@@ -21,7 +21,6 @@
     "preview:desktop": "npm run build:desktop && electron .",
     "start": "node scripts/with-local-service.mjs --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js dev --config dist/server/wrangler.json --local --persist-to .wrangler/state --ip 127.0.0.1 --inspector-port 0",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next --ignore-pattern desktop/renderer --ignore-pattern release --ignore-pattern test-results --ignore-pattern playwright-report",
-    "db:generate": "drizzle-kit generate",
     "test:desktop:smoke": "node scripts/desktop-smoke.mjs"
   },
   "dependencies": {
@@ -41,7 +40,6 @@
     "clsx": "2.1.1",
     "cmdk": "^1.1.1",
     "date-fns": "^4.4.0",
-    "drizzle-orm": "0.45.2",
     "embla-carousel-react": "^8.6.0",
     "input-otp": "^1.4.2",
     "lucide-react": "^1.31.0",
@@ -68,7 +66,6 @@
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "6.0.2",
     "@vitejs/plugin-rsc": "0.5.26",
-    "drizzle-kit": "0.31.10",
     "electron": "^44.5.1",
     "electron-builder": "^26.15.3",
     "eslint": "9.39.4",
