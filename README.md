@@ -72,8 +72,4 @@ npm run benchmark:indexer
 
 `npm run test:desktop:smoke` 默认使用构建后的 `release/win-unpacked/RepoLens.exe`；设置 `REPOLENS_DESKTOP_EXECUTABLE` 可用同一烟测检查便携版。它在隔离用户数据目录中通过真实界面配置本地模拟模型、生成讲解／路线／两轮问答、确认前零调用、缓存命中、引用定位、Python/Go 索引、节点和路线进度保存、跨重启恢复、源码变化后的过期保护、清除数据、损坏存储恢复、Git 缺失提示及正常关闭。模拟密钥不会写入保存文件。它不替代无 Node 环境的干净 Windows 虚拟机安装／卸载检查，也不代表真实模型联调通过。
 
-## 当前验收状态
-
-本地 JS/TS、Python、Go 索引、示例导览、问答模拟服务和桌面保存数据都有自动测试。2026-10-03 已通过 RepoLens 本机 Git 路径扫描一个公开 JS/TS、Python 和 Go 项目；该机器后续网络重试出现间歇连接失败，结果和限制记录在[桌面版交付验收记录](./桌面版交付验收-2026-10-03.md)。真实兼容模型尚未配置和调用；私有 GitHub 仓库尚未使用本机私有凭据验收。无 Node／Python／Go 的干净 Windows 虚拟机安装卸载检查及完整人工入门案例仍待验证。
-
 桌面发行物使用的第三方组件和许可证见[第三方许可证清单](./THIRD-PARTY-NOTICES.md)。
