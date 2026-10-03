@@ -1,0 +1,48 @@
+{
+  "generatedAt": "2026-10-03",
+  "source": "successful npm run smoke:github outputs",
+  "aiRequests": 0,
+  "unchangedRescan": "repository id, commit, revision, and sequence unchanged",
+  "repositoryClosed": true,
+  "serviceShutdown": { "code": 0, "remainingPids": [] },
+  "repositories": [
+    {
+      "url": "https://github.com/sindresorhus/is",
+      "commit": "e9c026c611c1160eaad50da00be4e676b626018f",
+      "resolvedRef": "refs/heads/main",
+      "revision": "06aab1d1f65ee8f4edca7b3799389f9fc4920741defa9f7433cecffcf578f803",
+      "sequence": 1,
+      "files": 5,
+      "languages": { "ts": 5 },
+      "dependencies": 6,
+      "openedSource": "source/index.ts",
+      "sourceCharacters": 84437
+    },
+    {
+      "url": "https://github.com/pallets/itsdangerous",
+      "commit": "672971d66a2ef9f85151e53283113f33d642dabd",
+      "resolvedRef": "refs/heads/main",
+      "revision": "2209c597adda69acc010362a0a6651ed462ff81fb8c4a61fb76f72bc47e373e4",
+      "sequence": 1,
+      "files": 15,
+      "languages": { "python": 15 },
+      "dependencies": 69,
+      "resolvedDependencies": { "file": 69 },
+      "openedSource": "docs/conf.py",
+      "sourceCharacters": 2121
+    },
+    {
+      "url": "https://github.com/spf13/cast",
+      "commit": "d8e892d16caba3fc13f781dcf4b3f4dd8976999c",
+      "resolvedRef": "refs/heads/master",
+      "revision": "2a7c8f3f7ac7b0f76a1729c09df138cb784df439d17252bd351890d3e5633aaf",
+      "sequence": 1,
+      "files": 21,
+      "languages": { "go": 21 },
+      "dependencies": 58,
+      "resolvedDependencies": { "package": 58 },
+      "openedSource": "alias_test.go",
+      "sourceCharacters": 2288
+    }
+  ]
+}

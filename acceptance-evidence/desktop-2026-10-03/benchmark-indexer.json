@@ -1,0 +1,324 @@
+{
+  "generatedAt": "2026-10-03T10:24:06.765Z",
+  "environment": {
+    "node": "v24.13.1",
+    "platform": "win32",
+    "release": "10.0.26200",
+    "arch": "x64",
+    "cpu": "AMD Ryzen 9 8945HX with Radeon Graphics        "
+  },
+  "note": "冷扫描不复用 RepoLens 索引对象；没有清除操作系统磁盘缓存。每次单文件修改都会写入新内容。",
+  "fixtures": [
+    {
+      "kind": "无配置",
+      "cold": [
+        {
+          "mode": "verify",
+          "candidateCount": 5000,
+          "indexedCount": 5000,
+          "parsedFileCount": 5000,
+          "sourceReadCount": 5000,
+          "sourceParseCount": 5000,
+          "configReadCount": 0,
+          "configParseCount": 0,
+          "languageConfigReadCount": 0,
+          "languageConfigParseCount": 1,
+          "durationMs": 1672.84
+        },
+        {
+          "mode": "verify",
+          "candidateCount": 5000,
+          "indexedCount": 5000,
+          "parsedFileCount": 5000,
+          "sourceReadCount": 5000,
+          "sourceParseCount": 5000,
+          "configReadCount": 0,
+          "configParseCount": 0,
+          "languageConfigReadCount": 0,
+          "languageConfigParseCount": 1,
+          "durationMs": 1471.8
+        },
+        {
+          "mode": "verify",
+          "candidateCount": 5000,
+          "indexedCount": 5000,
+          "parsedFileCount": 5000,
+          "sourceReadCount": 5000,
+          "sourceParseCount": 5000,
+          "configReadCount": 0,
+          "configParseCount": 0,
+          "languageConfigReadCount": 0,
+          "languageConfigParseCount": 1,
+          "durationMs": 1394.03
+        }
+      ],
+      "incremental": [
+        {
+          "mode": "incremental",
+          "candidateCount": 5000,
+          "indexedCount": 5000,
+          "parsedFileCount": 1,
+          "sourceReadCount": 1,
+          "sourceParseCount": 1,
+          "configReadCount": 0,
+          "configParseCount": 0,
+          "languageConfigReadCount": 0,
+          "languageConfigParseCount": 0,
+          "durationMs": 309.95
+        },
+        {
+          "mode": "incremental",
+          "candidateCount": 5000,
+          "indexedCount": 5000,
+          "parsedFileCount": 1,
+          "sourceReadCount": 1,
+          "sourceParseCount": 1,
+          "configReadCount": 0,
+          "configParseCount": 0,
+          "languageConfigReadCount": 0,
+          "languageConfigParseCount": 0,
+          "durationMs": 273.3
+        },
+        {
+          "mode": "incremental",
+          "candidateCount": 5000,
+          "indexedCount": 5000,
+          "parsedFileCount": 1,
+          "sourceReadCount": 1,
+          "sourceParseCount": 1,
+          "configReadCount": 0,
+          "configParseCount": 0,
+          "languageConfigReadCount": 0,
+          "languageConfigParseCount": 0,
+          "durationMs": 277.31
+        }
+      ],
+      "configuration": [],
+      "medians": {
+        "coldMs": 1471.8,
+        "incrementalMs": 277.31
+      }
+    },
+    {
+      "kind": "继承配置 + 路径别名 + 实际依赖",
+      "cold": [
+        {
+          "mode": "verify",
+          "candidateCount": 5000,
+          "indexedCount": 5000,
+          "parsedFileCount": 5000,
+          "sourceReadCount": 5000,
+          "sourceParseCount": 5000,
+          "configReadCount": 2,
+          "configParseCount": 1,
+          "languageConfigReadCount": 0,
+          "languageConfigParseCount": 1,
+          "durationMs": 1481.64
+        },
+        {
+          "mode": "verify",
+          "candidateCount": 5000,
+          "indexedCount": 5000,
+          "parsedFileCount": 5000,
+          "sourceReadCount": 5000,
+          "sourceParseCount": 5000,
+          "configReadCount": 2,
+          "configParseCount": 1,
+          "languageConfigReadCount": 0,
+          "languageConfigParseCount": 1,
+          "durationMs": 1469.52
+        },
+        {
+          "mode": "verify",
+          "candidateCount": 5000,
+          "indexedCount": 5000,
+          "parsedFileCount": 5000,
+          "sourceReadCount": 5000,
+          "sourceParseCount": 5000,
+          "configReadCount": 2,
+          "configParseCount": 1,
+          "languageConfigReadCount": 0,
+          "languageConfigParseCount": 1,
+          "durationMs": 1375.1
+        }
+      ],
+      "incremental": [
+        {
+          "mode": "incremental",
+          "candidateCount": 5000,
+          "indexedCount": 5000,
+          "parsedFileCount": 1,
+          "sourceReadCount": 1,
+          "sourceParseCount": 1,
+          "configReadCount": 2,
+          "configParseCount": 0,
+          "languageConfigReadCount": 0,
+          "languageConfigParseCount": 0,
+          "durationMs": 307.15
+        },
+        {
+          "mode": "incremental",
+          "candidateCount": 5000,
+          "indexedCount": 5000,
+          "parsedFileCount": 1,
+          "sourceReadCount": 1,
+          "sourceParseCount": 1,
+          "configReadCount": 2,
+          "configParseCount": 0,
+          "languageConfigReadCount": 0,
+          "languageConfigParseCount": 0,
+          "durationMs": 304.43
+        },
+        {
+          "mode": "incremental",
+          "candidateCount": 5000,
+          "indexedCount": 5000,
+          "parsedFileCount": 1,
+          "sourceReadCount": 1,
+          "sourceParseCount": 1,
+          "configReadCount": 2,
+          "configParseCount": 0,
+          "languageConfigReadCount": 0,
+          "languageConfigParseCount": 0,
+          "durationMs": 274.79
+        }
+      ],
+      "configuration": [
+        {
+          "mode": "verify",
+          "candidateCount": 5000,
+          "indexedCount": 5000,
+          "parsedFileCount": 0,
+          "sourceReadCount": 5000,
+          "sourceParseCount": 0,
+          "configReadCount": 4,
+          "configParseCount": 1,
+          "languageConfigReadCount": 0,
+          "languageConfigParseCount": 0,
+          "durationMs": 1268.15
+        },
+        {
+          "mode": "verify",
+          "candidateCount": 5000,
+          "indexedCount": 5000,
+          "parsedFileCount": 0,
+          "sourceReadCount": 5000,
+          "sourceParseCount": 0,
+          "configReadCount": 4,
+          "configParseCount": 1,
+          "languageConfigReadCount": 0,
+          "languageConfigParseCount": 0,
+          "durationMs": 1346.41
+        },
+        {
+          "mode": "verify",
+          "candidateCount": 5000,
+          "indexedCount": 5000,
+          "parsedFileCount": 0,
+          "sourceReadCount": 5000,
+          "sourceParseCount": 0,
+          "configReadCount": 4,
+          "configParseCount": 1,
+          "languageConfigReadCount": 0,
+          "languageConfigParseCount": 0,
+          "durationMs": 1458.24
+        }
+      ],
+      "medians": {
+        "coldMs": 1469.52,
+        "incrementalMs": 304.43,
+        "configurationMs": 1346.41
+      }
+    },
+    {
+      "kind": "Python + Go + JavaScript/TypeScript 混合（5,000 个源码文件，Python 与 Go 含真实包引用）",
+      "cold": [
+        {
+          "mode": "verify",
+          "candidateCount": 5000,
+          "indexedCount": 5000,
+          "parsedFileCount": 5000,
+          "sourceReadCount": 5000,
+          "sourceParseCount": 5000,
+          "configReadCount": 0,
+          "configParseCount": 0,
+          "languageConfigReadCount": 1,
+          "languageConfigParseCount": 1,
+          "durationMs": 1736.94
+        },
+        {
+          "mode": "verify",
+          "candidateCount": 5000,
+          "indexedCount": 5000,
+          "parsedFileCount": 5000,
+          "sourceReadCount": 5000,
+          "sourceParseCount": 5000,
+          "configReadCount": 0,
+          "configParseCount": 0,
+          "languageConfigReadCount": 1,
+          "languageConfigParseCount": 1,
+          "durationMs": 1495.13
+        },
+        {
+          "mode": "verify",
+          "candidateCount": 5000,
+          "indexedCount": 5000,
+          "parsedFileCount": 5000,
+          "sourceReadCount": 5000,
+          "sourceParseCount": 5000,
+          "configReadCount": 0,
+          "configParseCount": 0,
+          "languageConfigReadCount": 1,
+          "languageConfigParseCount": 1,
+          "durationMs": 1441.19
+        }
+      ],
+      "incremental": [
+        {
+          "mode": "incremental",
+          "candidateCount": 5000,
+          "indexedCount": 5000,
+          "parsedFileCount": 1,
+          "sourceReadCount": 1,
+          "sourceParseCount": 1,
+          "configReadCount": 0,
+          "configParseCount": 0,
+          "languageConfigReadCount": 1,
+          "languageConfigParseCount": 0,
+          "durationMs": 360.6
+        },
+        {
+          "mode": "incremental",
+          "candidateCount": 5000,
+          "indexedCount": 5000,
+          "parsedFileCount": 1,
+          "sourceReadCount": 1,
+          "sourceParseCount": 1,
+          "configReadCount": 0,
+          "configParseCount": 0,
+          "languageConfigReadCount": 1,
+          "languageConfigParseCount": 0,
+          "durationMs": 378.33
+        },
+        {
+          "mode": "incremental",
+          "candidateCount": 5000,
+          "indexedCount": 5000,
+          "parsedFileCount": 1,
+          "sourceReadCount": 1,
+          "sourceParseCount": 1,
+          "configReadCount": 0,
+          "configParseCount": 0,
+          "languageConfigReadCount": 1,
+          "languageConfigParseCount": 0,
+          "durationMs": 402.39
+        }
+      ],
+      "medians": {
+        "coldMs": 1495.13,
+        "incrementalMs": 378.33
+      }
+    }
+  ],
+  "limitCheck": "三类 5,000 文件样例添加第 5,001 个候选文件后均明确拒绝。"
+}
