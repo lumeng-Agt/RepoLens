@@ -170,7 +170,7 @@ function layoutGraph(
   graph.setGraph({ rankdir: compact ? "TB" : "LR", nodesep: compact ? 8 : 38, ranksep: compact ? 28 : 74, marginx: compact ? 10 : 34, marginy: compact ? 12 : 32 });
 
   for (const file of visibleFiles) {
-    graph.setNode(file.id, { width: compact ? 150 : 190, height: compact ? 66 : 76 });
+    graph.setNode(file.id, { width: compact ? 140 : 160, height: compact ? 60 : 68 });
   }
   for (const dependency of visibleDependencies) {
     graph.setEdge(dependency.fromId, dependency.toId);
@@ -183,7 +183,7 @@ function layoutGraph(
       id: file.id,
       type: "fileCard",
       deletable: false,
-      position: nodePositions.get(`${snapshot.id}:${file.id}`) ?? { x: position.x - (compact ? 75 : 95), y: position.y - (compact ? 33 : 38) },
+      position: nodePositions.get(`${snapshot.id}:${file.id}`) ?? { x: position.x - (compact ? 70 : 80), y: position.y - (compact ? 30 : 34) },
       data: { file, selected: file.id === selectedId, compact },
       selected: file.id === selectedId,
     };
@@ -200,7 +200,7 @@ function layoutGraph(
       animated: false,
       markerEnd: { type: MarkerType.ArrowClosed, width: 14, height: 14 },
       style: {
-        stroke: connected ? "#75d5bd" : "#526270",
+        stroke: connected ? "#9bb5df" : "#6c7787",
         strokeWidth: connected ? 1.8 : 1.15,
         opacity: connected ? 1 : 0.72,
       },
@@ -726,8 +726,8 @@ function AppShell() {
       const dimensions = (node: GraphNode) => ({
         x: node.position.x,
         y: node.position.y,
-        width: node.measured?.width ?? node.width ?? (compactGraphRef.current ? 150 : 190),
-        height: node.measured?.height ?? node.height ?? (compactGraphRef.current ? 66 : 76),
+        width: node.measured?.width ?? node.width ?? (compactGraphRef.current ? 140 : 160),
+        height: node.measured?.height ?? node.height ?? (compactGraphRef.current ? 60 : 68),
       });
       const isFiniteBox = (box: ReturnType<typeof dimensions>) => [box.x, box.y, box.width, box.height].every(Number.isFinite) && box.width > 0 && box.height > 0;
       if (!isFiniteBox(dimensions(selected))) {
