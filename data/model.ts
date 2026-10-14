@@ -45,6 +45,10 @@ export type TourStep = {
 
 export type RepositorySnapshot = {
   id: string;
+  /** Stable local persistence key; GitHub repositories use a ref-scoped value while id remains the service session identity. */
+  workspaceId?: string;
+  /** Identifies the opened service session so late writes cannot target a newer ref. */
+  persistenceSessionId?: string;
   version: string;
   name: string;
   description: string;

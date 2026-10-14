@@ -127,7 +127,11 @@ function resolveRequestedRef(parsed, remote) {
     }
   }
   const possibleCommit = parts[0];
-  if (/^[0-9a-f]{7,64}$/i.test(possibleCommit)) return { ref: possibleCommit, resolvedRef: possibleCommit.toLowerCase(), subdirectory: parts.slice(1).join("/") };
+  if (/^[0-9a-f]{7,64}$/i.test(possibleCommit)) {
+    const advertisedCommit = [...remote.refs.values()].find((sha) => sha.startsWith(possibleCommit.toLowerCase()));
+    const commit = advertisedCommit ?? possibleCommit.toLowerCase();
+    return { ref: commit, resolvedRef: commit, subdirectory: parts.slice(1).join("/") };
+  }
   throw new Error("GitHub 链接中的分支、标签或提交不存在。");
 }
 

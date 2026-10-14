@@ -1,0 +1,30 @@
+export type QuestionRecoveryMessage = {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  references: { fileId: string; startLine: number; endLine?: number }[];
+  contextFiles: { fileId: string; contentHash: string }[];
+  insufficientEvidence?: boolean;
+  stale?: boolean;
+};
+export type QuestionRecoveryConversation = {
+  id: string;
+  title: string;
+  messages: QuestionRecoveryMessage[];
+  updatedAt: number;
+};
+export type QuestionRecoveryOperation =
+  | { sequence: number; kind: "delete"; conversationId: string }
+  | { sequence: number; kind: "upsert"; conversation: QuestionRecoveryConversation };
+
+export function restoreQuestionConversations(workspaceId: string, saved: QuestionRecoveryConversation[]): QuestionRecoveryConversation[];
+export function failQuestionConversationRead(workspaceId: string, message: string): QuestionRecoveryConversation[];
+export function getQuestionConversationView(workspaceId: string): QuestionRecoveryConversation[];
+export function getQuestionConversationReadError(workspaceId: string): string;
+export function getQuestionConversationSaveError(workspaceId: string): string;
+export function recordQuestionConversationChanges(workspaceId: string, value: QuestionRecoveryConversation[]): QuestionRecoveryConversation[];
+export function getQuestionConversationOperations(workspaceId: string): QuestionRecoveryOperation[];
+export function acknowledgeQuestionConversationSave(workspaceId: string, persisted: QuestionRecoveryConversation[], throughSequence: number): QuestionRecoveryConversation[];
+export function setQuestionConversationSaveError(workspaceId: string, message: string): void;
+export function clearQuestionConversationSaveError(workspaceId: string): void;
+export function enqueueQuestionConversationSave<T>(workspaceId: string, operation: () => Promise<T>): Promise<T>;

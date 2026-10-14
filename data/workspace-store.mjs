@@ -87,13 +87,14 @@ export function createWorkspaceStore(directory) {
     },
     async touchRecent(repository) {
       return mutate((current) => {
+        const targetId = repository.targetId ?? repository.id;
         current.recentRepositories = [
-          { ...repository, lastOpenedAt: Date.now() },
-          ...current.recentRepositories.filter((item) => item.id !== repository.id),
+          { ...repository, id: targetId, targetId, workspaceId: repository.workspaceId ?? repository.id, lastOpenedAt: Date.now() },
+          ...current.recentRepositories.filter((item) => (item.targetId ?? item.id) !== targetId),
         ].slice(0, 20);
       });
     },
-    async removeRecent(repositoryId) { return mutate((current) => { current.recentRepositories = current.recentRepositories.filter((item) => item.id !== repositoryId); }); },
+    async removeRecent(targetId) { return mutate((current) => { current.recentRepositories = current.recentRepositories.filter((item) => (item.targetId ?? item.id) !== targetId); }); },
     async saveAiResult(repositoryId, fileId, result) {
       return mutate((current) => {
         current.aiResults[repositoryId] ??= {};
@@ -116,7 +117,7 @@ export function createWorkspaceStore(directory) {
     },
     async clearRepository(repositoryId) {
       return mutate((current) => {
-        current.recentRepositories = current.recentRepositories.filter((item) => item.id !== repositoryId);
+        current.recentRepositories = current.recentRepositories.filter((item) => (item.workspaceId ?? item.id) !== repositoryId);
         delete current.aiResults[repositoryId]; delete current.aiRoutes[repositoryId];
         delete current.nodePositions[repositoryId]; delete current.conversations[repositoryId];
         for (const key of Object.keys(current.progress)) if (key.startsWith(`repolens:${repositoryId}:`)) delete current.progress[key];

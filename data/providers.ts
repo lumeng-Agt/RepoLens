@@ -27,7 +27,7 @@ export interface LocalRepositoryProvider extends RepositoryProvider {
 
 export type LocalWorkspaceState = {
   version: number;
-  recentRepositories: { id: string; name: string; location: string; kind: "local" | "github"; lastOpenedAt: number; requestedRef?: string; resolvedRef?: string; commit?: string; subdirectory?: string }[];
+  recentRepositories: { id: string; targetId?: string; workspaceId?: string; name: string; location: string; kind: "local" | "github"; lastOpenedAt: number; requestedRef?: string; resolvedRef?: string; commit?: string; subdirectory?: string }[];
   aiResults: Record<string, Record<string, unknown>>;
   aiRoute: Record<string, unknown> | null;
   progress: Record<string, string>;
@@ -36,16 +36,18 @@ export type LocalWorkspaceState = {
   warning?: string;
 };
 
+export type WorkspaceSession = { repositoryId: string; workspaceId: string; persistenceSessionId?: string };
+
 export interface WorkspacePersistenceProvider {
   get(repositoryId: string, signal?: AbortSignal): Promise<LocalWorkspaceState>;
-  touchRecent(repositoryId: string): Promise<void>;
-  removeRecent(repositoryId: string): Promise<void>;
-  saveProgress(repositoryId: string, key: string, value: string): Promise<void>;
-  saveNodePositions(repositoryId: string, positions: Record<string, { x: number; y: number }>): Promise<void>;
-  saveAiResult(repositoryId: string, fileId: string, record: Record<string, unknown>): Promise<void>;
-  saveAiRoute(repositoryId: string, record: Record<string, unknown>): Promise<void>;
-  saveConversations(repositoryId: string, conversations: unknown[]): Promise<void>;
-  clearRepository(repositoryId: string): Promise<void>;
+  touchRecent(session: WorkspaceSession): Promise<void>;
+  removeRecent(targetId: string): Promise<void>;
+  saveProgress(session: WorkspaceSession, key: string, value: string): Promise<void>;
+  saveNodePositions(session: WorkspaceSession, positions: Record<string, { x: number; y: number }>): Promise<void>;
+  saveAiResult(session: WorkspaceSession, fileId: string, record: Record<string, unknown>): Promise<void>;
+  saveAiRoute(session: WorkspaceSession, record: Record<string, unknown>): Promise<void>;
+  saveConversations(session: WorkspaceSession, conversations: unknown[]): Promise<void>;
+  clearRepository(session: WorkspaceSession): Promise<void>;
   clearAll(): Promise<void>;
 }
 
@@ -76,13 +78,13 @@ export const localRepositoryProvider: LocalRepositoryProvider = {
 
 export const localWorkspaceProvider: WorkspacePersistenceProvider = {
   async get(repositoryId, signal) { return request<LocalWorkspaceState>(`${LOCAL_API_ORIGIN}/api/workspace?repositoryId=${encodeURIComponent(repositoryId)}`, { signal }); },
-  async touchRecent(repositoryId) { await request(`${LOCAL_API_ORIGIN}/api/workspace`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "recent-touch", repositoryId }) }); },
+  async touchRecent(session) { await request(`${LOCAL_API_ORIGIN}/api/workspace`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "recent-touch", ...session }) }); },
   async removeRecent(repositoryId) { await request(`${LOCAL_API_ORIGIN}/api/workspace`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "recent-remove", repositoryId }) }); },
-  async saveProgress(repositoryId, key, value) { await request(`${LOCAL_API_ORIGIN}/api/workspace`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "progress", repositoryId, key, value }) }); },
-  async saveNodePositions(repositoryId, positions) { await request(`${LOCAL_API_ORIGIN}/api/workspace`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "node-positions", repositoryId, positions }) }); },
-  async saveAiResult(repositoryId, fileId, record) { await request(`${LOCAL_API_ORIGIN}/api/workspace`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "ai-result", repositoryId, fileId, record }) }); },
-  async saveAiRoute(repositoryId, record) { await request(`${LOCAL_API_ORIGIN}/api/workspace`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "ai-route", repositoryId, record }) }); },
-  async saveConversations(repositoryId, conversations) { await request(`${LOCAL_API_ORIGIN}/api/workspace`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "conversations", repositoryId, conversations }) }); },
-  async clearRepository(repositoryId) { await request(`${LOCAL_API_ORIGIN}/api/workspace`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "clear-repository", repositoryId }) }); },
+  async saveProgress(session, key, value) { await request(`${LOCAL_API_ORIGIN}/api/workspace`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "progress", ...session, key, value }) }); },
+  async saveNodePositions(session, positions) { await request(`${LOCAL_API_ORIGIN}/api/workspace`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "node-positions", ...session, positions }) }); },
+  async saveAiResult(session, fileId, record) { await request(`${LOCAL_API_ORIGIN}/api/workspace`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "ai-result", ...session, fileId, record }) }); },
+  async saveAiRoute(session, record) { await request(`${LOCAL_API_ORIGIN}/api/workspace`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "ai-route", ...session, record }) }); },
+  async saveConversations(session, conversations) { await request(`${LOCAL_API_ORIGIN}/api/workspace`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "conversations", ...session, conversations }) }); },
+  async clearRepository(session) { await request(`${LOCAL_API_ORIGIN}/api/workspace`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "clear-repository", ...session }) }); },
   async clearAll() { await request(`${LOCAL_API_ORIGIN}/api/workspace`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "clear-all", repositoryId: "" }) }); },
 };

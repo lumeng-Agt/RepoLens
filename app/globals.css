@@ -94,6 +94,8 @@ button:focus-visible, input:focus-visible, a:focus-visible { outline: 2px solid 
   background: #0e151b;
 }
 
+.desktop-backend-alert { position: fixed; z-index: 50; top: 58px; right: 0; left: 0; padding: 10px 18px; color: #ffe0df; background: #5b2427; border-bottom: 1px solid #a94b50; font-size: 13px; }
+
 .brand-lockup, .repo-context, .topbar-end, .brand-mark, .tour-status, .sample-badge, .graph-title-group, .graph-actions, .detail-file-heading, .source-meta { display: flex; align-items: center; }
 .brand-lockup { gap: 10px; min-width: 0; }
 .brand-mark { width: 27px; height: 27px; justify-content: center; color: #10251f; background: #79ddc0; border: 1px solid #9be9d3; border-radius: 8px; box-shadow: 0 0 20px #63d6b633; }

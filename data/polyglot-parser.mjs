@@ -27,9 +27,15 @@ function descendants(node, types, result = []) {
   return result;
 }
 
+function pythonStringValue(node) {
+  if (node?.type !== "string") return null;
+  const match = node.text.match(/^([rubf]*)('''|\"\"\"|'|\")([\s\S]*)\2$/i);
+  if (!match || /f/i.test(match[1]) || match[3].includes("\\")) return null;
+  return match[3];
+}
+
 function pythonImports(rootNode) {
   const imports = [];
-  const source = rootNode.text;
   for (const node of descendants(rootNode, new Set(["import_statement", "import_from_statement"]))) {
     const line = node.startPosition.row + 1;
     if (node.type === "import_statement") {
@@ -39,13 +45,33 @@ function pythonImports(rootNode) {
       }
     } else {
       const moduleNode = node.childForFieldName("module_name");
-      if (moduleNode?.text) imports.push({ specifier: moduleNode.text, line, kind: "from-import", typeOnly: false });
+      const importChildren = node.namedChildren.filter((child) => ["dotted_name", "aliased_import", "wildcard_import"].includes(child.type)
+        && (!moduleNode || child.startIndex !== moduleNode.startIndex || child.endIndex !== moduleNode.endIndex));
+      const members = importChildren
+        .map((child) => child.type === "wildcard_import" ? "*" : child.type === "aliased_import" ? child.childForFieldName("name")?.text : child.text)
+        .filter(Boolean);
+      const memberAliases = Object.fromEntries(importChildren.flatMap((child) => {
+        if (child.type !== "aliased_import") return [];
+        const name = child.childForFieldName("name")?.text;
+        const alias = child.childForFieldName("alias")?.text;
+        return name && alias ? [[alias, name]] : [];
+      }));
+      if (moduleNode?.text || members.length) imports.push({ specifier: moduleNode?.text ?? "", members, memberAliases, line, kind: "from-import", typeOnly: false });
     }
   }
-  for (const match of source.matchAll(/\b(?:__import__|importlib\.import_module)\s*\(\s*(?:(["'])([^"']+)\1)?/g)) {
-    const specifier = match[2] ?? "<动态模块导入>";
-    if (!imports.some((item) => item.line === source.slice(0, match.index).split("\n").length && item.specifier === specifier)) {
-      imports.push({ specifier, line: source.slice(0, match.index).split("\n").length, kind: "dynamic", typeOnly: false });
+  for (const node of descendants(rootNode, new Set(["call"]))) {
+    const callable = node.childForFieldName("function");
+    const isImportCall = callable?.type === "identifier" && callable.text === "__import__";
+    const isImportlibCall = callable?.type === "attribute"
+      && callable.childForFieldName("object")?.text === "importlib"
+      && callable.childForFieldName("attribute")?.text === "import_module";
+    if (!isImportCall && !isImportlibCall) continue;
+    const argument = node.childForFieldName("arguments")?.namedChildren.find((child) => child.type !== "comment");
+    const literalValue = pythonStringValue(argument);
+    const specifier = literalValue || "<动态模块导入>";
+    const line = node.startPosition.row + 1;
+    if (!imports.some((item) => item.line === line && item.specifier === specifier)) {
+      imports.push({ specifier, line, kind: "dynamic", typeOnly: false });
     }
   }
   const symbols = descendants(rootNode, new Set(["class_definition", "function_definition"]))

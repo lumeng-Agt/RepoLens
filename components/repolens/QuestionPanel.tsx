@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import { localWorkspaceProvider } from "@/data/providers";
 import { localExplanationProvider, type AiGenerationResult, type AiLineRange, type AiPreviewResponse, type AiQuestionHistoryItem, type AiScopeCandidate } from "@/data/explanation-provider";
 import type { AiPreview, FileRecord, RepositorySnapshot, SourceReference } from "@/data/model";
+import { acknowledgeQuestionConversationSave, clearQuestionConversationSaveError, enqueueQuestionConversationSave, failQuestionConversationRead, getQuestionConversationOperations, getQuestionConversationReadError, getQuestionConversationSaveError, getQuestionConversationView, recordQuestionConversationChanges, restoreQuestionConversations, setQuestionConversationSaveError } from "@/data/question-recovery.mjs";
 
 type QaReference = { fileId: string; startLine: number; endLine?: number };
 type QaMessage = {
@@ -23,12 +24,23 @@ function validConversation(value: unknown): value is QaConversation {
     message && typeof message.id === "string" && ["user", "assistant"].includes(message.role) && typeof message.content === "string" && Array.isArray(message.references) && Array.isArray(message.contextFiles));
 }
 
-export function QuestionPanel({ repository, currentFile, filesById, onOpenReference }: {
-  repository: RepositorySnapshot; currentFile: FileRecord; filesById: Map<string, FileRecord>; onOpenReference: (reference: SourceReference) => void;
+export function QuestionPanel({ repository, currentFile, filesById, onOpenReference, backendAvailable = true }: {
+  repository: RepositorySnapshot; currentFile: FileRecord; filesById: Map<string, FileRecord>; onOpenReference: (reference: SourceReference) => void; backendAvailable?: boolean;
 }) {
-  const [conversations, setConversations] = useState<QaConversation[]>([]);
+  const workspaceId = repository.workspaceId ?? repository.id;
+  const sessionKey = `${workspaceId}:${repository.persistenceSessionId ?? ""}`;
+  const currentWorkspaceIdRef = useRef(sessionKey);
+  useEffect(() => { currentWorkspaceIdRef.current = sessionKey; }, [sessionKey]);
+  const [conversations, setConversations] = useState<QaConversation[]>(() => getQuestionConversationView(workspaceId));
   const [activeId, setActiveId] = useState("");
-  const [loadedRepositoryId, setLoadedRepositoryId] = useState("");
+  const [loadedSessionKey, setLoadedSessionKey] = useState("");
+  const loadedSessionKeyRef = useRef("");
+  useEffect(() => { loadedSessionKeyRef.current = loadedSessionKey; }, [loadedSessionKey]);
+  const [failedRepositoryId, setFailedRepositoryId] = useState(() => getQuestionConversationReadError(workspaceId) ? workspaceId : "");
+  const [saveError, setSaveError] = useState(() => {
+    const error = getQuestionConversationSaveError(workspaceId);
+    return error ? { sessionKey, message: error } : null;
+  });
   const [question, setQuestion] = useState("");
   const [stage, setStage] = useState<"idle" | "previewing" | "scope" | "ready" | "generating" | "error">("idle");
   const [message, setMessage] = useState("");
@@ -40,27 +52,67 @@ export function QuestionPanel({ repository, currentFile, filesById, onOpenRefere
   const requestSequence = useRef(0);
   const requestController = useRef<AbortController | null>(null);
   const activeRequestContext = useRef("");
-  const contextKey = `${repository.id}:${repository.revision ?? repository.version}:${currentFile.id}`;
+  const loadRequestSequence = useRef(0);
+  const contextKey = `${workspaceId}:${repository.revision ?? repository.version}:${currentFile.id}`;
   const visiblePreviewState = previewState?.contextKey === contextKey ? previewState : null;
   const visibleScope = stage === "scope" && scopeContextKey === contextKey;
-  const currentConversation = conversations.find((item) => item.id === activeId) ?? null;
   const filesSignature = repository.files.map((file) => `${file.id}:${file.contentHash ?? ""}`).join("\n");
+  const visibleConversations = loadedSessionKey === sessionKey ? conversations : getQuestionConversationView(workspaceId);
+  const currentConversation = visibleConversations.find((item) => item.id === activeId) ?? null;
+  const persistConversations = useCallback((value: QaConversation[], afterRestore = false) => {
+    const view = recordQuestionConversationChanges(workspaceId, value);
+    if (loadedSessionKeyRef.current !== sessionKey && !afterRestore) {
+      setMessage("本地问答记录尚未成功读取；本次操作暂存在当前页面。读取成功前不会覆盖已保存记录。");
+      return;
+    }
+    const operations = getQuestionConversationOperations(workspaceId);
+    if (!operations.length) return;
+    const throughSequence = operations[operations.length - 1].sequence;
+    clearQuestionConversationSaveError(workspaceId);
+    setSaveError(null);
+    const save = enqueueQuestionConversationSave(workspaceId, async () => {
+      await localWorkspaceProvider.saveConversations({ repositoryId: repository.id, workspaceId, persistenceSessionId: repository.persistenceSessionId }, view);
+      const latest = acknowledgeQuestionConversationSave(workspaceId, view, throughSequence);
+      if (currentWorkspaceIdRef.current === sessionKey) {
+        setConversations(latest);
+        setSaveError(null);
+        setMessage("");
+      }
+    });
+    void save.catch((error: Error) => {
+      setQuestionConversationSaveError(workspaceId, error.message);
+      if (currentWorkspaceIdRef.current === sessionKey) setSaveError({ sessionKey, message: error.message });
+    });
+  }, [repository.id, repository.persistenceSessionId, sessionKey, workspaceId]);
+
+  const loadWorkspace = useCallback(async () => {
+    const requestId = ++loadRequestSequence.current;
+    loadedSessionKeyRef.current = "";
+    setLoadedSessionKey("");
+    setActiveId("");
+    try {
+      const saved = await localWorkspaceProvider.get(workspaceId);
+      if (loadRequestSequence.current !== requestId) return;
+      if (saved.warning) throw new Error(saved.warning);
+      const restored = saved.conversations.filter(validConversation).map((item) => ({ ...item, messages: item.messages.map((entry) => ({ ...entry })) }));
+      const next = restoreQuestionConversations(workspaceId, restored);
+      loadedSessionKeyRef.current = sessionKey;
+      setConversations(next); setActiveId(next[0]?.id ?? ""); setLoadedSessionKey(sessionKey); setFailedRepositoryId("");
+      setMessage(saved.warning ? `无法读取部分本地问答记录：${saved.warning}` : "");
+      if (getQuestionConversationOperations(workspaceId).length) persistConversations(next, true);
+    } catch (error) {
+      if (loadRequestSequence.current !== requestId || (error as Error).name === "AbortError") return;
+      const detail = error instanceof Error ? error.message : "读取失败";
+      setConversations(failQuestionConversationRead(workspaceId, detail));
+      setFailedRepositoryId(workspaceId);
+      setMessage(`本地问答记录不可用：${detail}；页面操作会暂存，原记录不会覆盖。`);
+    }
+  }, [persistConversations, sessionKey, workspaceId]);
 
   useEffect(() => {
-    const controller = new AbortController();
-    let cancelled = false;
-    void localWorkspaceProvider.get(repository.id, controller.signal).then((saved) => {
-      if (cancelled) return;
-      const restored = saved.conversations.filter(validConversation).map((item) => ({ ...item, messages: item.messages.map((entry) => ({ ...entry })) }));
-      setConversations(restored);
-      setActiveId(restored[0]?.id ?? "");
-      setLoadedRepositoryId(repository.id);
-      if (saved.warning) setMessage(`无法读取部分本地问答记录：${saved.warning}`);
-    }).catch((error: Error) => {
-      if (!cancelled && error.name !== "AbortError") { setLoadedRepositoryId(repository.id); setMessage(`本地问答记录不可用：${error.message}`); }
-    });
-    return () => { cancelled = true; controller.abort(); };
-  }, [repository.id]);
+    const timer = window.setTimeout(() => { void loadWorkspace(); }, 0);
+    return () => { window.clearTimeout(timer); loadRequestSequence.current += 1; };
+  }, [loadWorkspace, repository.id]);
 
   useEffect(() => {
     requestSequence.current += 1;
@@ -70,27 +122,36 @@ export function QuestionPanel({ repository, currentFile, filesById, onOpenRefere
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setPreviewState(null); setCandidates([]); setStage("idle");
     if (repository.source === "local") setMessage("");
-  }, [repository.id, repository.revision, repository.source, currentFile.id]);
+  }, [repository.id, workspaceId, repository.revision, repository.source, currentFile.id]);
+
+  useEffect(() => window.repoLens?.onBackendStatus(({ available }) => {
+    if (available) return;
+    requestSequence.current += 1;
+    requestController.current?.abort(); requestController.current = null;
+    activeRequestContext.current = "";
+    setPreviewState(null); setCandidates([]); setStage("error");
+    setMessage("本地索引服务已停止；问答请求已取消。请关闭并重新启动 RepoLens。");
+  }), []);
 
   const isStale = useCallback((entry: QaMessage) => entry.stale === true || entry.contextFiles.some((context) => filesById.get(context.fileId)?.contentHash !== context.contentHash), [filesById]);
   const displayMessages = useMemo(() => currentConversation?.messages ?? [], [currentConversation]);
 
   useEffect(() => {
-    if (loadedRepositoryId !== repository.id) return;
+    if (loadedSessionKey !== sessionKey) return;
     const timer = window.setTimeout(() => {
       const current = conversations.map((conversation) => ({
         ...conversation,
         messages: conversation.messages.map((entry) => isStale(entry) ? { ...entry, stale: true } : entry),
       }));
-      void localWorkspaceProvider.saveConversations(repository.id, current).catch((error: Error) => setMessage(`问答仍可使用，但未能保存：${error.message}`));
+      persistConversations(current);
     }, 250);
     return () => window.clearTimeout(timer);
-  }, [conversations, filesSignature, isStale, loadedRepositoryId, repository.id]);
+  }, [conversations, filesSignature, isStale, loadedSessionKey, persistConversations, sessionKey, workspaceId]);
 
   const startPreview = async (questionText = question, fileIds?: string[]) => {
     const trimmed = questionText.trim();
     if (!trimmed) { setMessage("先输入一个问题。"); return; }
-    const active = conversations.find((item) => item.id === activeId) ?? currentConversation;
+    const active = visibleConversations.find((item) => item.id === activeId) ?? currentConversation;
     const history = (active?.messages ?? []).filter((entry) => !isStale(entry)).slice(-6).map(({ role, content }) => ({ role, content }));
     const id = ++requestSequence.current;
     requestController.current?.abort();
@@ -139,13 +200,15 @@ export function QuestionPanel({ repository, currentFile, filesById, onOpenRefere
         insufficientEvidence: result.insufficientEvidence === true,
       };
       const nextId = activeId || crypto.randomUUID();
-      setConversations((previous) => {
-        const existing = previous.find((item) => item.id === nextId);
-        const next: QaConversation = existing
-          ? { ...existing, messages: [...existing.messages, userMessage, answerMessage], updatedAt: Date.now() }
-          : { id: nextId, title: state.question.slice(0, 48), messages: [userMessage, answerMessage], updatedAt: Date.now() };
-        return [next, ...previous.filter((item) => item.id !== nextId)].slice(0, 100);
-      });
+      const existing = visibleConversations.find((item) => item.id === nextId);
+      const next: QaConversation = existing
+        ? { ...existing, messages: [...existing.messages, userMessage, answerMessage], updatedAt: Date.now() }
+        : { id: nextId, title: state.question.slice(0, 48), messages: [userMessage, answerMessage], updatedAt: Date.now() };
+      const updatedConversations = [next, ...visibleConversations.filter((item) => item.id !== nextId)].slice(0, 100);
+      setConversations(updatedConversations);
+      // Persist before the user can switch tabs and unmount this panel; a debounced
+      // effect alone can be cancelled by the unmount immediately after an answer.
+      persistConversations(updatedConversations);
       setActiveId(nextId); setQuestion(""); setPreviewState(null); setStage("idle");
       setMessage(response.cached ? "回答已从本地服务缓存恢复。" : "回答已保存到此设备；源码仅按本次确认发送。引用可以定位，但仍需人工判断解释是否准确。");
     } catch (error) {
@@ -156,23 +219,29 @@ export function QuestionPanel({ repository, currentFile, filesById, onOpenRefere
   const createConversation = () => {
     cancel();
     const next = { id: crypto.randomUUID(), title: "新对话", messages: [], updatedAt: Date.now() };
-    setConversations((previous) => [next, ...previous]); setActiveId(next.id); setMessage("");
+    const updatedConversations = [next, ...visibleConversations].slice(0, 100);
+    setConversations(updatedConversations); persistConversations(updatedConversations); setActiveId(next.id); setMessage("");
   };
   const deleteConversation = () => {
     if (!currentConversation) return;
     cancel();
-    const remaining = conversations.filter((item) => item.id !== currentConversation.id);
-    setConversations(remaining); setActiveId(remaining[0]?.id ?? ""); setMessage("已删除此问答会话。");
+    const remaining = visibleConversations.filter((item) => item.id !== currentConversation.id);
+    setConversations(remaining); persistConversations(remaining); setActiveId(remaining[0]?.id ?? ""); setMessage("已删除此问答会话。");
   };
   const retryMessage = (text: string) => { setQuestion(text); void startPreview(text); };
   const changeQuestion = (value: string) => { setQuestion(value); setPreviewState(null); if (stage === "ready") setStage("idle"); };
   const updateScope = (nextFiles: string[], nextRanges = ranges) => { setSelectedFiles(nextFiles); setRanges(nextRanges); setPreviewState(null); setStage("scope"); };
 
-  return <section className="question-panel" aria-label="源码问答">
+  return <>
+    {!backendAvailable && <p role="alert" className="question-feedback">本地索引服务已停止。请关闭并重新启动 RepoLens 后继续使用问答。</p>}
+    {failedRepositoryId === workspaceId && <div className="question-feedback" role="alert">本地问答记录读取失败；本页修改暂存于内存，不会覆盖已保存记录。<button type="button" className="question-retry" onClick={() => { void loadWorkspace(); }}>重试读取本地问答记录</button></div>}
+    {saveError?.sessionKey === sessionKey && <p className="question-feedback" role="alert">问答仍可使用，但未能保存：{saveError.message}</p>}
+    <fieldset disabled={!backendAvailable} style={{ border: 0, margin: 0, minWidth: 0, padding: 0 }}>
+    <section className="question-panel" aria-label="源码问答">
     <div className="question-toolbar">
       <label><span className="sr-only">问答会话</span><select aria-label="问答会话" value={activeId} onChange={(event) => { cancel(); setActiveId(event.target.value); }}>
-        {!conversations.length && <option value="">新问答</option>}
-        {conversations.map((item) => <option key={item.id} value={item.id}>{item.title || "新问答"}</option>)}
+        {!visibleConversations.length && <option value="">新问答</option>}
+        {visibleConversations.map((item) => <option key={item.id} value={item.id}>{item.title || "新问答"}</option>)}
       </select></label>
       <button type="button" onClick={createConversation}>新对话</button>
       {currentConversation && <button type="button" onClick={deleteConversation}>删除对话</button>}
@@ -218,5 +287,7 @@ export function QuestionPanel({ repository, currentFile, filesById, onOpenRefere
       <button type="button" onClick={() => { void confirmAndGenerate(); }}>确认发送并获取引用回答</button>
     </section>}
     {message && <p className="question-feedback" role={stage === "error" ? "alert" : "status"}>{message}</p>}
-  </section>;
+    </section>
+    </fieldset>
+  </>;
 }

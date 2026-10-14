@@ -290,13 +290,34 @@ export async function scanRepository(inputPath, previous = null, { mode = "verif
     if (file.kind === "python") {
       for (const imported of file.imports) {
         const target = resolvePythonImport(file.path, imported.specifier, known, pythonFiles);
+        let resolvedMember = false;
         if (target) {
           dependencies.push({ id: `${file.id}::${target}::${imported.line}`, fromId: file.id, toId: target, specifier: imported.specifier, kind: imported.kind, resolution: "file", typeOnly: false, reference: { fileId: file.id, line: imported.line } });
-        } else {
+        }
+        const packageRoots = target
+          ? path.posix.basename(target).startsWith("__init__.") ? [path.posix.dirname(target)] : []
+          : pythonImportRoots(file.path, imported.specifier);
+        for (const member of imported.members ?? []) {
+          if (member === "*") {
+            diagnostics.push({ path: file.path, message: `第 ${imported.line} 行使用了 from-import *；无法确定具体子模块，图谱只保留可解析的包引用。` });
+            continue;
+          }
+          const memberPath = resolvePythonModuleFromRoots(packageRoots.map((rootPath) => path.posix.join(rootPath, member)), known, pythonFiles);
+          if (!memberPath || memberPath === target) {
+            if (target && path.posix.basename(target).startsWith("__init__.") && member !== "*") {
+              diagnostics.push({ path: file.path, message: `第 ${imported.line} 行从包 ${imported.specifier || "当前包"} 导入 ${member}；无法判断它是普通符号还是未解析子模块，因此不按名称推测文件依赖。` });
+            }
+            continue;
+          }
+          resolvedMember = true;
+          dependencies.push({ id: `${file.id}::${memberPath}::${imported.line}`, fromId: file.id, toId: memberPath, specifier: imported.specifier ? `${imported.specifier}.${member}` : member, kind: imported.kind, resolution: "file", typeOnly: false, reference: { fileId: file.id, line: imported.line } });
+        }
+        if (!target && !resolvedMember) {
           const rootModule = imported.specifier.replace(/^\.+/, "").split(".")[0];
           const standard = !imported.specifier.startsWith(".") && PYTHON_STDLIB.has(rootModule);
           const dynamic = imported.kind === "dynamic";
-          unresolved.push({ fileId: file.id, specifier: imported.specifier, line: imported.line, kind: dynamic ? "dynamic" : standard ? "standard-library" : "unresolved", external: !dynamic && (standard || !imported.specifier.startsWith(".")) });
+          if (imported.specifier) unresolved.push({ fileId: file.id, specifier: imported.specifier, line: imported.line, kind: dynamic ? "dynamic" : standard ? "standard-library" : "unresolved", external: !dynamic && (standard || !imported.specifier.startsWith(".")) });
+          if ((imported.members ?? []).length && imported.specifier.startsWith(".")) diagnostics.push({ path: file.path, message: `第 ${imported.line} 行的相对 from-import 无法解析：${imported.members.join(", ")}` });
         }
       }
       continue;
@@ -406,7 +427,7 @@ function resolveGoPackage(specifier, goModules) {
   return null;
 }
 
-function resolvePythonImport(filePath, specifier, known, pythonFiles) {
+function pythonImportRoots(filePath, specifier) {
   const moduleText = specifier.trim();
   const relative = /^\.+/.exec(moduleText)?.[0] ?? "";
   const moduleName = moduleText.slice(relative.length).replaceAll(".", "/");
@@ -418,9 +439,13 @@ function resolvePythonImport(filePath, specifier, known, pythonFiles) {
   } else {
     roots.push(moduleName, path.posix.join("src", moduleName));
   }
+  return roots.filter(Boolean);
+}
+
+function resolvePythonModuleFromRoots(roots, known, pythonFiles) {
   const available = new Set(pythonFiles);
   for (const base of roots) {
-    if (!base || base === ".") continue;
+    if (!base) continue;
     const candidates = [
       `${base}.py`, `${base}.pyi`, `${base}/__init__.py`, `${base}/__init__.pyi`,
     ];
@@ -428,6 +453,10 @@ function resolvePythonImport(filePath, specifier, known, pythonFiles) {
     if (target) return target;
   }
   return null;
+}
+
+function resolvePythonImport(filePath, specifier, known, pythonFiles) {
+  return resolvePythonModuleFromRoots(pythonImportRoots(filePath, specifier), known, pythonFiles);
 }
 
 async function extractFileStructure(source, fileName, relativePath) {

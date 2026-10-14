@@ -23,10 +23,21 @@ let uiServer;
 let mainWindow;
 let quitting = false;
 let shutdownPromise;
+let backendFailure = null;
 const logs = [];
 
 // Allow isolated desktop smoke runs without touching a user's normal AppData.
 if (process.env.REPOLENS_USER_DATA_PATH) app.setPath("userData", path.resolve(process.env.REPOLENS_USER_DATA_PATH));
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+if (!hasSingleInstanceLock) app.quit();
+let secondInstancePendingFocus = false;
+function focusMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+if (hasSingleInstanceLock) app.on("second-instance", () => { if (mainWindow) focusMainWindow(); else secondInstancePendingFocus = true; });
 
 function log(message) {
   logs.push(`${new Date().toISOString()} ${message}`);
@@ -113,6 +124,7 @@ async function waitForBackend(origin, child) {
 function stopBackend() {
   if (shutdownPromise) return shutdownPromise;
   shutdownPromise = (async () => {
+    if (backendFailure) throw new Error(`本地索引服务曾意外退出：${backendFailure}`);
     if (backend && backend.exitCode === null) {
       const exited = new Promise((resolve) => backend.once("exit", (code, signal) => resolve({ code, signal })));
       const timer = new Promise((resolve) => setTimeout(() => resolve({ timeout: true }), 20_000));
@@ -157,6 +169,7 @@ async function createMainWindow(uiOrigin) {
 
 async function start() {
   await app.whenReady();
+  if (!hasSingleInstanceLock) return;
   const rendererIndex = path.join(rendererRoot, "index.html");
   await access(rendererIndex);
   await access(backendPath);
@@ -184,16 +197,29 @@ async function start() {
   });
   backend.stdout?.on("data", (chunk) => log(chunk.toString("utf8").trimEnd()));
   backend.stderr?.on("data", (chunk) => log(chunk.toString("utf8").trimEnd()));
+  backend.on("error", (error) => reportBackendFailure(`本地索引服务无法运行：${error.message}`));
+  backend.on("exit", (code, signal) => {
+    if (!quitting && (code !== 0 || signal)) reportBackendFailure(`本地索引服务意外退出（${JSON.stringify({ code, signal })}）。请重启 RepoLens 后继续操作。`);
+    else if (!quitting) reportBackendFailure("本地索引服务已意外停止。请重启 RepoLens 后继续操作。");
+  });
   await waitForBackend(apiOrigin, backend);
   await createMainWindow(uiOrigin);
+  if (secondInstancePendingFocus) { secondInstancePendingFocus = false; focusMainWindow(); }
 }
 
 ipcMain.handle("desktop:quit", () => app.quit());
+function reportBackendFailure(message) {
+  if (backendFailure || quitting) return;
+  backendFailure = message;
+  log(message);
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("desktop:backend-status", { available: false, message });
+}
 app.on("before-quit", (event) => {
   if (quitting) return;
   event.preventDefault();
   quitting = true;
   void stopBackend().then(() => app.exit(0), async (error) => {
+    if (process.env.REPOLENS_SMOKE_HIDDEN === "1") { log(error.message); app.exit(1); return; }
     await dialog.showMessageBox({ type: "error", title: "RepoLens 清理失败", message: error.message });
     app.exit(1);
   });

@@ -34,6 +34,116 @@ test("indexes Python and Go static imports without executing project code", asyn
   assert.equal(indexed.stats.sourceParseCount, 7);
 });
 
+test("recognizes Python dynamic imports only when they are actual calls", async (context) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "repolens-python-dynamic-call-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(path.join(root, "main.py"), [
+    '# __import__("comment_module")',
+    'example = "__import__(\'string_module\')"',
+    'documentation = """importlib.import_module(\'doc_module\')"""',
+    'import importlib',
+    'static = __import__("real_module")',
+    'also_static = importlib.import_module("another_module")',
+    'dynamic = importlib.import_module(module_name)',
+  ].join("\n") + "\n", "utf8");
+  for (const name of ["comment_module", "string_module", "doc_module", "real_module", "another_module"]) {
+    await writeFile(path.join(root, `${name}.py`), `value = ${JSON.stringify(name)}\n`, "utf8");
+  }
+
+  const indexed = await scanRepository(root);
+  const mainEdges = indexed.snapshot.dependencies.filter((edge) => edge.fromId === "main.py");
+  assert.ok(mainEdges.some((edge) => edge.toId === "real_module.py"), "a literal __import__ call resolves its module");
+  assert.ok(mainEdges.some((edge) => edge.toId === "another_module.py"), "a literal importlib.import_module call resolves its module");
+  assert.equal(mainEdges.some((edge) => ["comment_module.py", "string_module.py", "doc_module.py"].includes(edge.toId)), false,
+    "comments and ordinary or documentation strings do not create fake dependency edges");
+  assert.ok(indexed.snapshot.unresolved.some((item) => item.fileId === "main.py" && item.specifier === "<动态模块导入>" && item.kind === "dynamic"),
+    "a real dynamic call with a non-literal argument remains visible as an unresolved dynamic import");
+});
+
+test("resolves Python dynamic import literals when comments precede the first argument", async (context) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "repolens-python-dynamic-comment-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(path.join(root, "worker.py"), "value = 42\n", "utf8");
+  await writeFile(path.join(root, "main.py"), [
+    "import importlib",
+    "first = importlib.import_module(",
+    "    # the module name follows this comment",
+    "    \"worker\",",
+    ")",
+    "second = __import__(",
+    "    # the same applies to the builtin import",
+    "    \"worker\",",
+    ")",
+  ].join("\n") + "\n", "utf8");
+
+  const indexed = await scanRepository(root);
+  const mainEdges = indexed.snapshot.dependencies.filter((edge) => edge.fromId === "main.py");
+  assert.equal(mainEdges.filter((edge) => edge.toId === "worker.py").length, 2,
+    "both real literal calls resolve even when comments precede the argument");
+  assert.equal(indexed.snapshot.unresolved.some((item) => item.fileId === "main.py" && item.specifier === "<动态模块导入>"), false,
+    "comments are ignored when finding the first positional argument");
+});
+
+test("resolves Python from-import submodules while retaining package imports and symbol imports", async (context) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "repolens-python-submodules-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(path.join(root, "pkg"), { recursive: true });
+  await writeFile(path.join(root, "pkg", "__init__.py"), "from . import worker\nfrom .worker import run\n");
+  await writeFile(path.join(root, "pkg", "worker.py"), "def run():\n    return 1\n");
+  await writeFile(path.join(root, "pkg", "models.py"), "class Model: pass\n");
+  await writeFile(path.join(root, "main.py"), "from pkg import worker, models as model_alias, Model\nfrom pkg import worker as worker_alias\n");
+  const indexed = await scanRepository(root);
+  const edges = indexed.snapshot.dependencies.filter((edge) => edge.fromId === "main.py");
+  assert.ok(edges.some((edge) => edge.toId === "pkg/__init__.py"), "keep the package initializer edge");
+  assert.ok(edges.some((edge) => edge.toId === "pkg/worker.py"), "resolve imported submodules");
+  assert.ok(edges.some((edge) => edge.toId === "pkg/models.py"), "resolve aliased submodules");
+  assert.equal(edges.filter((edge) => edge.toId === "pkg/Model.py").length, 0, "do not infer module files from ordinary imported symbols");
+  assert.ok(indexed.snapshot.diagnostics.some((item) => item.path === "main.py" && item.message.includes("普通符号还是未解析子模块")), "report ambiguous package members without guessing a file edge");
+  assert.equal(indexed.snapshot.unresolved.some((item) => item.fileId === "main.py" && /pkg/.test(item.specifier)), false);
+});
+
+test("resolves relative Python from-import submodules in src packages", async (context) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "repolens-python-relative-submodules-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(path.join(root, "src", "pkg"), { recursive: true });
+  await writeFile(path.join(root, "src", "pkg", "__init__.py"), "");
+  await writeFile(path.join(root, "src", "pkg", "main.py"), "from . import worker\nfrom .models import Model\n");
+  await writeFile(path.join(root, "src", "pkg", "worker.py"), "value = 1\n");
+  await writeFile(path.join(root, "src", "pkg", "models.py"), "class Model: pass\n");
+  const indexed = await scanRepository(root);
+  const edges = indexed.snapshot.dependencies.filter((edge) => edge.fromId === "src/pkg/main.py");
+  assert.ok(edges.some((edge) => edge.toId === "src/pkg/__init__.py"));
+  assert.ok(edges.some((edge) => edge.toId === "src/pkg/worker.py"));
+  assert.ok(edges.some((edge) => edge.toId === "src/pkg/models.py"));
+});
+
+test("Python multiline from-imports ignore comments, preserve aliases, and follow stub file changes", async (context) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "repolens-python-import-comments-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(path.join(root, "pkg"), { recursive: true });
+  await writeFile(path.join(root, "pkg", "__init__.py"), "");
+  await writeFile(path.join(root, "pkg", "worker.pyi"), "def run() -> int: ...\n");
+  await writeFile(path.join(root, "main.py"), "from pkg import (\n    worker as worker_alias, # helper module\n)\n");
+  let indexed = await scanRepository(root);
+  let edgePaths = indexed.snapshot.dependencies.filter((edge) => edge.fromId === "main.py").map((edge) => edge.toId);
+  assert.ok(edgePaths.includes("pkg/__init__.py"));
+  assert.ok(edgePaths.includes("pkg/worker.pyi"));
+  assert.equal(indexed.snapshot.diagnostics.some((item) => item.message.includes("helper module")), false);
+  assert.deepEqual(indexed.snapshot.files.find((file) => file.id === "main.py").imports[0].memberAliases, { worker_alias: "worker" });
+
+  await writeFile(path.join(root, "pkg", "worker.py"), "def run(): return 1\n");
+  indexed = await scanRepository(root, indexed);
+  edgePaths = indexed.snapshot.dependencies.filter((edge) => edge.fromId === "main.py").map((edge) => edge.toId);
+  assert.ok(edgePaths.includes("pkg/worker.py"), "a newly added implementation file is indexed as a dependency");
+  assert.equal(edgePaths.includes("pkg/worker.pyi"), false, "the implementation takes precedence over its stub");
+
+  await rm(path.join(root, "pkg", "worker.py"));
+  await rm(path.join(root, "pkg", "worker.pyi"));
+  await writeFile(path.join(root, "pkg", "worker_renamed.py"), "def run(): return 2\n");
+  indexed = await scanRepository(root, indexed);
+  assert.equal(indexed.snapshot.dependencies.some((edge) => edge.fromId === "main.py" && edge.toId.startsWith("pkg/worker")), false);
+});
+
 test("resolves Go workspace and local replace imports as package-expanded static edges", async (context) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "repolens-go-workspace-"));
   context.after(() => rm(root, { recursive: true, force: true }));

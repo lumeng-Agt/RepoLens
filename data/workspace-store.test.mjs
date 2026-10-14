@@ -39,3 +39,17 @@ test("workspace store limits recents and quarantines damaged records while stayi
   await damaged.touchRecent({ id: "recovered", name: "Recovered", location: "D:\\recovered" });
   assert.equal((await damaged.getRepository("recovered")).recentRepositories[0].id, "recovered");
 });
+
+test("workspace store keeps distinct open targets while sharing the same ref workspace", async (context) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "repolens-workspace-targets-"));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const store = createWorkspaceStore(directory);
+  await store.touchRecent({ id: "ref-main", targetId: "target-src", workspaceId: "ref-main", name: "Repo", location: "https://github.com/example/repo/tree/main/src" });
+  await store.touchRecent({ id: "ref-main", targetId: "target-lib", workspaceId: "ref-main", name: "Repo", location: "https://github.com/example/repo/tree/main/lib" });
+  await store.touchRecent({ id: "ref-main", targetId: "target-src", workspaceId: "ref-main", name: "Repo", location: "https://github.com/example/repo/tree/main/src" });
+  const restored = await createWorkspaceStore(directory).getRepository("ref-main");
+  assert.equal(restored.recentRepositories.length, 2);
+  assert.deepEqual(new Set(restored.recentRepositories.map((item) => item.id)), new Set(["target-src", "target-lib"]));
+  await store.removeRecent("target-src");
+  assert.deepEqual((await store.get()).recentRepositories.map((item) => item.id), ["target-lib"]);
+});

@@ -55,6 +55,11 @@ function snapshotView() {
   if (!session) return null;
   return { ...session.snapshot, files: session.snapshot.files.map(({ ...file }) => { delete file.source; return file; }) };
 }
+function matchesPersistenceSession(input) {
+  return Boolean(session && input.repositoryId === session.snapshot.id
+    && input.workspaceId === (session.snapshot.workspaceId ?? session.snapshot.id)
+    && input.persistenceSessionId === session.persistenceSessionId);
+}
 function attachGitHubMetadata(value, workspace, previousSnapshot = null) {
   const snapshot = value.snapshot;
   const id = `github-${digest(`${workspace.origin.owner.toLowerCase()}/${workspace.origin.repository.toLowerCase()}`).slice(0, 32)}`;
@@ -63,6 +68,8 @@ function attachGitHubMetadata(value, workspace, previousSnapshot = null) {
   snapshot.description = `GitHub 静态索引 · ${workspace.origin.url} · ${workspace.origin.commit.slice(0, 12)}`;
   snapshot.source = "local";
   snapshot.origin = workspace.origin;
+  const fixedCommitRef = /^([0-9a-f]{7,64})$/i.test(workspace.origin.resolvedRef) ? workspace.origin.commit : workspace.origin.resolvedRef;
+  snapshot.workspaceId = `github-${digest(`${workspace.origin.owner.toLowerCase()}/${workspace.origin.repository.toLowerCase()}\0${fixedCommitRef}`)}`;
   snapshot.revision = digest(`${snapshot.revision}\0${workspace.origin.commit}`);
   if (previousSnapshot?.id === id && previousSnapshot.revision === snapshot.revision) snapshot.sequence = previousSnapshot.sequence ?? snapshot.sequence;
   value.githubWorkspace = workspace;
@@ -85,7 +92,9 @@ function updateSession(value) {
     ? { ownerClientId: session.ownerClientId, ownerIntentSequence: session.ownerIntentSequence }
     : {};
   const githubWorkspace = value.githubWorkspace ?? (isSameRepository ? session.githubWorkspace : undefined);
-  session = trackSequence({ ...value, ...owner, ...(githubWorkspace ? { githubWorkspace } : {}) });
+  const persistenceSessionId = isSameRepository ? session.persistenceSessionId : value.persistenceSessionId;
+  if (persistenceSessionId) value.snapshot.persistenceSessionId = persistenceSessionId;
+  session = trackSequence({ ...value, ...owner, persistenceSessionId, ...(githubWorkspace ? { githubWorkspace } : {}) });
   return session;
 }
 function beginGitHubOperation(repositoryId, generation) {
@@ -344,7 +353,8 @@ const server = createServer(async (request, response) => {
     if (request.method === "GET" && url.pathname === "/api/workspace") {
       const repositoryId = url.searchParams.get("repositoryId");
       if (!repositoryId || repositoryId.length > 160) return json(response, 400, { error: "工作区编号无效。" });
-      return json(response, 200, await workspaceStore.getRepository(repositoryId));
+      const workspaceId = session?.snapshot.id === repositoryId ? session.snapshot.workspaceId ?? repositoryId : repositoryId;
+      return json(response, 200, await workspaceStore.getRepository(workspaceId));
     }
     if (request.method === "POST" && url.pathname === "/api/workspace") {
       const input = await body(request);
@@ -352,30 +362,45 @@ const server = createServer(async (request, response) => {
       const { repositoryId } = input;
       let result;
       if (input.action === "recent-touch") {
-        if (!session || session.snapshot.id !== repositoryId) return json(response, 409, { error: "只有当前已打开的仓库可以加入最近记录。" });
+        if (!matchesPersistenceSession(input)) return json(response, 409, { error: "仓库会话已变化，最近记录未保存。" });
         const originInfo = session.snapshot.origin?.kind === "github" ? session.snapshot.origin : null;
+        const workspaceId = session.snapshot.workspaceId ?? repositoryId;
+        const locationRef = originInfo
+          ? /^[0-9a-f]{7,64}$/i.test(originInfo.resolvedRef) ? originInfo.commit : originInfo.resolvedRef
+          : "";
+        const encodedLocationPath = [locationRef, originInfo?.subdirectory].filter(Boolean).flatMap((part) => part.split("/")).map(encodeURIComponent).join("/");
+        const location = originInfo && encodedLocationPath
+          ? `${originInfo.url}/tree/${encodedLocationPath}`
+          : originInfo?.url ?? session.root;
         result = await workspaceStore.touchRecent({
-          id: repositoryId,
+          id: workspaceId,
+          targetId: originInfo ? `github-target-${digest(`${originInfo.owner.toLowerCase()}/${originInfo.repository.toLowerCase()}\0${/^([0-9a-f]{7,64})$/i.test(originInfo.resolvedRef) ? originInfo.commit : originInfo.resolvedRef}\0${originInfo.subdirectory}`)}` : workspaceId,
+          workspaceId,
+          repositoryId,
           name: session.snapshot.name,
-          location: originInfo?.url ?? session.root,
+          location,
           kind: originInfo ? "github" : "local",
           ...(originInfo ? { requestedRef: originInfo.requestedRef, resolvedRef: originInfo.resolvedRef, commit: originInfo.commit, subdirectory: originInfo.subdirectory } : {}),
         });
       } else if (input.action === "recent-remove") {
-        result = await workspaceStore.removeRecent(repositoryId);
+        result = await workspaceStore.removeRecent(input.targetId ?? repositoryId);
       } else if (input.action === "progress") {
-        result = await workspaceStore.saveProgress(repositoryId, input.key, input.value);
+        const sampleWorkspace = repositoryId === "taskflow-sample";
+        if (!sampleWorkspace && !matchesPersistenceSession(input)) return json(response, 409, { error: "仓库会话已变化，阅读进度未保存。" });
+        result = await workspaceStore.saveProgress(sampleWorkspace ? repositoryId : session.snapshot.workspaceId ?? repositoryId, input.key, input.value);
       } else if (input.action === "node-positions" || input.action === "ai-result" || input.action === "ai-route" || input.action === "conversations") {
-        const sampleWorkspace = repositoryId === "taskflow-sample" && input.action === "node-positions";
-        if (!sampleWorkspace && (!session || session.snapshot.id !== repositoryId)) return json(response, 409, { error: "当前仓库会话已变化，保存请求已丢弃。" });
-        if (input.action === "node-positions") result = await workspaceStore.saveNodePositions(repositoryId, input.positions);
-        else if (input.action === "ai-result") result = await workspaceStore.saveAiResult(repositoryId, input.fileId, input.record);
-        else if (input.action === "ai-route") result = await workspaceStore.saveAiRoute(repositoryId, input.record);
-        else result = await workspaceStore.saveConversations(repositoryId, input.conversations);
+        const sampleWorkspace = repositoryId === "taskflow-sample";
+        if (!sampleWorkspace && !matchesPersistenceSession(input)) return json(response, 409, { error: "当前仓库会话已变化，保存请求已丢弃。" });
+        const workspaceId = sampleWorkspace ? repositoryId : session.snapshot.workspaceId ?? repositoryId;
+        if (input.action === "node-positions") result = await workspaceStore.saveNodePositions(workspaceId, input.positions);
+        else if (input.action === "ai-result") result = await workspaceStore.saveAiResult(workspaceId, input.fileId, input.record);
+        else if (input.action === "ai-route") result = await workspaceStore.saveAiRoute(workspaceId, input.record);
+        else result = await workspaceStore.saveConversations(workspaceId, input.conversations);
       } else if (input.action === "clear-all") {
         result = await workspaceStore.clearAll();
       } else if (input.action === "clear-repository") {
-        result = await workspaceStore.clearRepository(repositoryId);
+        if (!matchesPersistenceSession(input)) return json(response, 409, { error: "仓库会话已变化，保存数据未清除。" });
+        result = await workspaceStore.clearRepository(session.snapshot.workspaceId ?? repositoryId);
       } else return json(response, 400, { error: "工作区操作类型无效。" });
       return json(response, 200, { ok: result.persisted, warning: result.warning });
     }
@@ -410,7 +435,10 @@ const server = createServer(async (request, response) => {
         if (previousSession?.snapshot.id) await cancelGitHubOperations(previousSession.snapshot.id);
         if (operation.cancelled || !repositoryCommands.isCurrent(operation.command, "open")) return json(response, 409, { error: "仓库打开请求已被更新请求取代。" });
         ++sessionGeneration; stopWatching(); invalidatePreviews();
-        session = trackSequence({ ...next, ownerClientId: input.command.clientId, ownerIntentSequence: input.command.intentSequence });
+        next.snapshot.workspaceId ??= next.snapshot.id;
+        const persistenceSessionId = randomUUID();
+        next.snapshot.persistenceSessionId = persistenceSessionId;
+        session = trackSequence({ ...next, persistenceSessionId, ownerClientId: input.command.clientId, ownerIntentSequence: input.command.intentSequence });
         operation.committed = true;
         startWatching();
         if (previousSession?.githubWorkspace && previousSession.githubWorkspace.storageRoot !== session.githubWorkspace?.storageRoot) await cleanOwnedWorkspace(previousSession.githubWorkspace);

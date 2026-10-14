@@ -17,10 +17,10 @@
     "smoke:github": "node scripts/github-live-smoke.mjs",
     "build": "node scripts/run-framework.mjs build",
     "build:desktop": "vite build --config desktop.vite.config.mjs",
-    "package:desktop": "npm run build:desktop && electron-builder --win --x64 && node scripts/write-desktop-checksums.mjs",
+    "package:desktop": "npm run build:desktop && electron-builder --win --x64 --config.electronDist=./node_modules/electron/dist && node scripts/write-desktop-checksums.mjs",
     "preview:desktop": "npm run build:desktop && electron .",
     "start": "node scripts/with-local-service.mjs --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js dev --config dist/server/wrangler.json --local --persist-to .wrangler/state --ip 127.0.0.1 --inspector-port 0",
-    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next --ignore-pattern desktop/renderer --ignore-pattern release --ignore-pattern test-results --ignore-pattern playwright-report",
+    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next --ignore-pattern desktop/renderer --ignore-pattern release --ignore-pattern test-results --ignore-pattern playwright-report --ignore-pattern .artifacts",
     "test:desktop:smoke": "node scripts/desktop-smoke.mjs"
   },
   "dependencies": {

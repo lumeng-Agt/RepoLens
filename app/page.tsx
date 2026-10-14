@@ -25,7 +25,7 @@ import {
   useState,
   useLayoutEffect,
 } from "react";
-import { localRepositoryProvider, localWorkspaceProvider, sampleRepositoryProvider, type LocalWorkspaceState, type RepositoryCommand } from "@/data/providers";
+import { localRepositoryProvider, localWorkspaceProvider, sampleRepositoryProvider, type LocalWorkspaceState, type RepositoryCommand, type WorkspaceSession } from "@/data/providers";
 import { localExplanationProvider, type AiLineRange, type AiMode, type AiScopeCandidate } from "@/data/explanation-provider";
 import { aiWorkflowReducer, initialAiWorkflowState } from "@/data/ai-workflow.mjs";
 import { aiContextIsStale, aiResultIsStale } from "@/data/ai-result.mjs";
@@ -112,7 +112,15 @@ function routeSignature(tour: TourStep[]) {
   for (let index = 0; index < value.length; index++) hash = Math.imul(hash ^ value.charCodeAt(index), 16777619);
   return (hash >>> 0).toString(36);
 }
-function progressKey(repository: RepositorySnapshot, tour: TourStep[], stableRouteSignature?: string) { return `repolens:${repository.id}:${repository.source === "sample" ? repository.version : stableRouteSignature ?? routeSignature(tour)}`; }
+function repositoryWorkspaceId(repository: RepositorySnapshot) { return repository.workspaceId ?? repository.id; }
+function nodePositionSessionKey(repository: RepositorySnapshot) { return repositoryWorkspaceId(repository) + ":" + (repository.persistenceSessionId ?? repository.id); }
+function nodePositionSignature(positions: Record<string, { x: number; y: number }>) {
+  return JSON.stringify(Object.fromEntries(Object.entries(positions).sort(([left], [right]) => left.localeCompare(right))));
+}
+function workspaceSession(repository: RepositorySnapshot): WorkspaceSession {
+  return { repositoryId: repository.id, workspaceId: repositoryWorkspaceId(repository), persistenceSessionId: repository.persistenceSessionId };
+}
+function progressKey(repository: RepositorySnapshot, tour: TourStep[], stableRouteSignature?: string) { return `repolens:${repositoryWorkspaceId(repository)}:${repository.source === "sample" ? repository.version : stableRouteSignature ?? routeSignature(tour)}`; }
 
 function readTourProgress(key: string) {
   const memoryValue = progressMemory.get(key);
@@ -183,7 +191,7 @@ function layoutGraph(
       id: file.id,
       type: "fileCard",
       deletable: false,
-      position: nodePositions.get(`${snapshot.id}:${file.id}`) ?? { x: position.x - (compact ? 70 : 80), y: position.y - (compact ? 30 : 34) },
+      position: nodePositions.get(`${repositoryWorkspaceId(snapshot)}:${file.id}`) ?? { x: position.x - (compact ? 70 : 80), y: position.y - (compact ? 30 : 34) },
       data: { file, selected: file.id === selectedId, compact },
       selected: file.id === selectedId,
     };
@@ -244,6 +252,7 @@ function AppShell() {
   const [searchQuery, setSearchQuery] = useState("");
   const [repoPath, setRepoPath] = useState("");
   const [desktopMode] = useState(() => Boolean(globalThis.__REPOLENS_RUNTIME__?.desktop));
+  const [desktopBackendError, setDesktopBackendError] = useState("");
   const [repoBusy, setRepoBusy] = useState(false);
   const [repoMessage, setRepoMessage] = useState("");
   const [loadedSource, setLoadedSource] = useState<{ fileId: string; repositoryId: string; revision?: string; text: string } | null>(null);
@@ -297,24 +306,34 @@ function AppShell() {
   const layoutOwner = useRef({ version: 0, repositoryId: BOOT_SNAPSHOT.id });
   const graphCanvasRef = useRef<HTMLDivElement>(null);
   const [nodePositions, setNodePositions] = useState(new Map<string, { x: number; y: number }>());
-  const nodePositionsPersisted = useRef("");
+  const nodePositionsRef = useRef(nodePositions);
+  useLayoutEffect(() => { nodePositionsRef.current = nodePositions; }, [nodePositions]);
+  const nodePositionsPersisted = useRef(new Map<string, string>());
+  const dirtyNodePositions = useRef(new Map<string, Set<string>>());
+  const nodePositionSaveQueues = useRef(new Map<string, Promise<void>>());
+  const pendingNodePositionRestore = useRef<{ key: string; workspaceId: string; signature: string } | null>(null);
+  const [nodePositionsReadyKey, setNodePositionsReadyKey] = useState<string | null>(null);
+  const [workspacePersistenceReadyKeys, setWorkspacePersistenceReadyKeys] = useState(new Set<string>());
   const [graphReady, setGraphReady] = useState(false);
   const [graphSizeRevision, setGraphSizeRevision] = useState(0);
   const graphResizeRequest = useRef(0);
   const codeViewportRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const filesById = useMemo(() => new Map(repository.files.map((file) => [file.id, file])), [repository.files]);
+  const workspaceId = repositoryWorkspaceId(repository);
+  const activeNodePositionKeyRef = useRef(nodePositionSessionKey(repository));
+  useLayoutEffect(() => { activeNodePositionKeyRef.current = nodePositionSessionKey(repository); }, [repository]);
   const currentFile = filesById.get(selectedFileId) ?? repository.files[0] ?? EMPTY_FILE;
-  const aiResult = aiResultsByFile.get(`${repository.id}:${currentFile.id}`) ?? null;
+  const aiResult = aiResultsByFile.get(`${workspaceId}:${currentFile.id}`) ?? null;
   const aiStale = aiResultIsStale(aiResult, repository);
   const sourceKey = `${repository.id}:${repository.revision ?? repository.version}:${currentFile?.id ?? ""}`;
   const sourceMatches = loadedSource?.fileId === currentFile?.id && loadedSource.repositoryId === repository.id && loadedSource.revision === repository.revision;
   const sourceText = repository.source === "local" ? (sourceMatches ? loadedSource?.text ?? "" : "") : currentFile?.source ?? "";
   const sourceStatus = repository.source === "local" ? (sourceMatches ? "loaded" : sourceLoad?.key === sourceKey ? sourceLoad.status : "loading") : "loaded";
-  const aiContextKey = `${repository.id}:${repository.revision ?? repository.version}:${currentFile?.id ?? ""}:${aiSettingsRevision}`;
+  const aiContextKey = `${workspaceId}:${repository.revision ?? repository.version}:${currentFile?.id ?? ""}:${aiSettingsRevision}`;
   useLayoutEffect(() => { aiContextRef.current = aiContextKey; }, [aiContextKey]);
   useLayoutEffect(() => { settingsSessionRef.current = { repositoryId: repository.id, sessionVersion: repositorySessionVersion }; }, [repository.id, repositorySessionVersion]);
-  const aiRoute = aiRoutesByRepository.get(repository.id) ?? null;
+  const aiRoute = aiRoutesByRepository.get(workspaceId) ?? null;
   const aiRouteStale = aiRoute ? aiContextIsStale(aiRoute.contextFiles, repository) : false;
   const activeTour = aiRoute?.steps ?? repository.tour;
   const activeRouteSignature = aiRoute?.signature ?? routeSignature(activeTour);
@@ -341,58 +360,113 @@ function AppShell() {
   const graphHiddenCount = showAllGraph ? 0 : Math.max(0, graphCandidateCount - graphVisibleCount);
 
   const restoreWorkspaceState = useCallback((snapshot: RepositorySnapshot, saved: LocalWorkspaceState) => {
+    const positionsKey = nodePositionSessionKey(snapshot);
+    const targetWorkspaceId = repositoryWorkspaceId(snapshot);
+    const validSavedNodePositions = Object.fromEntries(Object.entries(saved.nodePositions).filter(([fileId, position]) =>
+      Number.isFinite(position?.x) && Number.isFinite(position?.y) && snapshot.files.some((file) => file.id === fileId)));
+    nodePositionsPersisted.current.set(positionsKey, nodePositionSignature(saved.nodePositions));
+    const dirtyIds = dirtyNodePositions.current.get(targetWorkspaceId) ?? new Set<string>();
+    const inMemoryPositions = Object.fromEntries([...nodePositionsRef.current].flatMap(([key, point]) => {
+      const prefix = `${targetWorkspaceId}:`;
+      const fileId = key.startsWith(prefix) ? key.slice(prefix.length) : "";
+      return dirtyIds.has(fileId) && snapshot.files.some((file) => file.id === fileId) ? [[fileId, point] as const] : [];
+    }));
+    const savedNodePositions = { ...validSavedNodePositions, ...inMemoryPositions };
+    pendingNodePositionRestore.current = { key: positionsKey, workspaceId: targetWorkspaceId, signature: nodePositionSignature(savedNodePositions) };
     setRecentRepositories(saved.recentRepositories);
-    for (const [key, value] of Object.entries(saved.progress)) progressMemory.set(key, value);
+    for (const [key, value] of Object.entries(saved.progress)) if (!progressMemory.has(key)) progressMemory.set(key, value);
     setAiResultsByFile((previous) => {
       const next = new Map(previous);
       for (const [fileId, value] of Object.entries(saved.aiResults)) {
-        if (value && typeof value === "object" && Array.isArray((value as AiResultRecord).__contextFiles)) next.set(`${snapshot.id}:${fileId}`, value as AiResultRecord);
+        if (value && typeof value === "object" && Array.isArray((value as AiResultRecord).__contextFiles)) next.set(`${repositoryWorkspaceId(snapshot)}:${fileId}`, value as AiResultRecord);
       }
       return next;
     });
     if (saved.aiRoute && saved.aiRoute.repositoryId === snapshot.id && Array.isArray(saved.aiRoute.steps) && Array.isArray(saved.aiRoute.contextFiles)) {
-      setAiRoutesByRepository((previous) => new Map(previous).set(snapshot.id, saved.aiRoute as unknown as AiRouteRecord));
+      setAiRoutesByRepository((previous) => new Map(previous).set(repositoryWorkspaceId(snapshot), saved.aiRoute as unknown as AiRouteRecord));
     }
     setNodePositions((previous) => {
-      const next = new Map([...previous].filter(([key]) => !key.startsWith(`${snapshot.id}:`)));
-      for (const [fileId, position] of Object.entries(saved.nodePositions)) {
-        if (Number.isFinite(position?.x) && Number.isFinite(position?.y) && snapshot.files.some((file) => file.id === fileId)) next.set(`${snapshot.id}:${fileId}`, position);
-      }
-      nodePositionsPersisted.current = JSON.stringify(saved.nodePositions);
+      const prefix = `${repositoryWorkspaceId(snapshot)}:`;
+      const next = new Map([...previous].filter(([key]) => !key.startsWith(prefix)));
+      for (const [fileId, position] of Object.entries(savedNodePositions)) next.set(`${prefix}${fileId}`, position);
+      return next;
+    });
+    setWorkspacePersistenceReadyKeys((previous) => {
+      const next = new Set(previous);
+      next.delete(positionsKey);
+      next.add(positionsKey);
+      while (next.size > 64) next.delete(next.values().next().value as string);
       return next;
     });
     return saved.warning;
   }, []);
 
   useEffect(() => {
+    const pending = pendingNodePositionRestore.current;
+    if (!pending || workspaceId !== pending.workspaceId) return;
+    const prefix = `${workspaceId}:`;
+    const current = Object.fromEntries([...nodePositions].flatMap(([key, point]) =>
+      key.startsWith(prefix) ? [[key.slice(prefix.length), point] as const] : []));
+    if (nodePositionSignature(current) !== pending.signature) return;
+    pendingNodePositionRestore.current = null;
+    setNodePositionsReadyKey(pending.key);
+  }, [nodePositions, workspaceId]);
+
+  useEffect(() => {
     if (!desktopMode || repository.id === BOOT_SNAPSHOT.id) return;
+    const positionsKey = nodePositionSessionKey(repository);
+    if (nodePositionsReadyKey !== positionsKey) return;
     const timer = window.setTimeout(() => {
       const positions = Object.fromEntries([...nodePositions].flatMap(([key, point]) => {
-        const prefix = `${repository.id}:`;
+        const prefix = `${workspaceId}:`;
         return key.startsWith(prefix) ? [[key.slice(prefix.length), point] as const] : [];
       }));
-      const serialized = JSON.stringify(positions);
-      if (serialized === nodePositionsPersisted.current) return;
-      nodePositionsPersisted.current = serialized;
-      void localWorkspaceProvider.saveNodePositions(repository.id, positions).catch((error: Error) => setRepoMessage(`节点位置只保存在当前页面：${error.message}`));
+      const serialized = nodePositionSignature(positions);
+      if (serialized === nodePositionsPersisted.current.get(positionsKey)) return;
+      const queue = nodePositionSaveQueues.current;
+      const save = (queue.get(positionsKey) ?? Promise.resolve()).catch(() => {}).then(async () => {
+        if (!workspacePersistenceReadyKeys.has(positionsKey)) return;
+        await localWorkspaceProvider.saveNodePositions(workspaceSession(repository), positions);
+        nodePositionsPersisted.current.set(positionsKey, serialized);
+        const currentPositions = Object.fromEntries([...nodePositionsRef.current].flatMap(([key, point]) => {
+          const prefix = `${workspaceId}:`;
+          return key.startsWith(prefix) ? [[key.slice(prefix.length), point] as const] : [];
+        }));
+        if (nodePositionSignature(currentPositions) === serialized) dirtyNodePositions.current.delete(workspaceId);
+      });
+      queue.set(positionsKey, save);
+      void save.catch((error: Error) => {
+        if (activeNodePositionKeyRef.current === positionsKey) setRepoMessage(`节点位置只保存在当前页面：${error.message}`);
+      });
     }, 450);
     return () => window.clearTimeout(timer);
-  }, [desktopMode, nodePositions, repository.id]);
+  }, [desktopMode, nodePositions, nodePositionsReadyKey, repository, repository.id, workspaceId, workspacePersistenceReadyKeys]);
 
   useEffect(() => {
     let cancelled = false;
     const epoch = beginRepositorySession();
     sampleRepositoryProvider.getSnapshot().then(async (snapshot) => {
       let warning: string | undefined;
+      if (cancelled || !repositoryGate.current.isCurrent(epoch)) return;
       if (desktopMode) {
-        try { warning = restoreWorkspaceState(snapshot, await localWorkspaceProvider.get(snapshot.id)); }
-        catch (error) { warning = error instanceof Error ? error.message : "无法读取桌面保存数据。"; }
+        try {
+          const saved = await localWorkspaceProvider.get(repositoryWorkspaceId(snapshot));
+          if (cancelled || !repositoryGate.current.isCurrent(epoch)) return;
+          warning = restoreWorkspaceState(snapshot, saved);
+        }
+        catch (error) {
+          if (cancelled || !repositoryGate.current.isCurrent(epoch)) return;
+          const failedKey = nodePositionSessionKey(snapshot);
+          setWorkspacePersistenceReadyKeys((current) => { const next = new Set(current); next.delete(failedKey); return next; });
+          setNodePositionsReadyKey((current) => current === failedKey ? null : current);
+          warning = error instanceof Error ? error.message : "无法读取桌面保存数据。";
+        }
       }
       if (cancelled || !repositoryGate.current.activate(epoch, snapshot)) return;
       setRepositorySessionVersion((version) => version + 1);
       setRepository(snapshot);
       setSelectedFileId(snapshot.files[0]?.id ?? "");
-      if (warning) setRepoMessage(`桌面保存数据不可用，本次继续使用内存：${warning}`);
+      if (warning) setRepoMessage(`桌面保存数据读取失败；修改暂存于当前页面，原记录不会覆盖：${warning}`);
     }).catch((error: Error) => { if (!cancelled && repositoryGate.current.isCurrent(epoch)) setRepoMessage(error.message); });
     return () => { cancelled = true; };
   }, [beginRepositorySession, desktopMode, restoreWorkspaceState, setSelectedFileId]);
@@ -406,14 +480,15 @@ function AppShell() {
   const edges = initialLayout.edges;
 
   useEffect(() => {
-    const shouldReset = layoutOwner.current.version !== layoutVersion || layoutOwner.current.repositoryId !== repository.id;
-    const present = new Set(repository.files.map((file) => `${repository.id}:${file.id}`));
+    const sameWorkspace = layoutOwner.current.repositoryId === workspaceId;
+    const shouldReset = layoutOwner.current.version !== layoutVersion;
+    const present = new Set(repository.files.map((file) => `${workspaceId}:${file.id}`));
     // Drop removed files and clear positions only when an explicit layout reset occurs.
     setNodePositions((previous) => {
       let changed = false;
       const next = new Map<string, { x: number; y: number }>();
       for (const [id, position] of previous) {
-        const isCurrentRepository = id.startsWith(`${repository.id}:`);
+        const isCurrentRepository = id.startsWith(`${workspaceId}:`);
         if (isCurrentRepository && (shouldReset || !present.has(id))) { changed = true; continue; }
         next.set(id, position);
       }
@@ -422,16 +497,24 @@ function AppShell() {
     // Keep React Flow's controlled nodes synchronized with the repository and the saved drag positions.
     setNodes((previous) => initialLayout.nodes.map((node) => {
       const existing = previous.find((candidate) => candidate.id === node.id);
-      const position = !shouldReset ? nodePositions.get(`${repository.id}:${node.id}`) ?? existing?.position ?? node.position : node.position;
+      const position = !shouldReset ? nodePositions.get(`${workspaceId}:${node.id}`) ?? (sameWorkspace ? existing?.position : undefined) ?? node.position : node.position;
       return { ...node, ...(existing?.measured ? { measured: existing.measured } : {}), position, selected: node.id === selectedFileId, data: { ...node.data, selected: node.id === selectedFileId } };
     }));
-    layoutOwner.current = { version: layoutVersion, repositoryId: repository.id };
-  }, [initialLayout, repository.id, repository.files, layoutVersion, selectedFileId, setNodes, nodePositions]);
+    layoutOwner.current = { version: layoutVersion, repositoryId: workspaceId };
+  }, [initialLayout, repository.id, workspaceId, repository.files, layoutVersion, selectedFileId, setNodes, nodePositions]);
 
   const onNodesChange = useCallback((changes: Parameters<typeof onNodesChangeBase>[0]) => {
-    for (const change of changes) if (change.type === "position" && change.position) setNodePositions((previous) => new Map(previous).set(`${repository.id}:${change.id}`, change.position!));
+    for (const change of changes) if (change.type === "position" && change.position) {
+      setNodePositions((previous) => new Map(previous).set(`${workspaceId}:${change.id}`, change.position!));
+      const positionsKey = nodePositionSessionKey(repository);
+      if (desktopMode && !workspacePersistenceReadyKeys.has(positionsKey)) {
+        const dirty = dirtyNodePositions.current.get(workspaceId) ?? new Set<string>();
+        dirty.add(change.id);
+        dirtyNodePositions.current.set(workspaceId, dirty);
+      }
+    }
     onNodesChangeBase(changes);
-  }, [onNodesChangeBase, repository.id]);
+  }, [desktopMode, onNodesChangeBase, repository, workspaceId, workspacePersistenceReadyKeys]);
 
   useEffect(() => {
     const updateLayout = () => setNarrowLayout((previous) => previous === (window.innerWidth <= 860) ? previous : window.innerWidth <= 860);
@@ -509,10 +592,10 @@ function AppShell() {
     const saved = writeTourProgress(activeProgressKey, value);
     traceProgress("save", activeProgressKey, progressSession.current.current().generation, { outcome: saved ? "persistent" : "memory-only", stepIndex: tourIndex });
     if (!saved) window.setTimeout(() => setRepoMessage("浏览器存储不可用，本次阅读进度只保存在当前页面。"), 0);
-    if (desktopMode && repository.id !== BOOT_SNAPSHOT.id) {
-      void localWorkspaceProvider.saveProgress(repository.id, activeProgressKey, value).catch((error: Error) => setRepoMessage(`阅读进度只保存在当前页面：${error.message}`));
+    if (desktopMode && repository.id !== BOOT_SNAPSHOT.id && workspacePersistenceReadyKeys.has(nodePositionSessionKey(repository))) {
+      void localWorkspaceProvider.saveProgress(workspaceSession(repository), activeProgressKey, value).catch((error: Error) => setRepoMessage(`阅读进度只保存在当前页面：${error.message}`));
     }
-  }, [tourIndex, completedSteps, activeProgressKey, desktopMode, repository.id]);
+  }, [tourIndex, completedSteps, activeProgressKey, desktopMode, repository, repository.id, workspacePersistenceReadyKeys]);
 
   useEffect(() => {
     const reference = focusedLine;
@@ -571,7 +654,7 @@ function AppShell() {
     const graphDirectory = initialDirectory && scopedFiles.length ? initialDirectory : "";
     setRepository(snapshot);
     dispatchNavigation({ type: "snapshot", selectedFileId: restoredFileId, graphDirectory, clearFocus: true, resetTour: true });
-    clearAiContext(); setSearchQuery(""); setCollapsedFolders([]); setShowAllGraph(false); setLayoutVersion((version) => version + 1);
+    clearAiContext(); setSearchQuery(""); setCollapsedFolders([]); setShowAllGraph(false);
     setDetailTab("guide"); setMobileView("files");
     return true;
   }, [clearAiContext, selectedFileId]);
@@ -599,6 +682,20 @@ function AppShell() {
   }, [aiRoute, aiRouteStale, clearAiContext, filesById, focusOrigin, focusRouteSignature, focusedLine, graphDirectory, selectedFileId]);
   useEffect(() => { applyUpdatedSnapshotRef.current = applyUpdatedSnapshot; }, [applyUpdatedSnapshot]);
 
+  useEffect(() => {
+    if (!desktopMode) return;
+    return window.repoLens?.onBackendStatus(({ available, message }) => {
+      setDesktopBackendError(available ? "" : message);
+      if (!available) {
+        aiRequestSequence.current += 1;
+        aiAbortController.current?.abort();
+        aiAbortController.current = null;
+        clearAiContext();
+        setRepoMessage(message);
+      }
+    });
+  }, [desktopMode, clearAiContext]);
+
   const openRepositoryPath = useCallback(async (path: string) => {
     const command = nextRepositoryCommand();
     const requestId = openRequestGate.current.begin();
@@ -611,8 +708,19 @@ function AppShell() {
       if (!openRequestGate.current.isCurrent(requestId) || !isCurrentRepositoryCommand(command) || controller.signal.aborted) return;
       let workspaceWarning: string | undefined;
       if (desktopMode) {
-        try { workspaceWarning = restoreWorkspaceState(snapshot, await localWorkspaceProvider.get(snapshot.id, controller.signal)); }
-        catch (error) { if (controller.signal.aborted) return; workspaceWarning = error instanceof Error ? error.message : "无法读取桌面保存数据。"; }
+        try {
+          const saved = await localWorkspaceProvider.get(repositoryWorkspaceId(snapshot), controller.signal);
+          if (!openRequestGate.current.isCurrent(requestId) || !isCurrentRepositoryCommand(command) || controller.signal.aborted) return;
+          workspaceWarning = restoreWorkspaceState(snapshot, saved);
+        }
+        catch (error) {
+          if (controller.signal.aborted) return;
+          if (!openRequestGate.current.isCurrent(requestId) || !isCurrentRepositoryCommand(command)) return;
+          const failedKey = nodePositionSessionKey(snapshot);
+          setWorkspacePersistenceReadyKeys((current) => { const next = new Set(current); next.delete(failedKey); return next; });
+          setNodePositionsReadyKey((current) => current === failedKey ? null : current);
+          workspaceWarning = error instanceof Error ? error.message : "无法读取桌面保存数据。";
+        }
       }
       if (!openRequestGate.current.isCurrent(requestId) || !isCurrentRepositoryCommand(command) || controller.signal.aborted) return;
       const epoch = beginRepositorySession();
@@ -620,11 +728,11 @@ function AppShell() {
       setRepositorySessionVersion((version) => version + 1);
       if (applySnapshot(snapshot, epoch)) {
         setRepoPath(path);
-        setRepoMessage(workspaceWarning ? `仓库已打开；保存数据读取失败：${workspaceWarning}` : "仓库已打开，正在监听文件变化。");
+        setRepoMessage(workspaceWarning ? `仓库已打开；保存数据读取失败，修改暂存于当前页面，原记录不会覆盖：${workspaceWarning}` : "仓库已打开，正在监听文件变化。");
         if (desktopMode) {
           try {
-            await localWorkspaceProvider.touchRecent(snapshot.id);
-            const saved = await localWorkspaceProvider.get(snapshot.id);
+            await localWorkspaceProvider.touchRecent(workspaceSession(snapshot));
+            const saved = await localWorkspaceProvider.get(repositoryWorkspaceId(snapshot));
             if (openRequestGate.current.isCurrent(requestId) && isCurrentRepositoryCommand(command)) setRecentRepositories(saved.recentRepositories);
           } catch (error) { if (openRequestGate.current.isCurrent(requestId)) setRepoMessage(`仓库已打开；最近记录未能保存：${error instanceof Error ? error.message : "存储不可用。"}`); }
         }
@@ -855,31 +963,31 @@ function AppShell() {
   }, [activeTour, activeRouteSignature, aiRouteStale, clearAiContext, focusTreeFile, focusGraphFile]);
 
   const resetGraph = useCallback(() => {
-    setNodePositions((previous) => new Map([...previous].filter(([id]) => !id.startsWith(`${repository.id}:`))));
+    setNodePositions((previous) => new Map([...previous].filter(([id]) => !id.startsWith(`${workspaceId}:`))));
     setLayoutVersion((version) => version + 1);
     window.requestAnimationFrame(() => focusGraphFile(currentFile.id));
-  }, [currentFile.id, focusGraphFile, repository.id]);
+  }, [currentFile.id, focusGraphFile, workspaceId]);
 
   const removeRecentRepository = useCallback(async (repositoryId: string) => {
     try {
       await localWorkspaceProvider.removeRecent(repositoryId);
-      const saved = await localWorkspaceProvider.get(repository.id);
+      const saved = await localWorkspaceProvider.get(workspaceId);
       setRecentRepositories(saved.recentRepositories);
     } catch (error) { setRepoMessage(`无法移除最近仓库：${error instanceof Error ? error.message : "本地存储不可用。"}`); }
-  }, [repository.id]);
+  }, [workspaceId]);
 
   const clearCurrentSavedData = useCallback(async () => {
     if (!desktopMode || repository.id === BOOT_SNAPSHOT.id) return;
     try {
-      await localWorkspaceProvider.clearRepository(repository.id);
-      setAiResultsByFile((previous) => new Map([...previous].filter(([key]) => !key.startsWith(`${repository.id}:`))));
-      setAiRoutesByRepository((previous) => { const next = new Map(previous); next.delete(repository.id); return next; });
-      setNodePositions((previous) => new Map([...previous].filter(([key]) => !key.startsWith(`${repository.id}:`))));
-      for (const key of progressMemory.keys()) if (key.startsWith(`repolens:${repository.id}:`)) progressMemory.delete(key);
-      setTourIndex(0); setCompletedSteps([]); setRecentRepositories((previous) => previous.filter((item) => item.id !== repository.id));
+      await localWorkspaceProvider.clearRepository(workspaceSession(repository));
+      setAiResultsByFile((previous) => new Map([...previous].filter(([key]) => !key.startsWith(`${workspaceId}:`))));
+      setAiRoutesByRepository((previous) => { const next = new Map(previous); next.delete(workspaceId); return next; });
+      setNodePositions((previous) => new Map([...previous].filter(([key]) => !key.startsWith(`${workspaceId}:`))));
+      for (const key of progressMemory.keys()) if (key.startsWith(`repolens:${workspaceId}:`)) progressMemory.delete(key);
+      setTourIndex(0); setCompletedSteps([]); setRecentRepositories((previous) => previous.filter((item) => (item.workspaceId ?? item.id) !== workspaceId));
       setRepoMessage("已清除此仓库的本地保存结果、路线、进度和节点位置。");
     } catch (error) { setRepoMessage(`无法清除此仓库的保存数据：${error instanceof Error ? error.message : "本地存储不可用。"}`); }
-  }, [desktopMode, repository.id, setTourIndex, setCompletedSteps]);
+  }, [desktopMode, repository, workspaceId, setTourIndex, setCompletedSteps]);
 
   const clearAllSavedData = useCallback(async () => {
     try {
@@ -930,7 +1038,17 @@ function AppShell() {
     if (!isCurrentRepositoryCommand(command)) return;
     openRequestGate.current.invalidate(); openRequestController.current?.abort(); openRequestController.current = null;
     clearAiContext(); setSearchQuery(""); setCollapsedFolders([]); setTourIndex(0); setCompletedSteps([]); setFocusedLine(null); setShowAllGraph(false); setGraphDirectory(""); setRepoMessage("正在载入内置示例仓库。"); setDetailTab("guide"); setMobileView("graph");
-    try { const snapshot = await sampleRepositoryProvider.getSnapshot(); if (!isCurrentRepositoryCommand(command) || !repositoryGate.current.activate(epoch, snapshot)) return; setRepositorySessionVersion((version) => version + 1); if (!applySnapshot(snapshot, epoch)) return; setRepoMessage("正在浏览内置示例仓库。"); setRepoBusy(false); }
+    try {
+      const snapshot = await sampleRepositoryProvider.getSnapshot();
+      if (!isCurrentRepositoryCommand(command) || !repositoryGate.current.activate(epoch, snapshot)) return;
+      setRepositorySessionVersion((version) => version + 1);
+      if (!applySnapshot(snapshot, epoch)) return;
+      // Same-page returns retain the sample workspace's in-memory positions.
+      // Re-enable autosave only after the sample snapshot has become active.
+      if (desktopMode && workspacePersistenceReadyKeys.has(nodePositionSessionKey(snapshot))) setNodePositionsReadyKey(nodePositionSessionKey(snapshot));
+      setRepoMessage("正在浏览内置示例仓库。");
+      setRepoBusy(false);
+    }
     catch (error) { if (isCurrentRepositoryCommand(command) && repositoryGate.current.isCurrent(epoch)) { setRepoBusy(false); setRepoMessage(error instanceof Error ? error.message : "无法载入示例仓库。"); } }
   };
   const closeRepository = async () => {
@@ -993,6 +1111,7 @@ function AppShell() {
     }
   };
   const previewAi = async (mode: AiMode, fileIds?: string[]) => {
+    if (desktopBackendError) { setRepoMessage(desktopBackendError); return; }
     if (!aiSettings.configured) { clearAiContext(); dispatchAiWorkflow({ type: "message", message: "请先保存完整的模型服务地址、模型名称和密钥，再预览发送范围。" }); return; }
     const contextKey = aiContextKey;
     const preserveScope = aiWorkflow.mode === mode && aiCandidates.length > 0;
@@ -1018,7 +1137,9 @@ function AppShell() {
   };
   const generateAi = async () => {
     const preview = aiPreview;
+    if (desktopBackendError) { setRepoMessage(desktopBackendError); return; }
     if (aiWorkflow.status !== "ready" || !aiWorkflow.mode || !preview || preview.mode !== aiWorkflow.mode || preview.repositoryId !== repository.id || preview.entryFileId !== currentFile.id || preview.revision !== repository.revision) return;
+    const savedWorkspaceSession = workspaceSession(repository);
     const contextKey = aiContextKey;
     const requestContext = JSON.stringify([contextKey, preview.id, preview.mode]);
     const requestId = ++aiRequestSequence.current;
@@ -1039,18 +1160,18 @@ function AppShell() {
           steps: value.result.steps as { fileId: string; purpose: string; references: { fileId: string; startLine: number; endLine?: number }[] }[],
           contextFiles,
         }, (fileId: string) => filesById.get(fileId)?.name ?? fileId);
-        setAiRoutesByRepository((previous) => new Map(previous).set(value.repositoryId, nextRoute));
+        setAiRoutesByRepository((previous) => new Map(previous).set(workspaceId, nextRoute));
         if (desktopMode) {
-          try { await localWorkspaceProvider.saveAiRoute(value.repositoryId, nextRoute as unknown as Record<string, unknown>); }
+          try { await localWorkspaceProvider.saveAiRoute(savedWorkspaceSession, nextRoute as unknown as Record<string, unknown>); }
           catch (error) { setRepoMessage(`路线已生成，但未能写入桌面保存数据：${error instanceof Error ? error.message : "存储不可用。"}`); }
         }
         setSearchQuery(""); setCollapsedFolders([]);
         finalMessage = "AI 阅读路线已生成；选中步骤即可定位文件和源码。";
       } else {
         const result: AiResultRecord = { ...value.result, __repositoryId: value.repositoryId, __entryFileId: value.entryFileId, __revision: value.revision, __mode: "explanation", __contextFiles: contextFiles };
-        setAiResultsByFile((previous) => new Map(previous).set(`${value.repositoryId}:${value.entryFileId}`, result));
+        setAiResultsByFile((previous) => new Map(previous).set(`${workspaceId}:${value.entryFileId}`, result));
         if (desktopMode) {
-          try { await localWorkspaceProvider.saveAiResult(value.repositoryId, value.entryFileId, result); }
+          try { await localWorkspaceProvider.saveAiResult(savedWorkspaceSession, value.entryFileId, result); }
           catch (error) { setRepoMessage(`讲解已生成，但未能写入桌面保存数据：${error instanceof Error ? error.message : "存储不可用。"}`); }
         }
         finalMessage = "讲解已生成，引用经过文件和行号校验。";
@@ -1078,10 +1199,11 @@ function AppShell() {
         </div>
         <div className="topbar-end">
           {repository.source === "sample" && <span className="tour-status"><Sparkles size={14} />预置导览</span>}
-          {repository.source === "local" && <><button className="repo-action" onClick={rescanRepository} disabled={repoBusy}>{repository.origin?.kind === "github" ? "检查远端更新" : "重新扫描"}</button><button className="repo-action" onClick={closeRepository}>返回示例</button></>}
+          {repository.source === "local" && <><button className="repo-action" onClick={rescanRepository} disabled={repoBusy || Boolean(desktopBackendError)}>{repository.origin?.kind === "github" ? "检查远端更新" : "重新扫描"}</button><button className="repo-action" onClick={closeRepository} disabled={Boolean(desktopBackendError)}>返回示例</button></>}
           <span className="version-stamp">v{repository.version}</span>
         </div>
       </header>
+      {desktopBackendError && <div className="desktop-backend-alert" role="alert">本地服务不可用：{desktopBackendError}</div>}
 
       <nav className="mobile-tabs" aria-label="工作区面板">
         <button className={mobileView === "files" ? "is-active" : ""} onClick={() => setMobileView("files")}>
@@ -1104,6 +1226,7 @@ function AppShell() {
           repoPath={repoPath}
           onRepoPathChange={setRepoPath}
           repoBusy={repoBusy}
+          serviceAvailable={!desktopBackendError}
           repoMessage={repoMessage}
           desktopMode={desktopMode}
           onPickDirectory={() => {
@@ -1156,6 +1279,7 @@ function AppShell() {
 
         <FileDetailsPanel
           repository={repository}
+          backendAvailable={!desktopBackendError}
           currentFile={currentFile}
           filesById={filesById}
           mobileView={mobileView}

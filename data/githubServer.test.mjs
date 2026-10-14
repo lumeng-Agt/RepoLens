@@ -56,12 +56,21 @@ test("local service opens GitHub URLs, retains failed-open sessions, and refresh
   await mkdir(path.join(working, "src"));
   await writeFile(path.join(working, "src", "main.ts"), "export const greeting = 'hello';\n");
   git(working, "add", "."); git(working, "commit", "-m", "first"); git(working, "branch", "-M", "main");
-  git(testRoot, "init", "--bare", remote); git(working, "remote", "add", "origin", remote); git(working, "push", "origin", "main");
+  git(working, "branch", "feature/test");
+  git(working, "checkout", "feature/test");
+  await writeFile(path.join(working, "src", "main.ts"), "export const greeting = 'feature';\n");
+  git(working, "add", "src/main.ts"); git(working, "commit", "-m", "feature source");
+  git(working, "tag", "release");
+  git(working, "checkout", "main");
+  git(working, "branch", "release");
+  git(testRoot, "init", "--bare", remote); git(working, "remote", "add", "origin", remote); git(working, "push", "origin", "--all");
+  git(working, "push", "origin", "--tags");
   git(testRoot, "--git-dir", remote, "symbolic-ref", "HEAD", "refs/heads/main");
 
   const apiPort = await freePort(); const origin = "http://127.0.0.1:" + apiPort; const appOrigin = "http://127.0.0.1:5173";
   let intentSequence = 0; const clientId = "github-api-test-" + process.pid;
   const command = () => ({ clientId, intentSequence: ++intentSequence });
+  const save = (snapshot, action, fields = {}) => api("/api/workspace", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repositoryId: snapshot.id, workspaceId: snapshot.workspaceId, persistenceSessionId: snapshot.persistenceSessionId, action, ...fields }) });
   const api = (route, init = {}) => fetch(origin + route, { ...init, headers: { Origin: appOrigin, ...(init.headers ?? {}) } });
   const cloneUrl = "https://github.com/repolens-test/demo.git";
   const child = spawn(process.execPath, [path.join(projectRoot, "scripts/local-server.mjs")], {
@@ -70,6 +79,7 @@ test("local service opens GitHub URLs, retains failed-open sessions, and refresh
       ...process.env,
       REPOLENS_PORT: String(apiPort),
       REPOLENS_UI_PORT: "5173",
+      REPOLENS_USER_DATA_PATH: path.join(testRoot, "user-data"),
       REPOLENS_TEMP_ROOT: testRoot,
       GIT_CONFIG_COUNT: "1",
       GIT_CONFIG_KEY_0: "url." + pathToFileURL(remote).href + ".insteadOf",
@@ -83,7 +93,11 @@ test("local service opens GitHub URLs, retains failed-open sessions, and refresh
     await rm(testRoot, { recursive: true, force: true });
   });
   await waitForService(origin, child);
-  const open = await api("/api/open", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: "https://github.com/repolens-test/demo/tree/main/src", command: command() }) });
+  const mainUrl = "https://github.com/repolens-test/demo/tree/main/src";
+  const featureUrl = "https://github.com/repolens-test/demo/tree/feature/test/src";
+  const mainRecentUrl = "https://github.com/repolens-test/demo/tree/refs/heads/main/src";
+  const featureRecentUrl = "https://github.com/repolens-test/demo/tree/refs/heads/feature/test/src";
+  const open = await api("/api/open", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: mainUrl, command: command() }) });
   assert.equal(open.status, 200);
   let snapshot = await open.json();
   assert.match(snapshot.id, /^github-/);
@@ -93,6 +107,86 @@ test("local service opens GitHub URLs, retains failed-open sessions, and refresh
   assert.equal(snapshot.origin.commit, git(working, "rev-parse", "HEAD"));
   assert.equal(snapshot.origin.subdirectory, "src");
   const stableRepositoryId = snapshot.id;
+  const mainWorkspaceId = snapshot.workspaceId;
+  assert.ok(mainWorkspaceId, "GitHub snapshots expose a stable ref-scoped persistence identity");
+  assert.ok(snapshot.persistenceSessionId, "opened snapshots carry their persistence session identity");
+  const shortCommitOpen = await api("/api/open", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: `https://github.com/repolens-test/demo/tree/${snapshot.origin.commit.slice(0, 7)}`, command: command() }) });
+  assert.equal(shortCommitOpen.status, 200, JSON.stringify(await shortCommitOpen.clone().json()));
+  const shortCommitSnapshot = await shortCommitOpen.json();
+  const fullCommitOpen = await api("/api/open", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: `https://github.com/repolens-test/demo/tree/${snapshot.origin.commit}`, command: command() }) });
+  assert.equal(fullCommitOpen.status, 200);
+  assert.equal((await fullCommitOpen.json()).workspaceId, shortCommitSnapshot.workspaceId, "short and full commit links use the canonical full commit persistence identity");
+  const reopenDefault = await api("/api/open", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: mainUrl, command: command() }) });
+  assert.equal(reopenDefault.status, 200);
+  snapshot = await reopenDefault.json();
+  assert.equal(snapshot.workspaceId, mainWorkspaceId);
+  await save(snapshot, "recent-touch");
+  await save(snapshot, "node-positions", { positions: { "src/main.ts": { x: 101, y: 202 } } });
+  await save(snapshot, "progress", { key: `repolens:${mainWorkspaceId}:route-a`, value: "main-progress" });
+  await save(snapshot, "ai-result", { fileId: "src/main.ts", record: { value: "main-result" } });
+
+  const mainLibUrl = "https://github.com/repolens-test/demo/tree/main/lib";
+  const mainLibOpen = await api("/api/open", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: mainLibUrl, command: command() }) });
+  assert.equal(mainLibOpen.status, 200);
+  const mainLibSnapshot = await mainLibOpen.json();
+  assert.equal(mainLibSnapshot.workspaceId, mainWorkspaceId, "subdirectories under one ref share their saved reading state");
+  await save(mainLibSnapshot, "recent-touch");
+  assert.equal((await (await api("/api/workspace?repositoryId=" + mainLibSnapshot.id)).json()).recentRepositories.filter((item) => item.kind === "github").length, 2, "different subdirectory targets remain separate recent entries");
+
+  const featureOpen = await api("/api/open", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: featureUrl, command: command() }) });
+  assert.equal(featureOpen.status, 200);
+  const featureSnapshot = await featureOpen.json();
+  assert.equal(featureSnapshot.id, stableRepositoryId, "the server repository id remains stable across refs");
+  assert.notEqual(featureSnapshot.workspaceId, mainWorkspaceId, "each resolved ref has an independent persistence identity");
+  assert.equal(featureSnapshot.origin.resolvedRef, "refs/heads/feature/test");
+  const featureSourceQuery = new URLSearchParams({ repositoryId: featureSnapshot.id, revision: featureSnapshot.revision, file: "src/main.ts" });
+  assert.match((await (await api("/api/source?" + featureSourceQuery)).json()).source, /feature/);
+  const staleBranchSave = await save(snapshot, "node-positions", { positions: { "src/main.ts": { x: 999, y: 888 } } });
+  assert.equal(staleBranchSave.status, 409, "a delayed save from the old branch is rejected");
+  await save(featureSnapshot, "recent-touch");
+  await save(featureSnapshot, "node-positions", { positions: { "src/main.ts": { x: 303, y: 404 } } });
+  await save(featureSnapshot, "progress", { key: `repolens:${featureSnapshot.workspaceId}:route-a`, value: "feature-progress" });
+  await save(featureSnapshot, "ai-result", { fileId: "src/main.ts", record: { value: "feature-result" } });
+  let featureWorkspace = await (await api("/api/workspace?repositoryId=" + featureSnapshot.id)).json();
+  assert.deepEqual(featureWorkspace.nodePositions["src/main.ts"], { x: 303, y: 404 });
+  assert.equal(featureWorkspace.progress[`repolens:${featureSnapshot.workspaceId}:route-a`], "feature-progress");
+  assert.equal(featureWorkspace.aiResults["src/main.ts"].value, "feature-result");
+  assert.ok(featureWorkspace.recentRepositories.some((item) => item.location === featureRecentUrl), `recent repositories retain the exact branch and subdirectory URL: ${JSON.stringify(featureWorkspace.recentRepositories)}`);
+
+  const reopenMain = await api("/api/open", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: mainUrl, command: command() }) });
+  assert.equal(reopenMain.status, 200);
+  snapshot = await reopenMain.json();
+  const mainWorkspace = await (await api("/api/workspace?repositoryId=" + snapshot.id)).json();
+  assert.deepEqual(mainWorkspace.nodePositions["src/main.ts"], { x: 101, y: 202 }, "main restores its own graph coordinates after a ref switch");
+  assert.equal(mainWorkspace.progress[`repolens:${mainWorkspaceId}:route-a`], "main-progress");
+  assert.equal(mainWorkspace.aiResults["src/main.ts"].value, "main-result");
+  assert.ok(mainWorkspace.recentRepositories.some((item) => item.location === mainRecentUrl));
+  assert.equal(mainWorkspace.recentRepositories.filter((item) => item.kind === "github").length, 3, "recent refs and subdirectory targets remain separate entries");
+
+  const branchReleaseUrl = "https://github.com/repolens-test/demo/tree/refs/heads/release";
+  const tagReleaseUrl = "https://github.com/repolens-test/demo/tree/refs/tags/release";
+  const branchReleaseOpen = await api("/api/open", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: branchReleaseUrl, command: command() }) });
+  assert.equal(branchReleaseOpen.status, 200, JSON.stringify(await branchReleaseOpen.clone().json()));
+  const branchRelease = await branchReleaseOpen.json();
+  assert.equal(branchRelease.origin.resolvedRef, "refs/heads/release");
+  await save(branchRelease, "recent-touch");
+  const tagReleaseOpen = await api("/api/open", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: tagReleaseUrl, command: command() }) });
+  assert.equal(tagReleaseOpen.status, 200, JSON.stringify(await tagReleaseOpen.clone().json()));
+  const tagRelease = await tagReleaseOpen.json();
+  assert.equal(tagRelease.origin.resolvedRef, "refs/tags/release");
+  await save(tagRelease, "recent-touch");
+  const releaseRecents = (await (await api("/api/workspace?repositoryId=" + tagRelease.id)).json()).recentRepositories;
+  assert.ok(releaseRecents.some((item) => item.resolvedRef === "refs/heads/release" && item.location === branchReleaseUrl),
+    `recent branch URL retains refs/heads: ${JSON.stringify(releaseRecents)}`);
+  assert.ok(releaseRecents.some((item) => item.resolvedRef === "refs/tags/release" && item.location === tagReleaseUrl),
+    `recent tag URL retains refs/tags: ${JSON.stringify(releaseRecents)}`);
+  const reopenedTag = await api("/api/open", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: tagReleaseUrl, command: command() }) });
+  assert.equal(reopenedTag.status, 200);
+  assert.equal((await reopenedTag.json()).origin.resolvedRef, "refs/tags/release", "the exact recent tag target opens without resolving to the same-named branch");
+  const restoreMainForUpdate = await api("/api/open", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: mainUrl, command: command() }) });
+  assert.equal(restoreMainForUpdate.status, 200);
+  snapshot = await restoreMainForUpdate.json();
+  const sequenceBeforeRescan = snapshot.sequence;
   const sourceQuery = new URLSearchParams({ repositoryId: snapshot.id, revision: snapshot.revision, file: "src/main.ts" });
   const source = (await (await api("/api/source?" + sourceQuery)).json()).source;
   assert.match(source, /hello/);
@@ -109,7 +203,7 @@ test("local service opens GitHub URLs, retains failed-open sessions, and refresh
   assert.equal(snapshot.id, stableRepositoryId, "a remote update must preserve the repository identity");
   assert.match(snapshot.origin.commit, /^[0-9a-f]{40}$/);
   assert.match(snapshot.revision, /^[0-9a-f]{64}$/);
-  assert.equal(snapshot.sequence, 2);
+  assert.equal(snapshot.sequence, sequenceBeforeRescan + 1, "a changed commit increments the active ref sequence once");
   const updatedQuery = new URLSearchParams({ repositoryId: snapshot.id, revision: snapshot.revision, file: "src/main.ts" });
   const updatedSource = (await (await api("/api/source?" + updatedQuery)).json()).source;
   assert.match(updatedSource, /updated/);

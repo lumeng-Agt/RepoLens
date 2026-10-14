@@ -7,6 +7,7 @@ declare global {
     repoLens?: {
       selectDirectory(): Promise<string | null>;
       quit(): Promise<void>;
+      onBackendStatus(listener: (status: { available: boolean; message: string }) => void): () => void;
     };
   }
 }

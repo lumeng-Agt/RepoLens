@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createServer as createHttpServer } from "node:http";
 import { createServer as createNetServer } from "node:net";
 import { access, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
@@ -114,8 +114,20 @@ async function launch({ gitExecutable } = {}) {
   }
   record.browser = browser;
   record.page = page;
+  record.workspaceResponses = [];
+  record.nodePositionWrites = [];
+  page.on("response", async (response) => {
+    if (!response.url().includes("/api/workspace") || response.request().method() !== "POST") return;
+    const requestBody = response.request().postData() ?? "";
+    try {
+      const payload = JSON.parse(requestBody);
+      if (payload.action === "node-positions") record.nodePositionWrites.push(payload.positions ?? {});
+    } catch {}
+    if (!requestBody.includes('"action":"conversations"')) return;
+    record.workspaceResponses.push({ status: response.status(), body: requestBody.slice(0, 1200), response: await response.text().catch(() => "<response body unavailable>") });
+  });
   await page.getByRole("button", { name: "第 1 步：从入口开始" }).waitFor({ state: "visible", timeout: 20_000 });
-  return { child, browser, page };
+  return { child, browser, page, workspaceResponses: record.workspaceResponses, nodePositionWrites: record.nodePositionWrites };
 }
 
 async function workspaceFor(app, repositoryId) {
@@ -133,7 +145,7 @@ async function waitForWorkspace(app, repositoryId, predicate, description) {
     if (predicate(last)) return last;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  throw new Error(`等待桌面保存状态超时：${description}。最后状态：${JSON.stringify(last)}`);
+  throw new Error(`等待桌面保存状态超时：${description}。最后状态：${JSON.stringify(last)}。节点位置写入：${JSON.stringify(app.nodePositionWrites ?? [])}。问答保存请求：${JSON.stringify(app.workspaceResponses ?? [])}。页面反馈：${(await app.page.locator("body").innerText().catch(() => "<unavailable>")).slice(-1800)}`);
 }
 
 async function assertDisabled(locator, message) {
@@ -151,6 +163,44 @@ async function quit(app) {
   clearTimeout(timer);
   assert.ok(!("timeout" in exit), "desktop completed its bounded service shutdown");
   assert.deepEqual(exit, { code: 0, signal: null }, "desktop and local service exited cleanly");
+  await app.browser.close();
+}
+
+async function assertSingleInstance(first) {
+  const port = await reservePort();
+  const environment = { ...process.env, REPOLENS_USER_DATA_PATH: userDataPath, REPOLENS_SMOKE_HIDDEN: "1", ELECTRON_DISABLE_GPU: "1" };
+  delete environment.ELECTRON_RUN_AS_NODE;
+  const child = spawn(executable, [`--remote-debugging-port=${port}`], { cwd: temporaryRoot, env: environment, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+  const record = { child, output: [] }; children.push(record);
+  child.stdout.on("data", (chunk) => record.output.push(chunk.toString("utf8")));
+  child.stderr.on("data", (chunk) => record.output.push(chunk.toString("utf8")));
+  const result = await Promise.race([
+    new Promise((resolve) => child.once("exit", (code, signal) => resolve({ code, signal }))),
+    new Promise((resolve) => setTimeout(() => resolve({ timeout: true }), 15_000)),
+  ]);
+  assert.deepEqual(result, { code: 0, signal: null }, `a second launch exits after focusing the existing instance: ${record.output.join("")}`);
+  await first.page.getByRole("button", { name: "第 1 步：从入口开始" }).waitFor({ state: "visible" });
+  assert.equal((await fetch(await first.page.evaluate(() => window.__REPOLENS_RUNTIME__?.apiOrigin) + "/api/health")).ok, true, "the original backend remains the only active service");
+}
+
+async function crashBackendAndAssertFailure(app) {
+  const apiOrigin = await app.page.evaluate(() => window.__REPOLENS_RUNTIME__?.apiOrigin ?? "");
+  const port = new URL(apiOrigin).port;
+  const listening = spawnSync("netstat", ["-ano", "-p", "tcp"], { encoding: "utf8", windowsHide: true }).stdout.split(/\r?\n/)
+    .find((line) => line.includes(`127.0.0.1:${port} `) && line.includes("LISTENING"));
+  const backendPid = Number(listening?.trim().split(/\s+/).at(-1));
+  assert.ok(Number.isInteger(backendPid) && backendPid > 0, "the isolated desktop backend listener is found");
+  const killed = spawnSync("taskkill", ["/pid", String(backendPid), "/f"], { encoding: "utf8", windowsHide: true });
+  assert.equal(killed.status, 0, `the isolated backend process is terminated: ${killed.stderr}`);
+  await app.page.getByRole("alert").filter({ hasText: "本地服务不可用" }).waitFor({ state: "visible", timeout: 10_000 });
+  await assertDisabled(app.page.locator("header").getByRole("button", { name: "重新扫描", exact: true }), "repository operations are disabled after backend failure");
+  await assertDisabled(app.page.getByRole("button", { name: "生成当前文件讲解" }), "AI preview is disabled after backend failure");
+  await app.page.evaluate(() => window.repoLens?.quit()).catch(() => {});
+  const exit = await Promise.race([
+    new Promise((resolve) => app.child.once("exit", (code, signal) => resolve({ code, signal }))),
+    new Promise((resolve) => setTimeout(() => resolve({ timeout: true }), 25_000)),
+  ]);
+  assert.deepEqual(exit, { code: 1, signal: null }, "an unexpected backend exit cannot be reported as a clean shutdown");
   await app.browser.close();
 }
 
@@ -174,6 +224,7 @@ try {
   await writeFile(path.join(repositoryPath, "internal", "value", "value.go"), 'package value\nconst Answer = "ok"\n', "utf8");
 
   const first = await launch();
+  await assertSingleInstance(first);
   await first.page.locator(".graph-file-card").first().waitFor({ state: "visible" });
   await first.page.locator("#repository-path").fill(repositoryPath);
   await first.page.getByRole("button", { name: "打开仓库", exact: true }).click();
@@ -283,9 +334,33 @@ try {
   assert.equal(persistedRecords.conversations[0].messages.length, 4);
   assert.ok(persistedRecords.conversations[0].messages.filter((message) => message.role === "assistant").every((message) => message.references.some((reference) => reference.fileId === "src/main.py")), "question answers cite the relevant Python entry file");
   assert.ok(Object.keys(persistedRecords.progress).length > 0, "tour progress persists through the real interface");
+  const expectedNodePosition = persistedRecords.nodePositions["src/main.py"];
+  assert.ok(Number.isFinite(expectedNodePosition?.x) && Number.isFinite(expectedNodePosition?.y), "the dragged node has a persisted coordinate pair");
+
+  await first.page.getByRole("button", { name: "返回示例", exact: true }).click();
+  const sampleNode = first.page.locator('.react-flow__node[data-id="src/main.tsx"]');
+  await sampleNode.waitFor({ state: "visible", timeout: 20_000 });
+  const sampleBefore = await sampleNode.evaluate((node) => node.getAttribute("style") ?? "");
+  const sampleBox = await sampleNode.boundingBox();
+  assert.ok(sampleBox && sampleBox.width > 0 && sampleBox.height > 0, "sample graph node is measured after returning from a local repository");
+  await first.page.mouse.move(sampleBox.x + sampleBox.width / 2, sampleBox.y + sampleBox.height / 2);
+  await first.page.mouse.down();
+  await first.page.mouse.move(sampleBox.x + sampleBox.width / 2 + 88, sampleBox.y + sampleBox.height / 2 + 46, { steps: 6 });
+  await first.page.mouse.up();
+  await first.page.waitForFunction((previous) => {
+    const node = document.querySelector('.react-flow__node[data-id="src/main.tsx"]');
+    return node && (node.getAttribute("style") ?? "") !== previous;
+  }, sampleBefore, { timeout: 5_000 });
+  const sampleWorkspace = await waitForWorkspace(first, "taskflow-sample", (state) => Number.isFinite(state.nodePositions?.["src/main.tsx"]?.x)
+    && Number.isFinite(state.nodePositions?.["src/main.tsx"]?.y), "保存返回示例后拖动的节点坐标");
+  const expectedSamplePosition = sampleWorkspace.nodePositions["src/main.tsx"];
+  assert.ok(Number.isFinite(expectedSamplePosition.x) && Number.isFinite(expectedSamplePosition.y));
   await quit(first);
 
   const stateText = await readFile(path.join(userDataPath, "workspace-v1.json"), "utf8");
+  const diskState = JSON.parse(stateText);
+  const diskWorkspaceId = recentEntry.workspaceId ?? recentEntry.id;
+  assert.deepEqual(diskState.nodePositions?.[diskWorkspaceId]?.["src/main.py"], expectedNodePosition, "the first desktop session flushes the dragged coordinate before shutdown");
   assert.match(stateText, /polyglot-demo/);
   assert.match(stateText, /桌面模拟讲解/);
   assert.match(stateText, /main\.py 如何得到并打印 answer/);
@@ -301,9 +376,47 @@ try {
     const origin = window.__REPOLENS_RUNTIME__?.apiOrigin;
     return fetch(`${origin}/api/workspace?repositoryId=taskflow-sample`).then((response) => response.json());
   });
+  const savedBeforeReopen = await workspaceFor(second, recentEntry.id);
+  assert.deepEqual(savedBeforeReopen.nodePositions?.["src/main.py"], expectedNodePosition, "the second service reads the saved coordinate before reopening the repository");
   assert.ok(restored.recentRepositories.some((item) => item.id === recentEntry.id), "recent repositories survive a full desktop restart");
+  const restoredSampleWorkspace = await workspaceFor(second, "taskflow-sample");
+  assert.deepEqual(restoredSampleWorkspace.nodePositions?.["src/main.tsx"], expectedSamplePosition,
+    "sample coordinates saved after returning from a local repository survive a full desktop restart");
+  await second.page.waitForFunction((expected) => {
+    const node = document.querySelector('.react-flow__node[data-id="src/main.tsx"]');
+    const match = (node?.getAttribute("style") ?? "").match(/translate\(([-\d.]+)px,\s*([-\d.]+)px\)/);
+    return match && Math.abs(Number(match[1]) - expected.x) < 0.5 && Math.abs(Number(match[2]) - expected.y) < 0.5;
+  }, expectedSamplePosition, { timeout: 10_000 });
   await second.page.locator(".recent-repository-open").filter({ hasText: "polyglot-demo" }).click();
   await second.page.getByRole("treeitem", { name: "main.py" }).waitFor({ state: "visible", timeout: 20_000 });
+  const reopenedIdentity = await second.page.evaluate(async (repositoryId) => {
+    const origin = window.__REPOLENS_RUNTIME__?.apiOrigin;
+    const snapshot = await fetch(`${origin}/api/snapshot?repositoryId=${encodeURIComponent(repositoryId)}`).then((response) => response.json());
+    const saved = await fetch(`${origin}/api/workspace?repositoryId=${encodeURIComponent(repositoryId)}`).then((response) => response.json());
+    return { id: snapshot.id, workspaceId: snapshot.workspaceId, persistenceSessionId: snapshot.persistenceSessionId, positions: saved.nodePositions };
+  }, recentEntry.id);
+  assert.equal(reopenedIdentity.workspaceId, diskWorkspaceId, `reopening a local repository preserves its workspace identity: ${JSON.stringify(reopenedIdentity)}`);
+  assert.deepEqual(reopenedIdentity.positions?.["src/main.py"], expectedNodePosition, "opening a local repository does not switch the workspace position record");
+  await second.page.getByRole("treeitem", { name: "main.py" }).click();
+  const restoredNode = second.page.locator('.react-flow__node[data-id="src/main.py"]');
+  await restoredNode.waitFor({ state: "visible" });
+  await second.page.waitForFunction((expected) => {
+    const node = document.querySelector('.react-flow__node[data-id="src/main.py"]');
+    const match = (node?.getAttribute("style") ?? "").match(/translate\(([-\d.]+)px,\s*([-\d.]+)px\)/);
+    return match && Math.abs(Number(match[1]) - expected.x) < 0.5 && Math.abs(Number(match[2]) - expected.y) < 0.5;
+  }, expectedNodePosition, { timeout: 10_000 });
+  const renderedPosition = await restoredNode.evaluate((node) => {
+    const match = (node.getAttribute("style") ?? "").match(/translate\(([-\d.]+)px,\s*([-\d.]+)px\)/);
+    return match ? { x: Number(match[1]), y: Number(match[2]) } : null;
+  });
+  assert.ok(renderedPosition && Math.abs(renderedPosition.x - expectedNodePosition.x) < 0.5 && Math.abs(renderedPosition.y - expectedNodePosition.y) < 0.5,
+    `the node itself renders at the persisted coordinate after reopening: ${JSON.stringify({ renderedPosition, expectedNodePosition })}`);
+  // The product intentionally debounces coordinate writes for 450ms; cross that real save window before reading state.
+  await second.page.waitForTimeout(600);
+  const restoredPositions = await waitForWorkspace(second, recentEntry.id, (state) => Object.hasOwn(state.nodePositions ?? {}, "src/main.py"), "the restored graph coordinate remains saved");
+  assert.deepEqual(restoredPositions.nodePositions["src/main.py"], expectedNodePosition, "reopening a workspace must not overwrite its restored graph coordinate with an empty or newly laid-out position");
+  assert.ok(second.nodePositionWrites.every((positions) => positions["src/main.py"] && positions["src/main.py"].x === expectedNodePosition.x && positions["src/main.py"].y === expectedNodePosition.y),
+    `automatic saves after restoration must preserve the saved coordinate: ${JSON.stringify(second.nodePositionWrites)}`);
   const restoredRepository = await second.page.evaluate(async (repositoryId) => {
     const origin = window.__REPOLENS_RUNTIME__?.apiOrigin;
     return fetch(`${origin}/api/snapshot?repositoryId=${encodeURIComponent(repositoryId)}`).then((response) => response.json());
@@ -320,6 +433,9 @@ try {
   await second.page.locator(".question-message.is-stale").first().waitFor({ state: "visible" });
   await assertDisabled(second.page.locator(".question-message.is-stale .question-references button").first(), "expired question references cannot navigate");
   await second.page.getByRole("button", { name: "导览已完成" }).waitFor({ state: "visible" });
+
+  await second.page.getByRole("button", { name: "重置布局" }).click();
+  await waitForWorkspace(second, recentEntry.id, (state) => !Object.keys(state.nodePositions ?? {}).length, "explicit reset clears saved graph coordinates");
 
   await second.page.getByRole("button", { name: "清除此仓库的保存数据" }).click();
   await second.page.getByText("已清除此仓库的本地保存结果、路线、进度和节点位置。", { exact: true }).waitFor({ state: "visible" });
@@ -342,7 +458,7 @@ try {
   await writeFile(path.join(userDataPath, "workspace-v1.json"), "{", "utf8");
   const missingGit = path.join(temporaryRoot, "missing-git.exe");
   const third = await launch({ gitExecutable: missingGit });
-  await third.page.getByText("桌面保存数据不可用，本次继续使用内存", { exact: false }).waitFor({ state: "visible", timeout: 20_000 });
+  await third.page.getByText("桌面保存数据读取失败", { exact: false }).waitFor({ state: "visible", timeout: 20_000 });
   const quarantined = await readdir(userDataPath);
   assert.ok(quarantined.some((name) => name.startsWith("workspace-v1.json.corrupt-")), "damaged workspace data is quarantined for recovery");
   await third.page.locator("#repository-path").fill(repositoryPath);
@@ -360,7 +476,12 @@ try {
   }
   await third.page.getByRole("treeitem", { name: "main.py" }).waitFor({ state: "visible" });
   await quit(third);
-  process.stdout.write("Desktop smoke passed: real UI AI previews, cached explanation, route and two-turn cited Q&A; persistence and stale-reference checks across restart; Python/Go indexing; damaged-store recovery; missing-Git guidance; data clearing; graceful exit.\n");
+  const fourth = await launch();
+  await fourth.page.locator("#repository-path").fill(repositoryPath);
+  await fourth.page.getByRole("button", { name: "打开仓库", exact: true }).click();
+  await fourth.page.getByRole("treeitem", { name: "main.py" }).waitFor({ state: "visible", timeout: 20_000 });
+  await crashBackendAndAssertFailure(fourth);
+  process.stdout.write("Desktop smoke passed: single-instance launch; backend crash notification and failure exit; real UI AI previews, cached explanation, route and two-turn cited Q&A; persistence and stale-reference checks across restart; Python/Go indexing; damaged-store recovery; missing-Git guidance; data clearing; graceful exit.\n");
 } finally {
   for (const record of children) {
     if (record.child.exitCode !== null) continue;

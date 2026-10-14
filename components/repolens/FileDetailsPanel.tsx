@@ -43,12 +43,12 @@ function ReferenceButton({ icon, title, caption, onClick }: { icon: ReactNode; t
   return <button className="reference-row" onClick={onClick}><span className="reference-icon">{icon}</span><span className="reference-copy"><strong>{title}</strong><small>{caption}</small></span><ChevronRight size={14} className="reference-arrow" /></button>;
 }
 
-export function FileDetailsPanel({ repository, currentFile, filesById, mobileView, detailTab, onDetailTabChange, onOpenReference,
+export function FileDetailsPanel({ repository, currentFile, filesById, mobileView, detailTab, onDetailTabChange, onOpenReference, backendAvailable = true,
   aiSettings, aiSettingsBusy, onBaseUrlChange, onModelChange, onApiKeyChange, onSaveSettings, onPreviewAi, aiBusy, aiPreview, aiCandidates,
   pendingAiMode, selectedAiFiles, selectedAiRanges, onToggleAiFile, onAiRangeChange, onGenerateAi, onCancelAi, aiMessage, aiSettingsReadError, aiSettingsSaveError, aiResult, aiStale,
   sourceText, sourceStatus, sourceError, focusedLine, onClearFocus, codeViewportRef,
 }: {
-  repository: RepositorySnapshot; currentFile: FileRecord; filesById: Map<string, FileRecord>; mobileView: "files" | "graph" | "details"; detailTab: string;
+  repository: RepositorySnapshot; currentFile: FileRecord; filesById: Map<string, FileRecord>; mobileView: "files" | "graph" | "details"; detailTab: string; backendAvailable?: boolean;
   onDetailTabChange: (tab: string) => void; onOpenReference: (reference: SourceReference) => void;
   aiSettings: { baseUrl: string; model: string; apiKey: string; configured: boolean };
   aiSettingsBusy: boolean;
@@ -87,12 +87,13 @@ export function FileDetailsPanel({ repository, currentFile, filesById, mobileVie
         {repository.source === "local" && <section className="ai-panel">
           <h3>AI 讲解（按需生成）</h3>
           <form onSubmit={onSaveSettings} className="ai-settings-form">
-            <input aria-label="兼容服务地址" placeholder="https://api.example.com/v1" value={aiSettings.baseUrl} onChange={(event) => onBaseUrlChange(event.target.value)} />
-            <input aria-label="模型名称" placeholder="模型名称" value={aiSettings.model} onChange={(event) => onModelChange(event.target.value)} />
-            <input aria-label="API 密钥" type="password" autoComplete="off" placeholder={aiSettings.configured ? "密钥已在本地服务中配置" : "API 密钥（仅存于本地服务内存）"} value={aiSettings.apiKey} onChange={(event) => onApiKeyChange(event.target.value)} />
-            <button type="submit" disabled={aiSettingsBusy}>{aiSettingsBusy ? "正在保存…" : "保存本地配置"}</button>
+            <input aria-label="兼容服务地址" placeholder="https://api.example.com/v1" value={aiSettings.baseUrl} disabled={!backendAvailable} onChange={(event) => onBaseUrlChange(event.target.value)} />
+            <input aria-label="模型名称" placeholder="模型名称" value={aiSettings.model} disabled={!backendAvailable} onChange={(event) => onModelChange(event.target.value)} />
+            <input aria-label="API 密钥" type="password" autoComplete="off" placeholder={aiSettings.configured ? "密钥已在本地服务中配置" : "API 密钥（仅存于本地服务内存）"} value={aiSettings.apiKey} disabled={!backendAvailable} onChange={(event) => onApiKeyChange(event.target.value)} />
+            <button type="submit" disabled={aiSettingsBusy || !backendAvailable}>{aiSettingsBusy ? "正在保存…" : "保存本地配置"}</button>
           </form>
-          <div className="ai-actions"><button type="button" onClick={() => onPreviewAi("explanation")} disabled={aiBusy || !repository.files.length}>生成当前文件讲解</button><button type="button" onClick={() => onPreviewAi("route")} disabled={aiBusy || !repository.files.length}>生成阅读路线</button></div>
+          {!backendAvailable && <p role="alert" className="ai-feedback">本地索引服务已停止。请关闭并重新启动 RepoLens 后继续使用本地功能。</p>}
+          <div className="ai-actions"><button type="button" onClick={() => onPreviewAi("explanation")} disabled={!backendAvailable || aiBusy || !repository.files.length}>生成当前文件讲解</button><button type="button" onClick={() => onPreviewAi("route")} disabled={!backendAvailable || aiBusy || !repository.files.length}>生成阅读路线</button></div>
           {aiCandidates.length > 0 && pendingAiMode && <div className="ai-scope-picker">
             <strong>选择发送范围</strong><p>必须保留当前文件；最多 12 个文件、60,000 字符。可用行范围缩小单个文件。</p>
             {aiCandidates.map((candidate) => {
@@ -111,13 +112,13 @@ export function FileDetailsPanel({ repository, currentFile, filesById, mobileVie
                 {selectedOversizedLines.length > 0 && <small role="alert">所选范围包含超长单行，需调整起止行将其排除。</small>}
               </label>;
             })}
-            <button type="button" onClick={() => onPreviewAi(pendingAiMode, selectedAiFiles)} disabled={aiBusy || selectedAiFiles.length === 0 || aiCandidates.some((candidate) => {
+            <button type="button" onClick={() => onPreviewAi(pendingAiMode, selectedAiFiles)} disabled={!backendAvailable || aiBusy || selectedAiFiles.length === 0 || aiCandidates.some((candidate) => {
               if (!selectedAiFiles.includes(candidate.fileId)) return false;
               const range = selectedAiRanges[candidate.fileId] ?? { startLine: 1, endLine: candidate.lineCount };
               return candidate.oversizedLines.some((line) => line >= range.startLine && line <= range.endLine);
             })}>预览所选范围</button>
           </div>}
-          {aiPreview && <div className="ai-consent"><strong>发送前确认</strong><p>目标服务：{aiPreview.baseUrl} · 模型：{aiPreview.model}。将把 {aiPreview.files.length} 个文件、共 {aiPreview.characters.toLocaleString()} 个字符发送至该服务：</p><ul>{aiPreview.files.map((file) => <li key={file.fileId}>{file.fileId}（第 {file.startLine}–{file.endLine} 行）</li>)}</ul>{!aiSettings.configured ? <p>请先保存完整的本地模型配置并重新预览。</p> : <button onClick={onGenerateAi} disabled={aiBusy}>{aiBusy ? "正在请求…" : "确认发送并生成"}</button>}<button className="ai-cancel" onClick={onCancelAi}>{aiBusy ? "取消请求" : "取消"}</button></div>}
+          {aiPreview && <div className="ai-consent"><strong>发送前确认</strong><p>目标服务：{aiPreview.baseUrl} · 模型：{aiPreview.model}。将把 {aiPreview.files.length} 个文件、共 {aiPreview.characters.toLocaleString()} 个字符发送至该服务：</p><ul>{aiPreview.files.map((file) => <li key={file.fileId}>{file.fileId}（第 {file.startLine}–{file.endLine} 行）</li>)}</ul>{!aiSettings.configured ? <p>请先保存完整的本地模型配置并重新预览。</p> : <button onClick={onGenerateAi} disabled={!backendAvailable || aiBusy}>{aiBusy ? "正在请求…" : "确认发送并生成"}</button>}<button className="ai-cancel" onClick={onCancelAi}>{aiBusy ? "取消请求" : "取消"}</button></div>}
           {aiSettingsReadError && <p className="ai-feedback ai-settings-read-error" role="alert"><strong>读取本地模型配置失败：</strong>{aiSettingsReadError}</p>}
           {aiSettingsSaveError && <p className="ai-feedback ai-settings-save-error" role="alert"><strong>保存本地模型配置失败：</strong>{aiSettingsSaveError}</p>}
           {aiMessage && <p className="ai-feedback" role="status">{aiMessage}</p>}
@@ -134,7 +135,7 @@ export function FileDetailsPanel({ repository, currentFile, filesById, mobileVie
         </div>}
         <button className="show-source-link" onClick={() => onOpenReference({ fileId: currentFile.id, line: 1 })}><Code2 size={14} />查看完整源码<ChevronRight size={14} /></button>
       </TabsContent>
-      {repository.source === "local" && <TabsContent value="questions" className="detail-scroll question-scroll"><QuestionPanel repository={repository} currentFile={currentFile} filesById={filesById} onOpenReference={onOpenReference} /></TabsContent>}
+      {repository.source === "local" && <TabsContent value="questions" className="detail-scroll question-scroll"><QuestionPanel repository={repository} currentFile={currentFile} filesById={filesById} onOpenReference={onOpenReference} backendAvailable={backendAvailable} /></TabsContent>}
       <TabsContent value="source" className="detail-scroll source-scroll" ref={codeViewportRef}>
         <div className="source-meta"><span>{(currentFile.language ?? (currentFile.kind === "style" ? "css" : "text")).toUpperCase()} 源文件</span><span>{sourceStatus === "loading" ? "读取中" : sourceStatus === "error" ? "读取失败" : `${sourceLines.length} 行`}</span></div>
         {sourceStatus === "loading" ? <div className="source-loading" role="status">正在从本地服务读取源码…</div> : sourceStatus === "error" ? <div className="source-loading" role="alert">{sourceError ?? "无法读取源码。"}</div> : sourceText.length === 0 ? <div className="source-loading">{repository.files.length ? "这是一个空源码文件。" : "仓库中没有可显示的源码文件。"}</div> : <pre className="source-code" aria-label={`${currentFile.path} 源码`}><code>{sourceLines.map(({ number, segments }) => {
