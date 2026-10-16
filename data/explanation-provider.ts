@@ -5,7 +5,7 @@ import { localApiOrigin } from "./runtime-config";
 const LOCAL_API_ORIGIN = localApiOrigin();
 
 export type AiMode = "explanation" | "route" | "question";
-export type AiScopeCandidate = { fileId: string; characters: number; lineCount: number; oversizedLines: number[] };
+export type AiScopeCandidate = { fileId: string; characters: number; lineCount: number; oversizedLines: number[]; reasons?: string[] };
 export type AiLineRange = { startLine: number; endLine: number };
 export type AiPreviewResponse = { scopeRequired: false; preview: AiPreview } | { scopeRequired: true; candidates: AiScopeCandidate[]; maxFiles: number; maxCharacters: number; retrievalInsufficient?: boolean };
 export type AiGenerationResult = { result: Record<string, unknown>; cached: boolean; revision: string; repositoryId: string; entryFileId: string; mode: AiMode };

@@ -88,7 +88,7 @@ test("GitHub link opens the selected tree, confirms only a previewed AI scope, a
   await page.getByRole("tab", { name: "源码", exact: true }).click();
   await expect(page.locator(".source-code")).toContainText("export const main = value + 1;");
   await page.setViewportSize({ width: 375, height: 812 });
-  await page.getByRole("button", { name: "文件" }).click();
+  await page.getByRole("button", { name: "文件", exact: true }).click();
   await expect(page.getByLabel("GitHub 来源信息")).toBeVisible();
   await expect(page.getByText("refs/heads/feature/ui", { exact: false })).toBeVisible();
 });

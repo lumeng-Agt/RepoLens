@@ -14,9 +14,15 @@ test("cached and generated AI results share one strict response envelope", () =>
 });
 
 test("scope-required preview responses identify oversized lines for every candidate", () => {
-  const response = { scopeRequired: true, candidates: [{ fileId: "src/main.ts", characters: 70_000, lineCount: 20, oversizedLines: [4] }], maxFiles: 12, maxCharacters: 60_000 };
+  const response = { scopeRequired: true, candidates: [{ fileId: "src/main.ts", characters: 70_000, lineCount: 20, oversizedLines: [4], reasons: ["当前文件", "源码包含问题关键词"] }], maxFiles: 12, maxCharacters: 60_000 };
   assert.equal(AiPreviewResponseSchema.safeParse(response).success, true);
   assert.equal(AiPreviewResponseSchema.safeParse({ ...response, candidates: [{ fileId: "", characters: -1, lineCount: 0, oversizedLines: [0] }] }).success, false);
   assert.equal(AiPreviewResponseSchema.safeParse({ ...response, candidates: [{ fileId: "src/main.ts", characters: 1, lineCount: 3, oversizedLines: [4] }] }).success, false);
   assert.equal(AiPreviewResponseSchema.safeParse({ ...response, unsafe: true }).success, false);
+});
+
+test("preview envelopes accept an explicitly approximate token estimate", () => {
+  const base = { scopeRequired: false, preview: { id: "preview", repositoryId: "repo", revision: "rev", entryFileId: "src/main.ts", mode: "question", baseUrl: "http://localhost/v1", model: "test", files: [], characters: 20, expiresAt: 2_000_000_000_000 } };
+  assert.equal(AiPreviewResponseSchema.safeParse({ ...base, preview: { ...base.preview, tokenEstimate: 8 } }).success, true);
+  assert.equal(AiPreviewResponseSchema.safeParse({ ...base, preview: { ...base.preview, tokenEstimate: -1 } }).success, false);
 });

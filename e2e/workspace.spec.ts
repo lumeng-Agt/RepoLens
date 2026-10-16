@@ -4,6 +4,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { isGraphNodeWithinBounds, waitForStableGraphGeometry } from "./helpers/graph-geometry";
+import { installResizeObserverProbe } from "./helpers/resize-observer-probe";
 
 async function enableProgressTrace(page: import("@playwright/test").Page) {
   await page.addInitScript(() => {
@@ -269,6 +270,7 @@ test("AI preview sends nothing before confirmation and stale generation cannot l
   temporaryRepository = await mkdtemp(path.join(os.tmpdir(), "repolens-browser-ai-"));
   await writeFile(path.join(temporaryRepository, "main.ts"), 'import { value } from "./lib";\nexport const current = value;\n');
   await writeFile(path.join(temporaryRepository, "lib.ts"), "export const value = 1;\n");
+  const resizeProbe = await installResizeObserverProbe(page);
   await page.goto("/");
   await expect(page.locator(".graph-file-card").first()).toBeVisible();
   const pathInput = page.getByLabel("本地仓库路径");
@@ -313,4 +315,5 @@ test("AI preview sends nothing before confirmation and stale generation cannot l
   await expect(page.getByText("引用关联源码已变化，当前结果已过期，不能跳转。")).toBeVisible({ timeout: 10_000 });
   await expect(page.getByRole("button", { name: "下一步" })).toBeDisabled();
   expect(modelCalls).toBe(3);
+  expect(await resizeProbe.errors(), resizeProbe.logs.join("\n")).toEqual([]);
 });

@@ -184,7 +184,8 @@ try {
   });
   page = await browserContext.newPage();
   const pageErrors = [];
-  page.on("pageerror", (error) => pageErrors.push(error.message));
+  page.on("pageerror", (error) => { pageErrors.push(error.message); process.stderr.write(`Browser page error: ${error.message}\n`); });
+  page.on("console", (message) => { if (message.type() === "error") { pageErrors.push(`console: ${message.text()}`); process.stderr.write(`Browser console error: ${message.text()}\n`); } });
   page.setDefaultTimeout(15_000);
 
   await page.goto(uiOrigin, { waitUntil: "domcontentloaded" });

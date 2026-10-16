@@ -150,6 +150,9 @@ test("local API protects source paths, streams file updates, and gates AI genera
   assert.equal(questionPreviewResponse.status, 200, questionPreviewBody.error);
   assert.equal(questionPreviewBody.preview.mode, "question");
   assert.equal(questionPreviewBody.preview.question, "What does main do?");
+  assert.ok(Number.isInteger(questionPreviewBody.preview.tokenEstimate) && questionPreviewBody.preview.tokenEstimate > 0);
+  const entryFilePreview = questionPreviewBody.preview.files.find((file) => file.fileId === questionPreviewBody.preview.entryFileId);
+  assert.ok(entryFilePreview.reasons.includes("当前文件"));
   const callsBeforeQuestionConfirmation = modelCalls.length;
   assert.equal(callsBeforeQuestionConfirmation, 4, "creating a question preview does not call the model");
   const questionResponse = await generate(questionPreviewBody.preview.id);

@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import fsPromises from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { createWorkspaceStore } from "./workspace-store.mjs";
@@ -52,4 +54,151 @@ test("workspace store keeps distinct open targets while sharing the same ref wor
   assert.deepEqual(new Set(restored.recentRepositories.map((item) => item.id)), new Set(["target-src", "target-lib"]));
   await store.removeRecent("target-src");
   assert.deepEqual((await store.get()).recentRepositories.map((item) => item.id), ["target-lib"]);
+});
+
+test("failed workspace clear leaves the confirmed state intact for later unrelated writes", async (context) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "repolens-workspace-clear-failure-"));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const store = createWorkspaceStore(directory);
+  const original = [{ id: "saved", title: "Keep me", messages: [], updatedAt: 1 }];
+  await store.saveConversations("repo", original);
+
+  const file = path.join(directory, "workspace-v1.json");
+  const backup = `${file}.backup`;
+  await rename(file, backup);
+  await mkdir(file);
+
+  const failedClear = await store.clearRepository("repo");
+  assert.equal(failedClear.persisted, false, "the simulated replacement failure must be reported");
+  assert.deepEqual((await store.getRepository("repo")).conversations, original, "failed clear must not change the confirmed in-memory view");
+
+  await rm(file, { recursive: true });
+  await rename(backup, file);
+  const unrelatedWrite = await store.saveNodePositions("other-repo", { "src/main.ts": { x: 1, y: 2 } });
+  assert.equal(unrelatedWrite.persisted, true);
+  const persisted = JSON.parse(await readFile(file, "utf8"));
+  assert.deepEqual(persisted.conversations.repo, original, "an unrelated successful write must not flush a failed clear");
+});
+
+test("a transient initial read failure retries before any write can replace the saved workspace", async (context) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "repolens-workspace-read-retry-"));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const file = path.join(directory, "workspace-v1.json");
+  const original = [{ id: "saved", title: "Keep me", messages: [], updatedAt: 1 }];
+  const seed = createWorkspaceStore(directory);
+  assert.equal((await seed.saveConversations("repo", original)).persisted, true);
+
+  const actualReadFile = fsPromises.readFile;
+  const actualRename = fsPromises.rename;
+  let denyRead = true;
+  fsPromises.readFile = async (fileName, ...args) => {
+    if (denyRead && fileName === file) throw Object.assign(new Error("controlled transient read denial"), { code: "EACCES" });
+    return actualReadFile(fileName, ...args);
+  };
+  fsPromises.rename = async (from, to) => {
+    if (from === file && denyRead) throw Object.assign(new Error("controlled quarantine denial"), { code: "EACCES" });
+    return actualRename(from, to);
+  };
+  syncBuiltinESMExports();
+  try {
+    const store = createWorkspaceStore(directory);
+    const failedRead = await store.getRepository("repo");
+    assert.match(failedRead.warning, /无法读取本地保存数据/);
+
+    denyRead = false;
+    const restored = await store.getRepository("repo");
+    assert.deepEqual(restored.conversations, original, "a later read must reload the intact file");
+    assert.equal((await store.saveNodePositions("other-repo", { "src/main.ts": { x: 1, y: 2 } })).persisted, true);
+    assert.deepEqual(JSON.parse(await actualReadFile(file, "utf8")).conversations.repo, original);
+    assert.deepEqual((await createWorkspaceStore(directory).getRepository("repo")).conversations, original);
+  } finally {
+    fsPromises.readFile = actualReadFile;
+    fsPromises.rename = actualRename;
+    syncBuiltinESMExports();
+  }
+});
+
+test("clear-all removes failed write copies and clear fails when an owned copy cannot be removed", async (context) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "repolens-workspace-clear-copies-"));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const store = createWorkspaceStore(directory);
+  const original = [{ id: "private-answer", title: "Sensitive saved answer", messages: [], updatedAt: 1 }];
+  assert.equal((await store.saveConversations("repo", original)).persisted, true);
+
+  const file = path.join(directory, "workspace-v1.json");
+  const backup = `${file}.backup`;
+  await rename(file, backup);
+  await mkdir(file);
+  assert.equal((await store.saveNodePositions("other-repo", { "src/main.ts": { x: 1, y: 2 } })).persisted, false);
+  await rm(file, { recursive: true, force: true });
+  await rename(backup, file);
+
+  const clear = await store.clearAll();
+  assert.equal(clear.persisted, true);
+  const remainingFiles = await readdir(directory);
+  assert.deepEqual(remainingFiles, ["workspace-v1.json"], "successful clear-all leaves no store-owned copies");
+  for (const name of remainingFiles) assert.doesNotMatch(await readFile(path.join(directory, name), "utf8"), /private-answer|Sensitive saved answer/);
+
+  assert.equal((await store.saveConversations("repo", original)).persisted, true);
+  const residue = path.join(directory, "workspace-v1.json.aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.tmp.failed");
+  const scrubTemporary = `${residue}.dddddddd-dddd-4ddd-8ddd-dddddddddddd.scrub.tmp`;
+  await writeFile(residue, JSON.stringify(original), "utf8");
+  await writeFile(scrubTemporary, JSON.stringify(original), "utf8");
+  const actualUnlink = fsPromises.unlink;
+  let denyResidueDelete = true;
+  fsPromises.unlink = async (fileName) => {
+    if (denyResidueDelete && fileName === residue) throw Object.assign(new Error("controlled residue lock"), { code: "EPERM" });
+    return actualUnlink(fileName);
+  };
+  syncBuiltinESMExports();
+  try {
+    const failedClear = await store.clearAll();
+    assert.equal(failedClear.persisted, false, "clear-all must report a failed owned-copy cleanup");
+    assert.match(failedClear.warning, /无法清理|clear/i);
+    denyResidueDelete = false;
+    const retriedClear = await store.clearAll();
+    assert.equal(retriedClear.persisted, true, "a later clear-all can retry the remaining owned copy");
+    assert.deepEqual(await readdir(directory), ["workspace-v1.json"]);
+  } finally {
+    fsPromises.unlink = actualUnlink;
+    syncBuiltinESMExports();
+  }
+});
+
+test("an unsupported store version stays intact and rejects writes until it can be read", async (context) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "repolens-workspace-version-"));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const file = path.join(directory, "workspace-v1.json");
+  const futureState = { version: 99, conversations: { repo: [{ id: "future-record" }] } };
+  await writeFile(file, JSON.stringify(futureState), "utf8");
+
+  const store = createWorkspaceStore(directory);
+  const read = await store.getRepository("repo");
+  assert.match(read.warning, /版本不受支持/);
+  assert.equal((await store.saveNodePositions("other", { x: { x: 1, y: 2 } })).persisted, false);
+  assert.deepEqual(JSON.parse(await readFile(file, "utf8")), futureState);
+  assert.deepEqual(await readdir(directory), ["workspace-v1.json"]);
+});
+
+test("clear-current scrubs only its workspace from owned copies and preserves other workspace data", async (context) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "repolens-workspace-clear-current-copies-"));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const store = createWorkspaceStore(directory);
+  const target = [{ id: "target-answer", title: "Target", messages: [], updatedAt: 1 }];
+  const other = [{ id: "other-answer", title: "Other", messages: [], updatedAt: 2 }];
+  await store.saveConversations("target", target);
+  await store.saveConversations("other", other);
+  const canonical = JSON.parse(await readFile(path.join(directory, "workspace-v1.json"), "utf8"));
+  const copyPath = path.join(directory, "workspace-v1.json.bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.tmp.failed");
+  await writeFile(copyPath, JSON.stringify(canonical), "utf8");
+
+  const result = await store.clearRepository("target");
+  assert.equal(result.persisted, true);
+  const canonicalAfter = JSON.parse(await readFile(path.join(directory, "workspace-v1.json"), "utf8"));
+  const copyAfter = JSON.parse(await readFile(copyPath, "utf8"));
+  for (const saved of [canonicalAfter, copyAfter]) {
+    assert.equal(saved.conversations.target, undefined);
+    assert.deepEqual(saved.conversations.other, other);
+  }
+  assert.deepEqual((await createWorkspaceStore(directory).getRepository("other")).conversations, other);
 });

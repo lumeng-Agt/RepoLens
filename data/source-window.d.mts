@@ -1,0 +1,1 @@
+export function visibleLineWindow(input: { lineCount: number; scrollTop: number; viewportHeight: number; rowHeight?: number; headerHeight?: number; overscan?: number }): { start: number; end: number; top: number; bottom: number };

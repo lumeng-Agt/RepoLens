@@ -178,10 +178,15 @@ export function sites({ mockAuth = true } = {}): Plugin {
       const drizzleSource = resolve(root, "drizzle");
 
       await rm(outputDirectory, { recursive: true, force: true });
-      await mkdir(outputDirectory, { recursive: true });
+      const hasHostingConfig = await exists(hostingConfig);
+      const hasDrizzleSource = await exists(drizzleSource);
+      if (!hasHostingConfig && !hasDrizzleSource) return;
 
-      await cp(hostingConfig, resolve(outputDirectory, "hosting.json"));
-      if (await exists(drizzleSource)) {
+      await mkdir(outputDirectory, { recursive: true });
+      if (hasHostingConfig) {
+        await cp(hostingConfig, resolve(outputDirectory, "hosting.json"));
+      }
+      if (hasDrizzleSource) {
         await cp(drizzleSource, resolve(outputDirectory, "drizzle"), {
           recursive: true,
         });

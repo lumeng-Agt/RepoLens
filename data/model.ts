@@ -81,8 +81,9 @@ export type AiPreview = {
   mode: "explanation" | "route" | "question";
   baseUrl: string;
   model: string;
-  files: { fileId: string; startLine: number; endLine: number; contentHash: string }[];
+  files: { fileId: string; startLine: number; endLine: number; contentHash: string; reasons?: string[] }[];
   characters: number;
+  tokenEstimate?: number;
   expiresAt: number;
   question?: string;
   history?: { role: "user" | "assistant"; content: string }[];

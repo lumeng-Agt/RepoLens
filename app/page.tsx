@@ -10,11 +10,14 @@ import {
 import dagre from "@dagrejs/dagre";
 import {
   BookOpenText,
+  ArrowLeft,
+  ArrowRight,
   Folder,
   GitBranch,
   ListTree,
-  Sparkles,
+  Search,
   Waypoints,
+  Sparkles,
 } from "lucide-react";
 import {
   useCallback,
@@ -39,6 +42,10 @@ import { DirectoryPanel } from "@/components/repolens/DirectoryPanel";
 import { FileDetailsPanel } from "@/components/repolens/FileDetailsPanel";
 import { parseTourProgress } from "@/data/tour-progress.mjs";
 import { createProgressSessionGate } from "@/data/progress-session.mjs";
+import { clearAllQuestionConversations, clearQuestionConversationWorkspace } from "@/data/question-recovery.mjs";
+import { enqueueWorkspacePersistence } from "@/data/workspace-persistence.mjs";
+import { emptyNavigationHistory, moveNavigationHistory, pushNavigationHistory } from "@/data/navigation-history.mjs";
+import { QuickOpenDialog } from "@/components/repolens/QuickOpenDialog";
 import type {
   FileRecord,
   AiPreview,
@@ -153,6 +160,37 @@ function writeTourProgress(key: string, value: string) {
   } catch { return false; }
 }
 
+function stageBrowserProgressClear(workspaceId?: string) {
+  const localPrefix = workspaceId ? `repolens:${workspaceId}:` : "repolens:";
+  const cookiePrefix = workspaceId ? `repolens_${workspaceId.replaceAll(/[^a-zA-Z0-9_-]/g, "_")}_` : "repolens_";
+  const localEntries: [string, string][] = [];
+  const cookieEntries: [string, string][] = [];
+  for (const key of Object.keys(window.localStorage)) {
+    if (!key.startsWith(localPrefix)) continue;
+    const value = window.localStorage.getItem(key);
+    if (value !== null) localEntries.push([key, value]);
+  }
+  for (const part of document.cookie.split(";")) {
+    const [name, ...value] = part.trim().split("=");
+    if (name.startsWith(cookiePrefix)) cookieEntries.push([name, value.join("=")]);
+  }
+  const restore = () => {
+    for (const [key, value] of localEntries) window.localStorage.setItem(key, value);
+    for (const [name, value] of cookieEntries) document.cookie = `${name}=${value}; Path=/; Max-Age=31536000; SameSite=Lax`;
+  };
+  try {
+    for (const [key] of localEntries) window.localStorage.removeItem(key);
+    for (const [name] of cookieEntries) document.cookie = `${name}=; Path=/; Max-Age=0; SameSite=Lax`;
+    const remainingLocal = localEntries.some(([key]) => window.localStorage.getItem(key) !== null);
+    const remainingCookies = cookieEntries.some(([name]) => document.cookie.split(";").some((part) => part.trim().startsWith(`${name}=`)));
+    if (remainingLocal || remainingCookies) throw new Error("浏览器中的阅读进度未能清除。");
+  } catch (error) {
+    try { restore(); } catch { /* Keep the original clearing error and report it to the user. */ }
+    throw new Error(`无法清除浏览器中的阅读进度：${error instanceof Error ? error.message : String(error)}`);
+  }
+  return restore;
+}
+
 function traceProgress(event: string, key: string, generation: number, details: Record<string, string | number | null> = {}) {
   if (typeof window === "undefined" || new URLSearchParams(window.location.search).get("repolensDebugProgress") !== "1") return;
   window.dispatchEvent(new CustomEvent("repolens:progress-trace", { detail: { event, key, generation, ...details, at: performance.now() } }));
@@ -191,6 +229,7 @@ function layoutGraph(
       id: file.id,
       type: "fileCard",
       deletable: false,
+      measured: { width: compact ? 140 : 160, height: compact ? 60 : 68 },
       position: nodePositions.get(`${repositoryWorkspaceId(snapshot)}:${file.id}`) ?? { x: position.x - (compact ? 70 : 80), y: position.y - (compact ? 30 : 34) },
       data: { file, selected: file.id === selectedId, compact },
       selected: file.id === selectedId,
@@ -198,7 +237,9 @@ function layoutGraph(
   });
 
   const edges: Edge[] = visibleDependencies.map((dependency) => {
-    const connected = dependency.fromId === selectedId || dependency.toId === selectedId;
+    const importsFromCurrent = dependency.fromId === selectedId;
+    const importsCurrent = dependency.toId === selectedId;
+    const connected = importsFromCurrent || importsCurrent;
     return {
       id: dependency.id,
       deletable: false,
@@ -208,9 +249,9 @@ function layoutGraph(
       animated: false,
       markerEnd: { type: MarkerType.ArrowClosed, width: 14, height: 14 },
       style: {
-        stroke: connected ? "#9bb5df" : "#6c7787",
+        stroke: importsFromCurrent ? "#a8c68e" : importsCurrent ? "#9bb5df" : "#6c7787",
         strokeWidth: connected ? 1.8 : 1.15,
-        opacity: connected ? 1 : 0.72,
+        opacity: connected ? 1 : 0.2,
       },
     };
   });
@@ -250,10 +291,15 @@ function AppShell() {
   const setGraphDirectory = useCallback((value: string) => dispatchNavigation({ type: "directory", value }), []);
   const [detailTab, setDetailTab] = useState("guide");
   const [searchQuery, setSearchQuery] = useState("");
+  const [quickOpen, setQuickOpen] = useState(false);
+  const [layoutMode, setLayoutMode] = useState<"structure" | "reading">("structure");
+  const [navigationHistory, setNavigationHistory] = useState(emptyNavigationHistory);
   const [repoPath, setRepoPath] = useState("");
   const [desktopMode] = useState(() => Boolean(globalThis.__REPOLENS_RUNTIME__?.desktop));
   const [desktopBackendError, setDesktopBackendError] = useState("");
   const [repoBusy, setRepoBusy] = useState(false);
+  const [savedDataClearBusy, setSavedDataClearBusy] = useState(false);
+  const [questionClearVersion, setQuestionClearVersion] = useState(0);
   const [repoMessage, setRepoMessage] = useState("");
   const [loadedSource, setLoadedSource] = useState<{ fileId: string; repositoryId: string; revision?: string; text: string } | null>(null);
   const [sourceLoad, setSourceLoad] = useState<{ key: string; status: "loading" | "loaded" | "error"; message?: string } | null>(null);
@@ -310,7 +356,6 @@ function AppShell() {
   useLayoutEffect(() => { nodePositionsRef.current = nodePositions; }, [nodePositions]);
   const nodePositionsPersisted = useRef(new Map<string, string>());
   const dirtyNodePositions = useRef(new Map<string, Set<string>>());
-  const nodePositionSaveQueues = useRef(new Map<string, Promise<void>>());
   const pendingNodePositionRestore = useRef<{ key: string; workspaceId: string; signature: string } | null>(null);
   const [nodePositionsReadyKey, setNodePositionsReadyKey] = useState<string | null>(null);
   const [workspacePersistenceReadyKeys, setWorkspacePersistenceReadyKeys] = useState(new Set<string>());
@@ -413,7 +458,7 @@ function AppShell() {
   }, [nodePositions, workspaceId]);
 
   useEffect(() => {
-    if (!desktopMode || repository.id === BOOT_SNAPSHOT.id) return;
+    if (!desktopMode || savedDataClearBusy || repository.id === BOOT_SNAPSHOT.id) return;
     const positionsKey = nodePositionSessionKey(repository);
     if (nodePositionsReadyKey !== positionsKey) return;
     const timer = window.setTimeout(() => {
@@ -423,8 +468,7 @@ function AppShell() {
       }));
       const serialized = nodePositionSignature(positions);
       if (serialized === nodePositionsPersisted.current.get(positionsKey)) return;
-      const queue = nodePositionSaveQueues.current;
-      const save = (queue.get(positionsKey) ?? Promise.resolve()).catch(() => {}).then(async () => {
+      const save = enqueueWorkspacePersistence(workspaceId, async () => {
         if (!workspacePersistenceReadyKeys.has(positionsKey)) return;
         await localWorkspaceProvider.saveNodePositions(workspaceSession(repository), positions);
         nodePositionsPersisted.current.set(positionsKey, serialized);
@@ -434,13 +478,12 @@ function AppShell() {
         }));
         if (nodePositionSignature(currentPositions) === serialized) dirtyNodePositions.current.delete(workspaceId);
       });
-      queue.set(positionsKey, save);
       void save.catch((error: Error) => {
         if (activeNodePositionKeyRef.current === positionsKey) setRepoMessage(`节点位置只保存在当前页面：${error.message}`);
       });
     }, 450);
     return () => window.clearTimeout(timer);
-  }, [desktopMode, nodePositions, nodePositionsReadyKey, repository, repository.id, workspaceId, workspacePersistenceReadyKeys]);
+  }, [desktopMode, nodePositions, nodePositionsReadyKey, repository, repository.id, workspaceId, workspacePersistenceReadyKeys, savedDataClearBusy]);
 
   useEffect(() => {
     let cancelled = false;
@@ -498,12 +541,14 @@ function AppShell() {
     setNodes((previous) => initialLayout.nodes.map((node) => {
       const existing = previous.find((candidate) => candidate.id === node.id);
       const position = !shouldReset ? nodePositions.get(`${workspaceId}:${node.id}`) ?? (sameWorkspace ? existing?.position : undefined) ?? node.position : node.position;
-      return { ...node, ...(existing?.measured ? { measured: existing.measured } : {}), position, selected: node.id === selectedFileId, data: { ...node.data, selected: node.id === selectedFileId } };
+      const dimensionsMatch = existing?.measured?.width === node.measured?.width && existing?.measured?.height === node.measured?.height;
+      return { ...node, ...(dimensionsMatch && existing?.measured ? { measured: existing.measured } : {}), position, selected: node.id === selectedFileId, data: { ...node.data, selected: node.id === selectedFileId } };
     }));
     layoutOwner.current = { version: layoutVersion, repositoryId: workspaceId };
   }, [initialLayout, repository.id, workspaceId, repository.files, layoutVersion, selectedFileId, setNodes, nodePositions]);
 
   const onNodesChange = useCallback((changes: Parameters<typeof onNodesChangeBase>[0]) => {
+    if (savedDataClearBusy) return;
     for (const change of changes) if (change.type === "position" && change.position) {
       setNodePositions((previous) => new Map(previous).set(`${workspaceId}:${change.id}`, change.position!));
       const positionsKey = nodePositionSessionKey(repository);
@@ -514,9 +559,9 @@ function AppShell() {
       }
     }
     onNodesChangeBase(changes);
-  }, [desktopMode, onNodesChangeBase, repository, workspaceId, workspacePersistenceReadyKeys]);
+  }, [desktopMode, onNodesChangeBase, repository, workspaceId, workspacePersistenceReadyKeys, savedDataClearBusy]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const updateLayout = () => setNarrowLayout((previous) => previous === (window.innerWidth <= 860) ? previous : window.innerWidth <= 860);
     updateLayout();
     window.addEventListener("resize", updateLayout);
@@ -592,10 +637,10 @@ function AppShell() {
     const saved = writeTourProgress(activeProgressKey, value);
     traceProgress("save", activeProgressKey, progressSession.current.current().generation, { outcome: saved ? "persistent" : "memory-only", stepIndex: tourIndex });
     if (!saved) window.setTimeout(() => setRepoMessage("浏览器存储不可用，本次阅读进度只保存在当前页面。"), 0);
-    if (desktopMode && repository.id !== BOOT_SNAPSHOT.id && workspacePersistenceReadyKeys.has(nodePositionSessionKey(repository))) {
-      void localWorkspaceProvider.saveProgress(workspaceSession(repository), activeProgressKey, value).catch((error: Error) => setRepoMessage(`阅读进度只保存在当前页面：${error.message}`));
+    if (desktopMode && !savedDataClearBusy && repository.id !== BOOT_SNAPSHOT.id && workspacePersistenceReadyKeys.has(nodePositionSessionKey(repository))) {
+      void enqueueWorkspacePersistence(workspaceId, () => localWorkspaceProvider.saveProgress(workspaceSession(repository), activeProgressKey, value)).catch((error: Error) => setRepoMessage(`阅读进度只保存在当前页面：${error.message}`));
     }
-  }, [tourIndex, completedSteps, activeProgressKey, desktopMode, repository, repository.id, workspacePersistenceReadyKeys]);
+  }, [tourIndex, completedSteps, activeProgressKey, desktopMode, repository, repository.id, workspacePersistenceReadyKeys, savedDataClearBusy, workspaceId]);
 
   useEffect(() => {
     const reference = focusedLine;
@@ -605,6 +650,10 @@ function AppShell() {
       if (target && codeViewportRef.current) {
         const viewport = codeViewportRef.current;
         viewport.scrollTo({ top: Math.max(0, target.getBoundingClientRect().top - viewport.getBoundingClientRect().top + viewport.scrollTop - 115), behavior: "smooth" });
+      } else if (codeViewportRef.current && sourceText.length > 0) {
+        // Long files render only visible rows; move the viewport first so the
+        // requested source line is mounted by the virtual list.
+        codeViewportRef.current.scrollTo({ top: Math.max(0, 45 + (reference.line - 1) * 24 - 115), behavior: "smooth" });
       }
     });
     return () => window.cancelAnimationFrame(frame);
@@ -697,6 +746,7 @@ function AppShell() {
   }, [desktopMode, clearAiContext]);
 
   const openRepositoryPath = useCallback(async (path: string) => {
+    if (savedDataClearBusy) return;
     const command = nextRepositoryCommand();
     const requestId = openRequestGate.current.begin();
     openRequestController.current?.abort();
@@ -731,7 +781,7 @@ function AppShell() {
         setRepoMessage(workspaceWarning ? `仓库已打开；保存数据读取失败，修改暂存于当前页面，原记录不会覆盖：${workspaceWarning}` : "仓库已打开，正在监听文件变化。");
         if (desktopMode) {
           try {
-            await localWorkspaceProvider.touchRecent(workspaceSession(snapshot));
+            await enqueueWorkspacePersistence(repositoryWorkspaceId(snapshot), () => localWorkspaceProvider.touchRecent(workspaceSession(snapshot)));
             const saved = await localWorkspaceProvider.get(repositoryWorkspaceId(snapshot));
             if (openRequestGate.current.isCurrent(requestId) && isCurrentRepositoryCommand(command)) setRecentRepositories(saved.recentRepositories);
           } catch (error) { if (openRequestGate.current.isCurrent(requestId)) setRepoMessage(`仓库已打开；最近记录未能保存：${error instanceof Error ? error.message : "存储不可用。"}`); }
@@ -743,7 +793,7 @@ function AppShell() {
       if (openRequestController.current === controller) openRequestController.current = null;
       if (openRequestGate.current.isCurrent(requestId) && isCurrentRepositoryCommand(command)) setRepoBusy(false);
     }
-  }, [applySnapshot, beginRepositorySession, desktopMode, restoreWorkspaceState]);
+  }, [applySnapshot, beginRepositorySession, desktopMode, restoreWorkspaceState, savedDataClearBusy]);
   const openRepository = useCallback((event: React.FormEvent) => {
     event.preventDefault();
     void openRepositoryPath(repoPath);
@@ -862,7 +912,7 @@ function AppShell() {
       const requestedZoom = Math.min(bounds.width - 48, bounds.height - 48) > 0 ? Math.min((bounds.width - 48) / box.width, (bounds.height - 48) / box.height) : 0.85;
       const zoom = Number.isFinite(requestedZoom) ? Math.max(0.85, Math.min(1.25, requestedZoom)) : 0.85;
       if (!Number.isFinite(box.x) || !Number.isFinite(box.y)) return;
-      flow.setCenter(box.x, box.y, { zoom, duration: 280 });
+      flow.setCenter(box.x, box.y, { zoom, duration: 0 });
     };
     requestAnimationFrame(locate);
   }, [flow, repository.dependencies]);
@@ -872,6 +922,8 @@ function AppShell() {
     const request = ++graphResizeRequest.current;
     let frame = 0;
     let attempts = 0;
+    let lastViewport: { x: number; y: number; zoom: number } | null = null;
+    let stableViewportFrames = 0;
     const preserveVisibleNode = () => {
       if (request !== graphResizeRequest.current) return;
       const canvas = graphCanvasRef.current;
@@ -882,10 +934,20 @@ function AppShell() {
         if (attempts++ < 120) frame = requestAnimationFrame(preserveVisibleNode);
         return;
       }
+      const currentViewport = flow.getViewport();
+      if (lastViewport && Math.abs(lastViewport.x - currentViewport.x) < 0.01 && Math.abs(lastViewport.y - currentViewport.y) < 0.01 && Math.abs(lastViewport.zoom - currentViewport.zoom) < 0.0001) {
+        stableViewportFrames += 1;
+      } else {
+        stableViewportFrames = 0;
+      }
+      lastViewport = currentViewport;
+      if (stableViewportFrames < 3) {
+        if (attempts++ < 120) frame = requestAnimationFrame(preserveVisibleNode);
+        return;
+      }
       const margin = 24;
       const width = bounds.width - margin * 2;
       const height = bounds.height - margin * 2;
-      const viewport = flow.getViewport();
       if (nodeBounds.width > width || nodeBounds.height > height) {
         focusGraphFile(selectedFileId);
         return;
@@ -897,7 +959,7 @@ function AppShell() {
         ? bounds.top + margin - nodeBounds.top
         : nodeBounds.bottom > bounds.bottom - margin ? bounds.bottom - margin - nodeBounds.bottom : 0;
       if (deltaX || deltaY) {
-        flow.setViewport({ ...viewport, x: viewport.x + deltaX, y: viewport.y + deltaY }, { duration: 180 });
+        flow.setViewport({ ...currentViewport, x: currentViewport.x + deltaX, y: currentViewport.y + deltaY }, { duration: 0 });
       }
     };
     frame = requestAnimationFrame(preserveVisibleNode);
@@ -914,59 +976,100 @@ function AppShell() {
     if (graphCanMount) return;
     graphFocusRequest.current += 1;
   }, [graphCanMount]);
+  const recordNavigation = useCallback((destination: { fileId: string; line?: number; endLine?: number }) => {
+    const current = { fileId: selectedFileId, ...(focusedLine?.fileId === selectedFileId ? { line: focusedLine.line, ...(focusedLine.endLine ? { endLine: focusedLine.endLine } : {}) } : {}) };
+    setNavigationHistory((history) => pushNavigationHistory(history, current, destination));
+  }, [selectedFileId, focusedLine]);
   const selectFile = useCallback((fileId: string, view: MobileView = "details", directoryOverride?: string) => {
+    recordNavigation({ fileId });
     clearAiContext();
     const nextDirectory = directoryOverride !== undefined ? directoryOverride : graphDirectory && !fileId.startsWith(`${graphDirectory}/`) ? "" : graphDirectory;
     dispatchNavigation({ type: "select-file", fileId, directory: nextDirectory });
-    setDetailTab("guide");
+    setDetailTab(layoutMode === "reading" ? "source" : "guide");
     setMobileView(view);
     setSearchQuery(""); focusTreeFile(fileId); focusGraphFile(fileId);
-  }, [clearAiContext, focusTreeFile, focusGraphFile, graphDirectory]);
+  }, [clearAiContext, focusTreeFile, focusGraphFile, graphDirectory, layoutMode, recordNavigation]);
 
   const openReference = useCallback((reference: SourceReference) => {
+    recordNavigation({ fileId: reference.fileId, line: reference.line, ...(reference.endLine ? { endLine: reference.endLine } : {}) });
     clearAiContext();
     const nextDirectory = graphDirectory && !reference.fileId.startsWith(`${graphDirectory}/`) ? "" : graphDirectory;
     dispatchNavigation({ type: "reference-navigation", reference, directory: nextDirectory });
     setDetailTab("source");
     setMobileView("details");
     setSearchQuery(""); focusTreeFile(reference.fileId); focusGraphFile(reference.fileId);
-  }, [clearAiContext, focusTreeFile, focusGraphFile, graphDirectory]);
+  }, [clearAiContext, focusTreeFile, focusGraphFile, graphDirectory, recordNavigation]);
 
   const openTourReference = useCallback((reference: SourceReference) => {
+    recordNavigation({ fileId: reference.fileId, line: reference.line, ...(reference.endLine ? { endLine: reference.endLine } : {}) });
     clearAiContext();
     const nextDirectory = graphDirectory && !reference.fileId.startsWith(`${graphDirectory}/`) ? "" : graphDirectory;
     dispatchNavigation({ type: "reference-navigation", reference, directory: nextDirectory, origin: "route", routeSignature: activeRouteSignature });
     setDetailTab("source"); setMobileView("details"); setSearchQuery("");
     focusTreeFile(reference.fileId); focusGraphFile(reference.fileId);
-  }, [activeRouteSignature, clearAiContext, focusTreeFile, focusGraphFile, graphDirectory]);
+  }, [activeRouteSignature, clearAiContext, focusTreeFile, focusGraphFile, graphDirectory, recordNavigation]);
+
+  const navigateHistory = useCallback((direction: -1 | 1) => {
+    const moved = moveNavigationHistory(navigationHistory, direction);
+    if (!moved.location || !filesById.has(moved.location.fileId)) return;
+    setNavigationHistory(moved.state);
+    clearAiContext();
+    const location = moved.location;
+    const nextDirectory = graphDirectory && !location.fileId.startsWith(`${graphDirectory}/`) ? "" : graphDirectory;
+    if (location.line) {
+      dispatchNavigation({ type: "reference-navigation", reference: { fileId: location.fileId, line: location.line, ...(location.endLine ? { endLine: location.endLine } : {}) }, directory: nextDirectory });
+      setDetailTab("source");
+    } else {
+      dispatchNavigation({ type: "select-file", fileId: location.fileId, directory: nextDirectory });
+      setDetailTab(layoutMode === "reading" ? "source" : "guide");
+    }
+    setMobileView("details"); setSearchQuery("");
+    focusTreeFile(location.fileId); focusGraphFile(location.fileId);
+  }, [navigationHistory, filesById, clearAiContext, graphDirectory, layoutMode, focusTreeFile, focusGraphFile]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "p") {
+        event.preventDefault(); setQuickOpen(true);
+      } else if (event.altKey && event.key === "ArrowLeft") {
+        event.preventDefault(); navigateHistory(-1);
+      } else if (event.altKey && event.key === "ArrowRight") {
+        event.preventDefault(); navigateHistory(1);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [navigateHistory]);
 
   const goToStep = useCallback((index: number, markCurrentComplete = false) => {
     const nextIndex = Math.max(0, Math.min(activeTour.length - 1, index));
-    if (!activeTour.length || aiRouteStale) return;
+    if (!activeTour.length || aiRouteStale || savedDataClearBusy) return;
     const step = activeTour[nextIndex];
+    recordNavigation({ fileId: step.reference.fileId, line: step.reference.line, ...(step.reference.endLine ? { endLine: step.reference.endLine } : {}) });
     clearAiContext();
     dispatchNavigation({ type: "route-step", stepIndex: nextIndex, step, routeSignature: activeRouteSignature, ...(markCurrentComplete ? { completedStepId: activeTour[tourIndex].id } : {}) });
     setShowAllGraph(false);
     setDetailTab("source");
     setMobileView("details");
     setSearchQuery(""); focusTreeFile(step.focusFileId); focusGraphFile(step.focusFileId);
-  }, [tourIndex, activeTour, activeRouteSignature, aiRouteStale, clearAiContext, focusTreeFile, focusGraphFile]);
+  }, [tourIndex, activeTour, activeRouteSignature, aiRouteStale, clearAiContext, focusTreeFile, focusGraphFile, savedDataClearBusy, recordNavigation]);
 
   const resetTour = useCallback(() => {
-    if (!activeTour.length || aiRouteStale) return;
+    if (!activeTour.length || aiRouteStale || savedDataClearBusy) return;
     clearAiContext();
     setShowAllGraph(false);
     dispatchNavigation({ type: "restart-tour", step: activeTour[0], routeSignature: activeRouteSignature });
     setDetailTab("source");
     setMobileView("details");
     setSearchQuery(""); focusTreeFile(activeTour[0].focusFileId); focusGraphFile(activeTour[0].focusFileId);
-  }, [activeTour, activeRouteSignature, aiRouteStale, clearAiContext, focusTreeFile, focusGraphFile]);
+  }, [activeTour, activeRouteSignature, aiRouteStale, clearAiContext, focusTreeFile, focusGraphFile, savedDataClearBusy]);
 
   const resetGraph = useCallback(() => {
+    if (savedDataClearBusy) return;
     setNodePositions((previous) => new Map([...previous].filter(([id]) => !id.startsWith(`${workspaceId}:`))));
     setLayoutVersion((version) => version + 1);
     window.requestAnimationFrame(() => focusGraphFile(currentFile.id));
-  }, [currentFile.id, focusGraphFile, workspaceId]);
+  }, [currentFile.id, focusGraphFile, workspaceId, savedDataClearBusy]);
 
   const removeRecentRepository = useCallback(async (repositoryId: string) => {
     try {
@@ -977,33 +1080,45 @@ function AppShell() {
   }, [workspaceId]);
 
   const clearCurrentSavedData = useCallback(async () => {
-    if (!desktopMode || repository.id === BOOT_SNAPSHOT.id) return;
+    if (!desktopMode || repository.id === BOOT_SNAPSHOT.id || savedDataClearBusy || repoBusy) return;
+    setSavedDataClearBusy(true);
+    clearAiContext();
     try {
-      await localWorkspaceProvider.clearRepository(workspaceSession(repository));
+      await clearQuestionConversationWorkspace(workspaceId, async () => {
+        const restoreBrowserProgress = stageBrowserProgressClear(workspaceId);
+        try { await localWorkspaceProvider.clearRepository(workspaceSession(repository)); }
+        catch (error) { restoreBrowserProgress(); throw error; }
+      });
       setAiResultsByFile((previous) => new Map([...previous].filter(([key]) => !key.startsWith(`${workspaceId}:`))));
       setAiRoutesByRepository((previous) => { const next = new Map(previous); next.delete(workspaceId); return next; });
       setNodePositions((previous) => new Map([...previous].filter(([key]) => !key.startsWith(`${workspaceId}:`))));
+      nodePositionsPersisted.current.delete(nodePositionSessionKey(repository));
+      dirtyNodePositions.current.delete(workspaceId);
       for (const key of progressMemory.keys()) if (key.startsWith(`repolens:${workspaceId}:`)) progressMemory.delete(key);
-      setTourIndex(0); setCompletedSteps([]); setRecentRepositories((previous) => previous.filter((item) => (item.workspaceId ?? item.id) !== workspaceId));
+      setTourIndex(0); setCompletedSteps([]); setQuestionClearVersion((value) => value + 1); setRecentRepositories((previous) => previous.filter((item) => (item.workspaceId ?? item.id) !== workspaceId));
       setRepoMessage("已清除此仓库的本地保存结果、路线、进度和节点位置。");
     } catch (error) { setRepoMessage(`无法清除此仓库的保存数据：${error instanceof Error ? error.message : "本地存储不可用。"}`); }
-  }, [desktopMode, repository, workspaceId, setTourIndex, setCompletedSteps]);
+    finally { setSavedDataClearBusy(false); }
+  }, [clearAiContext, desktopMode, repository, savedDataClearBusy, setTourIndex, setCompletedSteps, workspaceId, repoBusy]);
 
   const clearAllSavedData = useCallback(async () => {
+    if (savedDataClearBusy || repoBusy) return;
+    setSavedDataClearBusy(true);
+    clearAiContext();
     try {
-      await localWorkspaceProvider.clearAll();
+      await clearAllQuestionConversations(async () => {
+        const restoreBrowserProgress = stageBrowserProgressClear();
+        try { await localWorkspaceProvider.clearAll(); }
+        catch (error) { restoreBrowserProgress(); throw error; }
+      }, [workspaceId]);
       setRecentRepositories([]); setAiResultsByFile(new Map()); setAiRoutesByRepository(new Map()); setNodePositions(new Map());
       progressMemory.clear();
-      try {
-        for (const key of Object.keys(window.localStorage)) if (key.startsWith("repolens:")) window.localStorage.removeItem(key);
-        for (const part of document.cookie.split(";")) {
-          const key = part.trim().split("=", 1)[0];
-          if (key.startsWith("repolens_")) document.cookie = `${key}=; Path=/; Max-Age=0; SameSite=Lax`;
-        }
-      } catch { /* Server storage is still cleared; browser storage can be unavailable. */ }
-      setTourIndex(0); setCompletedSteps([]); setRepoMessage("已清除全部 RepoLens 本地保存数据。");
+      nodePositionsPersisted.current.clear();
+      dirtyNodePositions.current.clear();
+      setTourIndex(0); setCompletedSteps([]); setQuestionClearVersion((value) => value + 1); setRepoMessage("已清除全部 RepoLens 本地保存数据。");
     } catch (error) { setRepoMessage(`无法清除全部保存数据：${error instanceof Error ? error.message : "本地存储不可用。"}`); }
-  }, [setTourIndex, setCompletedSteps]);
+    finally { setSavedDataClearBusy(false); }
+  }, [clearAiContext, savedDataClearBusy, setTourIndex, setCompletedSteps, repoBusy, workspaceId]);
 
   const locateCurrentGraph = useCallback(() => {
     focusGraphFile(currentFile.id);
@@ -1052,6 +1167,7 @@ function AppShell() {
     catch (error) { if (isCurrentRepositoryCommand(command) && repositoryGate.current.isCurrent(epoch)) { setRepoBusy(false); setRepoMessage(error instanceof Error ? error.message : "无法载入示例仓库。"); } }
   };
   const closeRepository = async () => {
+    if (savedDataClearBusy) return;
     const command = nextRepositoryCommand();
     openRequestGate.current.invalidate(); openRequestController.current?.abort(); openRequestController.current = null;
     const epoch = beginRepositorySession(); setRepositorySessionVersion((version) => version + 1); setRepoBusy(true);
@@ -1061,6 +1177,7 @@ function AppShell() {
     await loadSample(command, epoch);
   };
   const rescanRepository = async () => {
+    if (savedDataClearBusy) return;
     const repositoryId = repository.id; const epoch = repositoryGate.current.current().epoch; const controller = new AbortController();
     repositoryReads.current.add(controller); setRepoBusy(true);
     try {
@@ -1111,6 +1228,7 @@ function AppShell() {
     }
   };
   const previewAi = async (mode: AiMode, fileIds?: string[]) => {
+    if (savedDataClearBusy) return;
     if (desktopBackendError) { setRepoMessage(desktopBackendError); return; }
     if (!aiSettings.configured) { clearAiContext(); dispatchAiWorkflow({ type: "message", message: "请先保存完整的模型服务地址、模型名称和密钥，再预览发送范围。" }); return; }
     const contextKey = aiContextKey;
@@ -1137,6 +1255,7 @@ function AppShell() {
   };
   const generateAi = async () => {
     const preview = aiPreview;
+    if (savedDataClearBusy) return;
     if (desktopBackendError) { setRepoMessage(desktopBackendError); return; }
     if (aiWorkflow.status !== "ready" || !aiWorkflow.mode || !preview || preview.mode !== aiWorkflow.mode || preview.repositoryId !== repository.id || preview.entryFileId !== currentFile.id || preview.revision !== repository.revision) return;
     const savedWorkspaceSession = workspaceSession(repository);
@@ -1162,18 +1281,26 @@ function AppShell() {
         }, (fileId: string) => filesById.get(fileId)?.name ?? fileId);
         setAiRoutesByRepository((previous) => new Map(previous).set(workspaceId, nextRoute));
         if (desktopMode) {
-          try { await localWorkspaceProvider.saveAiRoute(savedWorkspaceSession, nextRoute as unknown as Record<string, unknown>); }
+          try {
+            const saved = await enqueueWorkspacePersistence(workspaceId, () => localWorkspaceProvider.saveAiRoute(savedWorkspaceSession, nextRoute as unknown as Record<string, unknown>));
+            if (saved && "skipped" in saved && saved.skipped) return;
+          }
           catch (error) { setRepoMessage(`路线已生成，但未能写入桌面保存数据：${error instanceof Error ? error.message : "存储不可用。"}`); }
         }
+        if (aiRequestSequence.current !== requestId || aiContextRef.current !== contextKey) return;
         setSearchQuery(""); setCollapsedFolders([]);
         finalMessage = "AI 阅读路线已生成；选中步骤即可定位文件和源码。";
       } else {
         const result: AiResultRecord = { ...value.result, __repositoryId: value.repositoryId, __entryFileId: value.entryFileId, __revision: value.revision, __mode: "explanation", __contextFiles: contextFiles };
         setAiResultsByFile((previous) => new Map(previous).set(`${workspaceId}:${value.entryFileId}`, result));
         if (desktopMode) {
-          try { await localWorkspaceProvider.saveAiResult(savedWorkspaceSession, value.entryFileId, result); }
+          try {
+            const saved = await enqueueWorkspacePersistence(workspaceId, () => localWorkspaceProvider.saveAiResult(savedWorkspaceSession, value.entryFileId, result));
+            if (saved && "skipped" in saved && saved.skipped) return;
+          }
           catch (error) { setRepoMessage(`讲解已生成，但未能写入桌面保存数据：${error instanceof Error ? error.message : "存储不可用。"}`); }
         }
+        if (aiRequestSequence.current !== requestId || aiContextRef.current !== contextKey) return;
         finalMessage = "讲解已生成，引用经过文件和行号校验。";
       }
       dispatchAiWorkflow({ type: "message", message: finalMessage });
@@ -1196,10 +1323,20 @@ function AppShell() {
           <span className="repo-context-icon"><Folder size={15} /></span>
           <span className="repo-context-name">{repository.name}</span>
           <span className="sample-badge"><span />{repository.origin?.kind === "github" ? "GitHub 远端" : repository.source === "local" ? "本地仓库" : "示例仓库"}</span>
+          {currentFile.path && <><span className="repo-breadcrumb-separator">/</span><span className="repo-context-file" title={currentFile.path}>{currentFile.path}</span></>}
         </div>
         <div className="topbar-end">
+          <div className="workspace-nav-actions" aria-label="源码导航">
+            <button type="button" className="repo-action icon-action" aria-label="后退" title="后退（Alt+←）" disabled={navigationHistory.index <= 0} onClick={() => navigateHistory(-1)}><ArrowLeft size={15} /></button>
+            <button type="button" className="repo-action icon-action" aria-label="前进" title="前进（Alt+→）" disabled={navigationHistory.index < 0 || navigationHistory.index >= navigationHistory.entries.length - 1} onClick={() => navigateHistory(1)}><ArrowRight size={15} /></button>
+            <button type="button" className="repo-action quick-open-action" onClick={() => setQuickOpen(true)} title="快速打开（Ctrl/Cmd+P）"><Search size={14} /><span>快速打开</span><kbd>Ctrl P</kbd></button>
+            <div className="layout-switch" aria-label="工作区布局">
+              <button type="button" className={layoutMode === "reading" ? "is-active" : ""} aria-pressed={layoutMode === "reading"} onClick={() => { setLayoutMode("reading"); setDetailTab("source"); }}>阅读</button>
+              <button type="button" className={layoutMode === "structure" ? "is-active" : ""} aria-pressed={layoutMode === "structure"} onClick={() => { setLayoutMode("structure"); setDetailTab("guide"); }}>结构</button>
+            </div>
+          </div>
           {repository.source === "sample" && <span className="tour-status"><Sparkles size={14} />预置导览</span>}
-          {repository.source === "local" && <><button className="repo-action" onClick={rescanRepository} disabled={repoBusy || Boolean(desktopBackendError)}>{repository.origin?.kind === "github" ? "检查远端更新" : "重新扫描"}</button><button className="repo-action" onClick={closeRepository} disabled={Boolean(desktopBackendError)}>返回示例</button></>}
+          {repository.source === "local" && <><button className="repo-action" onClick={rescanRepository} disabled={repoBusy || savedDataClearBusy || Boolean(desktopBackendError)}>{repository.origin?.kind === "github" ? "检查远端更新" : "重新扫描"}</button><button className="repo-action" onClick={closeRepository} disabled={savedDataClearBusy || Boolean(desktopBackendError)}>返回示例</button></>}
           <span className="version-stamp">v{repository.version}</span>
         </div>
       </header>
@@ -1215,9 +1352,12 @@ function AppShell() {
         <button className={mobileView === "details" ? "is-active" : ""} onClick={() => setMobileView("details")}>
           <BookOpenText size={15} />详情
         </button>
+        <button type="button" aria-label="快速打开文件" onClick={() => setQuickOpen(true)}>
+          <Search size={15} />打开
+        </button>
       </nav>
 
-      <section id="repository-workspace" className="workspace-grid">
+      <section id="repository-workspace" className={`workspace-grid${layoutMode === "reading" ? " is-reading-mode" : ""}`}>
         <DirectoryPanel
           repository={repository}
           mobileView={mobileView}
@@ -1229,6 +1369,7 @@ function AppShell() {
           serviceAvailable={!desktopBackendError}
           repoMessage={repoMessage}
           desktopMode={desktopMode}
+          clearDataBusy={savedDataClearBusy}
           onPickDirectory={() => {
             void window.repoLens?.selectDirectory().then((selectedPath) => { if (selectedPath) setRepoPath(selectedPath); })
               .catch((error: unknown) => setRepoMessage(error instanceof Error ? error.message : "无法选择本地目录。"));
@@ -1257,6 +1398,7 @@ function AppShell() {
           showAll={showAllGraph}
           graphReady={graphReady}
           graphActive={graphCanMount}
+          disabled={savedDataClearBusy}
           canvasRef={graphCanvasRef}
           nodes={nodes}
           edges={edges}
@@ -1284,6 +1426,8 @@ function AppShell() {
           filesById={filesById}
           mobileView={mobileView}
           detailTab={detailTab}
+          questionStorageBusy={savedDataClearBusy}
+          questionClearVersion={questionClearVersion}
           onDetailTabChange={setDetailTab}
           onOpenReference={openReference}
           aiSettings={aiSettings}
@@ -1322,12 +1466,13 @@ function AppShell() {
         stepIndex={tourIndex}
         completedSteps={completedSteps}
         stepsRef={tourStepsRef}
-        disabled={aiRouteStale}
+        disabled={aiRouteStale || savedDataClearBusy}
         onGoToStep={goToStep}
         onComplete={() => { if (currentTour) setCompletedSteps((previous) => previous.includes(currentTour.id) ? previous : [...previous, currentTour.id]); }}
         onReset={resetTour}
         onOpenReference={openTourReference}
       />
+      <QuickOpenDialog open={quickOpen} files={repository.files} onOpenChange={setQuickOpen} onSelectFile={(file) => selectFile(file.id, "details")} />
     </main>
   );
 }

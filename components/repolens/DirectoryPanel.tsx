@@ -62,10 +62,10 @@ function TreeRows({ folder, depth, matchingIds, selectedId, collapsed, query, on
   })}</>;
 }
 
-export function DirectoryPanel({ repository, mobileView, searchQuery, onSearchChange, repoPath, onRepoPathChange, repoBusy, repoMessage, desktopMode, serviceAvailable = true, onPickDirectory, onOpenRepository, onRescan, recentRepositories = [], onOpenRecent, onRemoveRecent, onClearRepositoryData, onClearSavedData, selectedFileId, collapsedFolders, onToggleFolder, onSelectFile, searchInputRef }: {
+export function DirectoryPanel({ repository, mobileView, searchQuery, onSearchChange, repoPath, onRepoPathChange, repoBusy, repoMessage, desktopMode, serviceAvailable = true, clearDataBusy = false, onPickDirectory, onOpenRepository, onRescan, recentRepositories = [], onOpenRecent, onRemoveRecent, onClearRepositoryData, onClearSavedData, selectedFileId, collapsedFolders, onToggleFolder, onSelectFile, searchInputRef }: {
   repository: RepositorySnapshot; mobileView: "files" | "graph" | "details"; searchQuery: string; onSearchChange: (value: string) => void;
   repoPath: string; onRepoPathChange: (value: string) => void; repoBusy: boolean; repoMessage: string;
-  desktopMode: boolean; serviceAvailable?: boolean; onPickDirectory: () => void;
+  desktopMode: boolean; serviceAvailable?: boolean; clearDataBusy?: boolean; onPickDirectory: () => void;
   onOpenRepository: (event: FormEvent<HTMLFormElement>) => void; onRescan: () => void;
   recentRepositories?: { id: string; name: string; location: string; kind: "local" | "github"; lastOpenedAt: number; requestedRef?: string; resolvedRef?: string; commit?: string; subdirectory?: string }[];
   onOpenRecent?: (location: string) => void; onRemoveRecent?: (id: string) => void; onClearRepositoryData?: () => void; onClearSavedData?: () => void;
@@ -80,9 +80,9 @@ export function DirectoryPanel({ repository, mobileView, searchQuery, onSearchCh
     <form className="repository-open-form" onSubmit={onOpenRepository}>
       <label htmlFor="repository-path">本地仓库路径或 GitHub 链接</label>
       <input id="repository-path" value={repoPath} onChange={(event) => onRepoPathChange(event.target.value)} placeholder="D:\\coding\\project 或 https://github.com/owner/repo" />
-      {desktopMode && <button type="button" onClick={onPickDirectory} disabled={repoBusy || !serviceAvailable}><FolderOpen size={15} />选择本地目录</button>}
-      <button type="submit" disabled={repoBusy || !serviceAvailable || !repoPath.trim()}>{repoBusy ? "正在获取并扫描…" : "打开仓库"}</button>
-      {repository.source === "local" && <button type="button" onClick={onRescan} disabled={repoBusy || !serviceAvailable}>{repository.origin?.kind === "github" ? "检查远端更新" : "重新扫描"}</button>}
+      {desktopMode && <button type="button" onClick={onPickDirectory} disabled={repoBusy || clearDataBusy || !serviceAvailable}><FolderOpen size={15} />选择本地目录</button>}
+      <button type="submit" disabled={repoBusy || clearDataBusy || !serviceAvailable || !repoPath.trim()}>{repoBusy ? "正在获取并扫描…" : "打开仓库"}</button>
+      {repository.source === "local" && <button type="button" onClick={onRescan} disabled={repoBusy || clearDataBusy || !serviceAvailable}>{repository.origin?.kind === "github" ? "检查远端更新" : "重新扫描"}</button>}
     </form>
     {repository.origin?.kind === "github" && <div className="github-origin" aria-label="GitHub 来源信息">
       <a href={repository.origin.url} target="_blank" rel="noreferrer">{repository.origin.url}</a>
@@ -93,13 +93,13 @@ export function DirectoryPanel({ repository, mobileView, searchQuery, onSearchCh
     {desktopMode && <section className="recent-repositories" aria-label="最近打开的仓库及本地保存">
       <div className="recent-repositories-heading"><strong>最近仓库</strong><span>{recentRepositories.length}/20</span></div>
       {recentRepositories.length > 0 && <ul>{recentRepositories.map((recent) => <li key={recent.id}>
-        <button className="recent-repository-open" type="button" disabled={repoBusy || !serviceAvailable} onClick={() => onOpenRecent?.(recentRepositoryOpenLocation(recent))} title={recentRepositoryOpenLocation(recent)}>
+        <button className="recent-repository-open" type="button" disabled={repoBusy || clearDataBusy || !serviceAvailable} onClick={() => onOpenRecent?.(recentRepositoryOpenLocation(recent))} title={recentRepositoryOpenLocation(recent)}>
           <span>{recent.name}</span><small>{recentRepositoryTargetLabel(recent)}</small>
         </button>
-        <button type="button" className="recent-repository-remove" aria-label={`从最近仓库移除 ${recent.name}`} disabled={!serviceAvailable} onClick={() => onRemoveRecent?.(recent.id)}><Trash2 size={13} /></button>
+        <button type="button" className="recent-repository-remove" aria-label={`从最近仓库移除 ${recent.name}`} disabled={clearDataBusy || !serviceAvailable} onClick={() => onRemoveRecent?.(recent.id)}><Trash2 size={13} /></button>
       </li>)}</ul>}
-      {repository.source === "local" && <button className="clear-saved-data" type="button" disabled={!serviceAvailable} onClick={onClearRepositoryData}>清除此仓库的保存数据</button>}
-      <button className="clear-saved-data" type="button" disabled={!serviceAvailable} onClick={onClearSavedData}>清除全部本地保存数据</button>
+      {repository.source === "local" && <button className="clear-saved-data" type="button" disabled={!serviceAvailable || repoBusy || clearDataBusy} onClick={onClearRepositoryData}>{clearDataBusy ? "正在清除…" : "清除此仓库的保存数据"}</button>}
+      <button className="clear-saved-data" type="button" disabled={!serviceAvailable || repoBusy || clearDataBusy} onClick={onClearSavedData}>{clearDataBusy ? "正在清除…" : "清除全部本地保存数据"}</button>
     </section>}
     <label className="search-field"><Search size={15} aria-hidden="true" /><input ref={searchInputRef} value={searchQuery} onChange={(event) => onSearchChange(event.target.value)} placeholder="搜索文件…" aria-label="搜索文件名或路径" />
       {searchQuery && <button type="button" aria-label="清除搜索" onClick={() => onSearchChange("")}><X size={14} /></button>}{!searchQuery && <kbd>/</kbd>}

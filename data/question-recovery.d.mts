@@ -28,3 +28,7 @@ export function acknowledgeQuestionConversationSave(workspaceId: string, persist
 export function setQuestionConversationSaveError(workspaceId: string, message: string): void;
 export function clearQuestionConversationSaveError(workspaceId: string): void;
 export function enqueueQuestionConversationSave<T>(workspaceId: string, operation: () => Promise<T>): Promise<T>;
+export function clearQuestionConversationWorkspace<T>(workspaceId: string, operation: () => Promise<T>): Promise<T>;
+export function clearAllQuestionConversations<T>(operation: () => Promise<T>, additionalWorkspaceIds?: string[]): Promise<T>;
+export function isQuestionConversationClearPending(workspaceId: string): boolean;
+export function getQuestionConversationGeneration(workspaceId: string): number;

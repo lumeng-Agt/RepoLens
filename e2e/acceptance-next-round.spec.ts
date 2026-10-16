@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { installResizeObserverProbe } from './helpers/resize-observer-probe';
 import { createServer, type Server } from 'node:http';
 import { mkdtemp, mkdir, writeFile, unlink, rm } from 'node:fs/promises';
 import os from 'node:os';
@@ -130,6 +131,7 @@ test('B3 returning to sample after an open committed but before its response arr
 });
 
 test('B3 a delayed close response cannot undo a newer repository open', async ({ page }) => {
+  const resizeProbe = await installResizeObserverProbe(page);
   await open(page, await fixture({ 'old.ts': 'export const old = 1;\n' }));
   const newRoot = await fixture({ 'fresh.ts': 'export const fresh = 1;\n' });
   let release!: () => void;
@@ -154,6 +156,7 @@ test('B3 a delayed close response cannot undo a newer repository open', async ({
     release();
     await expect(page.locator('header').getByRole('button', { name: '重新扫描' })).toBeEnabled();
     expect((await page.request.get(`${api}/api/snapshot?repositoryId=${snapshot.id}`, { headers })).status()).toBe(200);
+    expect(await resizeProbe.errors(), resizeProbe.logs.join('\n')).toEqual([]);
   } finally { release(); }
 });
 

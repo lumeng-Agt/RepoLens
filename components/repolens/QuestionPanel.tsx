@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import { localWorkspaceProvider } from "@/data/providers";
 import { localExplanationProvider, type AiGenerationResult, type AiLineRange, type AiPreviewResponse, type AiQuestionHistoryItem, type AiScopeCandidate } from "@/data/explanation-provider";
 import type { AiPreview, FileRecord, RepositorySnapshot, SourceReference } from "@/data/model";
-import { acknowledgeQuestionConversationSave, clearQuestionConversationSaveError, enqueueQuestionConversationSave, failQuestionConversationRead, getQuestionConversationOperations, getQuestionConversationReadError, getQuestionConversationSaveError, getQuestionConversationView, recordQuestionConversationChanges, restoreQuestionConversations, setQuestionConversationSaveError } from "@/data/question-recovery.mjs";
+import { acknowledgeQuestionConversationSave, clearQuestionConversationSaveError, enqueueQuestionConversationSave, failQuestionConversationRead, getQuestionConversationGeneration, getQuestionConversationOperations, getQuestionConversationReadError, getQuestionConversationSaveError, getQuestionConversationView, isQuestionConversationClearPending, recordQuestionConversationChanges, restoreQuestionConversations, setQuestionConversationSaveError } from "@/data/question-recovery.mjs";
 
 type QaReference = { fileId: string; startLine: number; endLine?: number };
 type QaMessage = {
@@ -24,8 +24,9 @@ function validConversation(value: unknown): value is QaConversation {
     message && typeof message.id === "string" && ["user", "assistant"].includes(message.role) && typeof message.content === "string" && Array.isArray(message.references) && Array.isArray(message.contextFiles));
 }
 
-export function QuestionPanel({ repository, currentFile, filesById, onOpenReference, backendAvailable = true }: {
+export function QuestionPanel({ repository, currentFile, filesById, onOpenReference, backendAvailable = true, active = false, storageBusy = false, clearVersion = 0 }: {
   repository: RepositorySnapshot; currentFile: FileRecord; filesById: Map<string, FileRecord>; onOpenReference: (reference: SourceReference) => void; backendAvailable?: boolean;
+  active?: boolean; storageBusy?: boolean; clearVersion?: number;
 }) {
   const workspaceId = repository.workspaceId ?? repository.id;
   const sessionKey = `${workspaceId}:${repository.persistenceSessionId ?? ""}`;
@@ -53,6 +54,13 @@ export function QuestionPanel({ repository, currentFile, filesById, onOpenRefere
   const requestController = useRef<AbortController | null>(null);
   const activeRequestContext = useRef("");
   const loadRequestSequence = useRef(0);
+  const clearVersionRef = useRef(clearVersion);
+  const invalidateRequest = useCallback(() => {
+    requestSequence.current += 1;
+    requestController.current?.abort();
+    requestController.current = null;
+    activeRequestContext.current = "";
+  }, []);
   const contextKey = `${workspaceId}:${repository.revision ?? repository.version}:${currentFile.id}`;
   const visiblePreviewState = previewState?.contextKey === contextKey ? previewState : null;
   const visibleScope = stage === "scope" && scopeContextKey === contextKey;
@@ -60,6 +68,7 @@ export function QuestionPanel({ repository, currentFile, filesById, onOpenRefere
   const visibleConversations = loadedSessionKey === sessionKey ? conversations : getQuestionConversationView(workspaceId);
   const currentConversation = visibleConversations.find((item) => item.id === activeId) ?? null;
   const persistConversations = useCallback((value: QaConversation[], afterRestore = false) => {
+    if (isQuestionConversationClearPending(workspaceId)) return;
     const view = recordQuestionConversationChanges(workspaceId, value);
     if (loadedSessionKeyRef.current !== sessionKey && !afterRestore) {
       setMessage("本地问答记录尚未成功读取；本次操作暂存在当前页面。读取成功前不会覆盖已保存记录。");
@@ -87,12 +96,13 @@ export function QuestionPanel({ repository, currentFile, filesById, onOpenRefere
 
   const loadWorkspace = useCallback(async () => {
     const requestId = ++loadRequestSequence.current;
+    const recoveryGeneration = getQuestionConversationGeneration(workspaceId);
     loadedSessionKeyRef.current = "";
     setLoadedSessionKey("");
     setActiveId("");
     try {
       const saved = await localWorkspaceProvider.get(workspaceId);
-      if (loadRequestSequence.current !== requestId) return;
+      if (loadRequestSequence.current !== requestId || getQuestionConversationGeneration(workspaceId) !== recoveryGeneration) return;
       if (saved.warning) throw new Error(saved.warning);
       const restored = saved.conversations.filter(validConversation).map((item) => ({ ...item, messages: item.messages.map((entry) => ({ ...entry })) }));
       const next = restoreQuestionConversations(workspaceId, restored);
@@ -101,7 +111,7 @@ export function QuestionPanel({ repository, currentFile, filesById, onOpenRefere
       setMessage(saved.warning ? `无法读取部分本地问答记录：${saved.warning}` : "");
       if (getQuestionConversationOperations(workspaceId).length) persistConversations(next, true);
     } catch (error) {
-      if (loadRequestSequence.current !== requestId || (error as Error).name === "AbortError") return;
+      if (loadRequestSequence.current !== requestId || getQuestionConversationGeneration(workspaceId) !== recoveryGeneration || (error as Error).name === "AbortError") return;
       const detail = error instanceof Error ? error.message : "读取失败";
       setConversations(failQuestionConversationRead(workspaceId, detail));
       setFailedRepositoryId(workspaceId);
@@ -115,14 +125,35 @@ export function QuestionPanel({ repository, currentFile, filesById, onOpenRefere
   }, [loadWorkspace, repository.id]);
 
   useEffect(() => {
-    requestSequence.current += 1;
-    requestController.current?.abort(); requestController.current = null;
-    activeRequestContext.current = "";
-    // Context switches intentionally reset an unconfirmed range and release busy UI immediately.
+    invalidateRequest();
+    // Leaving the tab, changing context, or clearing saved data releases request state immediately.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setPreviewState(null); setCandidates([]); setStage("idle");
-    if (repository.source === "local") setMessage("");
-  }, [repository.id, workspaceId, repository.revision, repository.source, currentFile.id]);
+    if (active && !storageBusy) setMessage("");
+    return invalidateRequest;
+  }, [active, currentFile.id, invalidateRequest, repository.id, repository.revision, repository.source, sessionKey, storageBusy, workspaceId]);
+
+  const storageBusyRef = useRef(false);
+  useEffect(() => {
+    if (storageBusy) {
+      storageBusyRef.current = true;
+      loadRequestSequence.current += 1;
+      return;
+    }
+    if (!storageBusyRef.current) return;
+    storageBusyRef.current = false;
+    void loadWorkspace();
+  }, [loadWorkspace, storageBusy]);
+
+  useEffect(() => {
+    if (clearVersionRef.current === clearVersion) return;
+    clearVersionRef.current = clearVersion;
+    const view = getQuestionConversationView(workspaceId);
+    loadedSessionKeyRef.current = sessionKey;
+    // The storage clear controller has already invalidated and emptied this workspace.
+    setConversations(view); setActiveId(view[0]?.id ?? ""); setLoadedSessionKey(sessionKey);
+    setFailedRepositoryId(""); setSaveError(null); setQuestion(""); setPreviewState(null); setCandidates([]); setStage("idle"); setMessage("");
+  }, [clearVersion, sessionKey, workspaceId]);
 
   useEffect(() => window.repoLens?.onBackendStatus(({ available }) => {
     if (available) return;
@@ -177,8 +208,7 @@ export function QuestionPanel({ repository, currentFile, filesById, onOpenRefere
 
   const submitQuestion = (event: FormEvent) => { event.preventDefault(); void startPreview(); };
   const cancel = () => {
-    requestSequence.current += 1; requestController.current?.abort(); requestController.current = null;
-    activeRequestContext.current = "";
+    invalidateRequest();
     setPreviewState(null); setStage("idle"); setMessage("已取消；没有发送未确认的内容。");
   };
   const confirmAndGenerate = async () => {
@@ -236,7 +266,8 @@ export function QuestionPanel({ repository, currentFile, filesById, onOpenRefere
     {!backendAvailable && <p role="alert" className="question-feedback">本地索引服务已停止。请关闭并重新启动 RepoLens 后继续使用问答。</p>}
     {failedRepositoryId === workspaceId && <div className="question-feedback" role="alert">本地问答记录读取失败；本页修改暂存于内存，不会覆盖已保存记录。<button type="button" className="question-retry" onClick={() => { void loadWorkspace(); }}>重试读取本地问答记录</button></div>}
     {saveError?.sessionKey === sessionKey && <p className="question-feedback" role="alert">问答仍可使用，但未能保存：{saveError.message}</p>}
-    <fieldset disabled={!backendAvailable} style={{ border: 0, margin: 0, minWidth: 0, padding: 0 }}>
+    {storageBusy && <p className="question-feedback" role="status">正在清除本地保存数据，问答操作已暂停。</p>}
+    <fieldset disabled={!backendAvailable || storageBusy} style={{ border: 0, margin: 0, minWidth: 0, padding: 0 }}>
     <section className="question-panel" aria-label="源码问答">
     <div className="question-toolbar">
       <label><span className="sr-only">问答会话</span><select aria-label="问答会话" value={activeId} onChange={(event) => { cancel(); setActiveId(event.target.value); }}>
@@ -271,7 +302,7 @@ export function QuestionPanel({ repository, currentFile, filesById, onOpenRefere
         const range = ranges[candidate.fileId] ?? { startLine: 1, endLine: candidate.lineCount };
         return <label key={candidate.fileId}>
           <input type="checkbox" checked={selected} disabled={!selected && selectedFiles.length >= 12} onChange={(event) => updateScope(event.target.checked ? [...selectedFiles, candidate.fileId] : selectedFiles.filter((item) => item !== candidate.fileId))} />
-          <span>{candidate.fileId}</span><small>{candidate.lineCount} 行 · {candidate.characters.toLocaleString()} 字符</small>
+          <span>{candidate.fileId}</span><small>{candidate.lineCount} 行 · {candidate.characters.toLocaleString()} 字符{candidate.reasons?.length ? ` · ${candidate.reasons.join("、")}` : ""}</small>
           {selected && <span className="ai-range-fields"><input aria-label={`${candidate.fileId} 起始行`} type="number" min={1} max={candidate.lineCount} value={range.startLine} onChange={(event) => updateScope(selectedFiles, { ...ranges, [candidate.fileId]: { ...range, startLine: Number(event.target.value) } })} />至<input aria-label={`${candidate.fileId} 结束行`} type="number" min={range.startLine} max={candidate.lineCount} value={range.endLine} onChange={(event) => updateScope(selectedFiles, { ...ranges, [candidate.fileId]: { ...range, endLine: Number(event.target.value) } })} /></span>}
           {selected && candidate.oversizedLines.some((line) => line >= range.startLine && line <= range.endLine) && <small role="alert">范围包含不能发送的超长行，请缩小范围。</small>}
         </label>;
@@ -280,9 +311,10 @@ export function QuestionPanel({ repository, currentFile, filesById, onOpenRefere
     </section>}
     {visiblePreviewState && stage === "ready" && <section className="question-consent" aria-label="问答发送确认">
       <strong>确认发送这次问答</strong>
-      <p>服务：{visiblePreviewState.preview.baseUrl} · 模型：{visiblePreviewState.preview.model} · 携带历史 {visiblePreviewState.history.length} 条 · 总字符 {visiblePreviewState.preview.characters.toLocaleString()}</p>
+      <p>服务：{visiblePreviewState.preview.baseUrl} · 模型：{visiblePreviewState.preview.model} · 携带历史 {visiblePreviewState.history.length} 条 · 总字符 {visiblePreviewState.preview.characters.toLocaleString()}{visiblePreviewState.preview.tokenEstimate === undefined ? "" : ` · 约 ${visiblePreviewState.preview.tokenEstimate.toLocaleString()} token`}</p>
+      {visiblePreviewState.preview.tokenEstimate !== undefined && <small className="token-estimate-note">Token 数为粗略估算，因模型分词规则不同，不代表实际计费量。</small>}
       <blockquote>{visiblePreviewState.question}</blockquote>
-      <ul>{visiblePreviewState.preview.files.map((file) => <li key={file.fileId}>{file.fileId}（第 {file.startLine}–{file.endLine} 行）</li>)}</ul>
+      <ul>{visiblePreviewState.preview.files.map((file) => <li key={file.fileId}>{file.fileId}（第 {file.startLine}–{file.endLine} 行）{file.reasons?.length ? ` · ${file.reasons.join("、")}` : ""}</li>)}</ul>
       {visiblePreviewState.preview.retrievalInsufficient && <p role="alert">自动检索依据不足；请确认所选源码确实适合回答。</p>}
       <button type="button" onClick={() => { void confirmAndGenerate(); }}>确认发送并获取引用回答</button>
     </section>}

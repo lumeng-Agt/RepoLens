@@ -1,4 +1,4 @@
-import type { FormEvent, RefObject, ReactNode } from "react";
+import { useEffect, useMemo, useState, type FormEvent, type RefObject, type ReactNode } from "react";
 import Prism, { type Token, type TokenStream } from "prismjs";
 import "prismjs/components/prism-javascript";
 import "prismjs/components/prism-jsx";
@@ -13,6 +13,11 @@ import { AiResultView, type AiResultRecord } from "@/components/repolens/AiResul
 import { QuestionPanel } from "@/components/repolens/QuestionPanel";
 import type { AiLineRange, AiMode, AiScopeCandidate } from "@/data/explanation-provider";
 import type { AiPreview, FileRecord, RepositorySnapshot, SourceReference } from "@/data/model";
+import { visibleLineWindow } from "@/data/source-window.mjs";
+
+const HIGHLIGHT_CACHE_LIMIT = 4;
+const HIGHLIGHT_CACHE_CHAR_LIMIT = 300_000;
+const highlightedCache = new Map<string, { source: string; lines: ReturnType<typeof highlightedLines> }>();
 
 function sourceGrammar(language: string) {
   if (language === "tsx") return Prism.languages.tsx;
@@ -39,16 +44,72 @@ function highlightedLines(source: string, language: string) {
   return lines.map((segments, index) => ({ number: index + 1, segments }));
 }
 
+function cachedHighlightedLines(source: string, language: string) {
+  // Keep large files out of the cross-file cache so syntax tokens do not retain
+  // several copies of megabyte-sized source buffers in memory.
+  if (source.length > HIGHLIGHT_CACHE_CHAR_LIMIT) return highlightedLines(source, language);
+  const key = `${language}:${source.length}:${source.slice(0, 96)}:${source.slice(-96)}`;
+  const cached = highlightedCache.get(key);
+  if (cached?.source === source) {
+    highlightedCache.delete(key);
+    highlightedCache.set(key, cached);
+    return cached.lines;
+  }
+  const lines = highlightedLines(source, language);
+  highlightedCache.set(key, { source, lines });
+  while (highlightedCache.size > HIGHLIGHT_CACHE_LIMIT) highlightedCache.delete(highlightedCache.keys().next().value!);
+  return lines;
+}
+
+function SourceCodeView({ lines, path, sourceText, focusedLine, viewportRef }: {
+  lines: ReturnType<typeof highlightedLines>;
+  path: string;
+  sourceText: string;
+  focusedLine: SourceReference | null;
+  viewportRef: RefObject<HTMLDivElement | null>;
+}) {
+  const [scrollState, setScrollState] = useState({ top: 0, height: 0 });
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    let frame = 0;
+    const update = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        const next = { top: viewport.scrollTop, height: viewport.clientHeight };
+        setScrollState((current) => current.top === next.top && current.height === next.height ? current : next);
+      });
+    };
+    update();
+    viewport.addEventListener("scroll", update, { passive: true });
+    const observer = new ResizeObserver(update);
+    observer.observe(viewport);
+    return () => { cancelAnimationFrame(frame); observer.disconnect(); viewport.removeEventListener("scroll", update); };
+  }, [viewportRef]);
+
+  const virtualized = lines.length > 1_200;
+  const range = virtualized ? visibleLineWindow({ lineCount: lines.length, scrollTop: scrollState.top, viewportHeight: scrollState.height }) : { start: 0, end: lines.length, top: 0, bottom: 0 };
+  const visibleLines = lines.slice(range.start, range.end);
+  return <>{virtualized && <pre className="source-accessible-copy" tabIndex={0} aria-label={`${path} 完整源码，${lines.length} 行`}>{sourceText}</pre>}<pre className={`source-code${virtualized ? " is-virtualized" : ""}`} aria-hidden={virtualized} aria-label={`${path} 源码`}><code>
+    {range.top > 0 && <span className="source-window-spacer" aria-hidden="true" style={{ height: range.top }} />}
+    {visibleLines.map(({ number, segments }) => {
+      const isFocused = focusedLine && number >= focusedLine.line && number <= (focusedLine.endLine ?? focusedLine.line);
+      return <span key={number} id={`source-line-${number}`} className={`source-line${isFocused ? " is-focused" : ""}`}><span className="line-number">{String(number).padStart(2, "0")}</span><span className="line-content">{segments.map((segment, index) => <span key={`${number}-${index}`} className={segment.tokens.length ? `token ${segment.tokens.join(" ")}` : undefined}>{segment.text}</span>)}</span></span>;
+    })}
+    {range.bottom > 0 && <span className="source-window-spacer" aria-hidden="true" style={{ height: range.bottom }} />}
+  </code></pre></>;
+}
+
 function ReferenceButton({ icon, title, caption, onClick }: { icon: ReactNode; title: string; caption: string; onClick: () => void }) {
   return <button className="reference-row" onClick={onClick}><span className="reference-icon">{icon}</span><span className="reference-copy"><strong>{title}</strong><small>{caption}</small></span><ChevronRight size={14} className="reference-arrow" /></button>;
 }
 
-export function FileDetailsPanel({ repository, currentFile, filesById, mobileView, detailTab, onDetailTabChange, onOpenReference, backendAvailable = true,
+export function FileDetailsPanel({ repository, currentFile, filesById, mobileView, detailTab, onDetailTabChange, onOpenReference, backendAvailable = true, questionStorageBusy = false, questionClearVersion = 0,
   aiSettings, aiSettingsBusy, onBaseUrlChange, onModelChange, onApiKeyChange, onSaveSettings, onPreviewAi, aiBusy, aiPreview, aiCandidates,
   pendingAiMode, selectedAiFiles, selectedAiRanges, onToggleAiFile, onAiRangeChange, onGenerateAi, onCancelAi, aiMessage, aiSettingsReadError, aiSettingsSaveError, aiResult, aiStale,
   sourceText, sourceStatus, sourceError, focusedLine, onClearFocus, codeViewportRef,
 }: {
-  repository: RepositorySnapshot; currentFile: FileRecord; filesById: Map<string, FileRecord>; mobileView: "files" | "graph" | "details"; detailTab: string; backendAvailable?: boolean;
+  repository: RepositorySnapshot; currentFile: FileRecord; filesById: Map<string, FileRecord>; mobileView: "files" | "graph" | "details"; detailTab: string; backendAvailable?: boolean; questionStorageBusy?: boolean; questionClearVersion?: number;
   onDetailTabChange: (tab: string) => void; onOpenReference: (reference: SourceReference) => void;
   aiSettings: { baseUrl: string; model: string; apiKey: string; configured: boolean };
   aiSettingsBusy: boolean;
@@ -66,7 +127,7 @@ export function FileDetailsPanel({ repository, currentFile, filesById, mobileVie
   const incoming = repository.dependencies.filter((edge) => edge.toId === currentFile.id);
   const unresolved = repository.unresolved?.filter((edge) => edge.fileId === currentFile.id) ?? [];
   const repositoryDiagnostics = [...new Map((repository.diagnostics ?? []).map((item) => [`${item.path ?? ""}\u0000${item.message}`, item])).values()];
-  const sourceLines = highlightedLines(sourceText, currentFile.language ?? "");
+  const sourceLines = useMemo(() => detailTab === "source" && sourceStatus === "loaded" ? cachedHighlightedLines(sourceText, currentFile.language ?? "") : [], [detailTab, sourceStatus, sourceText, currentFile.language]);
 
   return <aside className={`details-pane${mobileView !== "details" ? " mobile-hidden" : ""}`} aria-label="文件详情">
     <div className="detail-file-heading"><span className={`detail-file-icon${currentFile.kind === "style" ? " is-style" : ""}`}>{currentFile.kind === "style" ? <FileText size={18} /> : <FileCode2 size={18} />}</span><div className="detail-file-title"><span>{currentFile.path}</span><strong>{currentFile.name}</strong></div></div>
@@ -103,7 +164,7 @@ export function FileDetailsPanel({ repository, currentFile, filesById, mobileVie
               return <label key={candidate.fileId}>
                 <input type="checkbox" checked={selected} disabled={candidate.fileId === currentFile.id} onChange={(event) => onToggleAiFile(candidate.fileId, event.target.checked)} />
                 <span>{candidate.fileId}</span>
-                <small>{candidate.lineCount} 行{candidate.oversizedLines.length ? ` · 超长行：${candidate.oversizedLines.join("、")}` : ""}</small>
+                <small>{candidate.lineCount} 行{candidate.oversizedLines.length ? ` · 超长行：${candidate.oversizedLines.join("、")}` : ""}{candidate.reasons?.length ? ` · ${candidate.reasons.join("、")}` : ""}</small>
                 {selected && <span className="ai-range-fields">
                   <input aria-label={`${candidate.fileId} 起始行`} type="number" min={1} max={candidate.lineCount} value={range.startLine} onChange={(event) => onAiRangeChange(candidate.fileId, { ...range, startLine: Number(event.target.value) })} />
                   <span>至</span>
@@ -118,7 +179,7 @@ export function FileDetailsPanel({ repository, currentFile, filesById, mobileVie
               return candidate.oversizedLines.some((line) => line >= range.startLine && line <= range.endLine);
             })}>预览所选范围</button>
           </div>}
-          {aiPreview && <div className="ai-consent"><strong>发送前确认</strong><p>目标服务：{aiPreview.baseUrl} · 模型：{aiPreview.model}。将把 {aiPreview.files.length} 个文件、共 {aiPreview.characters.toLocaleString()} 个字符发送至该服务：</p><ul>{aiPreview.files.map((file) => <li key={file.fileId}>{file.fileId}（第 {file.startLine}–{file.endLine} 行）</li>)}</ul>{!aiSettings.configured ? <p>请先保存完整的本地模型配置并重新预览。</p> : <button onClick={onGenerateAi} disabled={!backendAvailable || aiBusy}>{aiBusy ? "正在请求…" : "确认发送并生成"}</button>}<button className="ai-cancel" onClick={onCancelAi}>{aiBusy ? "取消请求" : "取消"}</button></div>}
+          {aiPreview && <div className="ai-consent"><strong>发送前确认</strong><p>目标服务：{aiPreview.baseUrl} · 模型：{aiPreview.model}。将把 {aiPreview.files.length} 个文件、共 {aiPreview.characters.toLocaleString()} 个字符发送至该服务{aiPreview.tokenEstimate === undefined ? "" : `，约 ${aiPreview.tokenEstimate.toLocaleString()} 个 token`}：</p>{aiPreview.tokenEstimate !== undefined && <small>Token 数为粗略估算，因模型分词规则不同，不代表实际计费量。</small>}<ul>{aiPreview.files.map((file) => <li key={file.fileId}>{file.fileId}（第 {file.startLine}–{file.endLine} 行）{file.reasons?.length ? ` · ${file.reasons.join("、")}` : ""}</li>)}</ul>{!aiSettings.configured ? <p>请先保存完整的本地模型配置并重新预览。</p> : <button onClick={onGenerateAi} disabled={!backendAvailable || aiBusy}>{aiBusy ? "正在请求…" : "确认发送并生成"}</button>}<button className="ai-cancel" onClick={onCancelAi}>{aiBusy ? "取消请求" : "取消"}</button></div>}
           {aiSettingsReadError && <p className="ai-feedback ai-settings-read-error" role="alert"><strong>读取本地模型配置失败：</strong>{aiSettingsReadError}</p>}
           {aiSettingsSaveError && <p className="ai-feedback ai-settings-save-error" role="alert"><strong>保存本地模型配置失败：</strong>{aiSettingsSaveError}</p>}
           {aiMessage && <p className="ai-feedback" role="status">{aiMessage}</p>}
@@ -135,13 +196,10 @@ export function FileDetailsPanel({ repository, currentFile, filesById, mobileVie
         </div>}
         <button className="show-source-link" onClick={() => onOpenReference({ fileId: currentFile.id, line: 1 })}><Code2 size={14} />查看完整源码<ChevronRight size={14} /></button>
       </TabsContent>
-      {repository.source === "local" && <TabsContent value="questions" className="detail-scroll question-scroll"><QuestionPanel repository={repository} currentFile={currentFile} filesById={filesById} onOpenReference={onOpenReference} backendAvailable={backendAvailable} /></TabsContent>}
+      {repository.source === "local" && <TabsContent value="questions" className="detail-scroll question-scroll"><QuestionPanel repository={repository} currentFile={currentFile} filesById={filesById} onOpenReference={onOpenReference} backendAvailable={backendAvailable} active={detailTab === "questions"} storageBusy={questionStorageBusy} clearVersion={questionClearVersion} /></TabsContent>}
       <TabsContent value="source" className="detail-scroll source-scroll" ref={codeViewportRef}>
         <div className="source-meta"><span>{(currentFile.language ?? (currentFile.kind === "style" ? "css" : "text")).toUpperCase()} 源文件</span><span>{sourceStatus === "loading" ? "读取中" : sourceStatus === "error" ? "读取失败" : `${sourceLines.length} 行`}</span></div>
-        {sourceStatus === "loading" ? <div className="source-loading" role="status">正在从本地服务读取源码…</div> : sourceStatus === "error" ? <div className="source-loading" role="alert">{sourceError ?? "无法读取源码。"}</div> : sourceText.length === 0 ? <div className="source-loading">{repository.files.length ? "这是一个空源码文件。" : "仓库中没有可显示的源码文件。"}</div> : <pre className="source-code" aria-label={`${currentFile.path} 源码`}><code>{sourceLines.map(({ number, segments }) => {
-          const isFocused = focusedLine?.fileId === currentFile.id && number >= focusedLine.line && number <= (focusedLine.endLine ?? focusedLine.line);
-          return <span key={number} id={`source-line-${number}`} className={`source-line${isFocused ? " is-focused" : ""}`}><span className="line-number">{String(number).padStart(2, "0")}</span><span className="line-content">{segments.map((segment, index) => <span key={`${number}-${index}`} className={segment.tokens.length ? `token ${segment.tokens.join(" ")}` : undefined}>{segment.text}</span>)}</span></span>;
-        })}</code></pre>}
+        {sourceStatus === "loading" ? <div className="source-loading" role="status">正在从本地服务读取源码…</div> : sourceStatus === "error" ? <div className="source-loading" role="alert">{sourceError ?? "无法读取源码。"}</div> : sourceText.length === 0 ? <div className="source-loading">{repository.files.length ? "这是一个空源码文件。" : "仓库中没有可显示的源码文件。"}</div> : <SourceCodeView lines={sourceLines} path={currentFile.path} sourceText={sourceText} focusedLine={focusedLine?.fileId === currentFile.id ? focusedLine : null} viewportRef={codeViewportRef} />}
         {focusedLine?.fileId === currentFile.id && <div className="source-focus-note"><span><span className="focus-note-dot" />导览定位 · 第 {focusedLine.line} 行</span><button onClick={onClearFocus} aria-label="清除源码定位"><X size={13} /></button></div>}
       </TabsContent>
     </Tabs>

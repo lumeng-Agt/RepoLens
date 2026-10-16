@@ -1,5 +1,7 @@
+import { clearWorkspacePersistence, enqueueWorkspacePersistence, getKnownWorkspacePersistenceIds } from "./workspace-persistence.mjs";
+
 const recoveryByWorkspace = new Map();
-const saveQueues = new Map();
+const clearTasks = new Map();
 
 function clone(value) {
   return structuredClone(value);
@@ -8,7 +10,7 @@ function clone(value) {
 function stateFor(workspaceId) {
   let state = recoveryByWorkspace.get(workspaceId);
   if (!state) {
-    state = { loaded: false, baseline: [], view: [], operations: [], nextSequence: 1, readError: "", saveError: "" };
+    state = { loaded: false, baseline: [], view: [], operations: [], nextSequence: 1, generation: 0, clearing: false, readError: "", saveError: "" };
     recoveryByWorkspace.set(workspaceId, state);
   }
   return state;
@@ -72,6 +74,7 @@ export function getQuestionConversationSaveError(workspaceId) {
  */
 export function recordQuestionConversationChanges(workspaceId, value) {
   const state = stateFor(workspaceId);
+  if (state.clearing) return clone(state.view);
   const next = clone(value);
   const previousById = new Map(state.view.map((conversation) => [conversation.id, conversation]));
   const nextById = new Map(next.map((conversation) => [conversation.id, conversation]));
@@ -122,9 +125,98 @@ export function clearQuestionConversationSaveError(workspaceId) {
 
 /** Serialize writes across component unmounts for one workspace. @param {string} workspaceId */
 export function enqueueQuestionConversationSave(workspaceId, operation) {
-  const previous = saveQueues.get(workspaceId) ?? Promise.resolve();
-  const next = previous.catch(() => {}).then(operation);
-  saveQueues.set(workspaceId, next);
-  void next.finally(() => { if (saveQueues.get(workspaceId) === next) saveQueues.delete(workspaceId); }).catch(() => {});
-  return next;
+  const state = stateFor(workspaceId);
+  if (state.clearing) return Promise.resolve({ skipped: true });
+  const generation = state.generation;
+  return enqueueWorkspacePersistence(workspaceId, () => {
+    if (state.generation !== generation || state.clearing) return { skipped: true };
+    return operation();
+  });
+}
+
+function resetStateAfterClear(state) {
+  state.loaded = true;
+  state.baseline = [];
+  state.view = [];
+  state.operations = [];
+  state.readError = "";
+  state.saveError = "";
+}
+
+function restoreStateAfterFailedClear(state, snapshot, message) {
+  state.loaded = snapshot.loaded;
+  state.baseline = snapshot.baseline;
+  state.view = snapshot.view;
+  state.operations = snapshot.operations;
+  state.nextSequence = snapshot.nextSequence;
+  state.readError = snapshot.readError;
+  state.saveError = message;
+}
+
+function enqueueClear(workspaceIds, operation) {
+  const ids = [...new Set(workspaceIds.filter((id) => typeof id === "string" && id))];
+  const priorTasks = [...new Set(ids.map((id) => clearTasks.get(id)).filter(Boolean))];
+  if (priorTasks.length) {
+    return Promise.all(priorTasks.map((task) => task.catch(() => {})))
+      .then(() => enqueueClear(ids, operation));
+  }
+  const states = new Map();
+  for (const id of ids) {
+    const state = stateFor(id);
+    states.set(id, {
+      state,
+      snapshot: clone({
+        loaded: state.loaded,
+        baseline: state.baseline,
+        view: state.view,
+        operations: state.operations,
+        nextSequence: state.nextSequence,
+        readError: state.readError,
+        saveError: state.saveError,
+      }),
+    });
+    state.generation += 1;
+    state.clearing = true;
+  }
+
+  const task = clearWorkspacePersistence(ids, operation)
+    .then((result) => {
+      for (const { state } of states.values()) resetStateAfterClear(state);
+      return result;
+    })
+    .catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      for (const { state, snapshot } of states.values()) restoreStateAfterFailedClear(state, snapshot, message);
+      throw error;
+    })
+    .finally(() => {
+      for (const [id, { state }] of states) {
+        state.clearing = false;
+        if (clearTasks.get(id) === task) clearTasks.delete(id);
+      }
+    });
+
+  for (const id of ids) clearTasks.set(id, task);
+  return task;
+}
+
+/** Wait for a workspace's in-flight writes, invalidate queued writes, then clear storage. */
+export function clearQuestionConversationWorkspace(workspaceId, operation) {
+  return enqueueClear([workspaceId], operation);
+}
+
+/** Clear every workspace known to this page after all their writes have settled. */
+export function clearAllQuestionConversations(operation, additionalWorkspaceIds = []) {
+  const workspaceIds = new Set([...recoveryByWorkspace.keys(), ...getKnownWorkspacePersistenceIds(), ...additionalWorkspaceIds]);
+  return enqueueClear([...workspaceIds], operation);
+}
+
+/** @param {string} workspaceId */
+export function isQuestionConversationClearPending(workspaceId) {
+  return stateFor(workspaceId).clearing;
+}
+
+/** @param {string} workspaceId */
+export function getQuestionConversationGeneration(workspaceId) {
+  return stateFor(workspaceId).generation;
 }

@@ -1,4 +1,5 @@
 import type { MouseEvent, RefObject } from "react";
+import { useState } from "react";
 import {
   Background,
   BackgroundVariant,
@@ -53,7 +54,7 @@ function GraphFlowCanvas({ nodes, edges, onNodesChange, onNodeClick, onInit, sho
 
 export function GraphPanel({
   mobileView, directory, directories, graphLabel, scopedFileCount, hiddenCount, showAll,
-  graphReady, graphActive, canvasRef, nodes, edges, onNodesChange, onNodeClick, onInit, onDirectoryChange, onToggleScope, onLocateCurrent, onResetLayout,
+  graphReady, graphActive, canvasRef, nodes, edges, onNodesChange, onNodeClick, onInit, onDirectoryChange, onToggleScope, onLocateCurrent, onResetLayout, disabled = false,
 }: {
   mobileView: "files" | "graph" | "details";
   directory: string;
@@ -74,20 +75,25 @@ export function GraphPanel({
   onToggleScope: () => void;
   onLocateCurrent: () => void;
   onResetLayout: () => void;
+  disabled?: boolean;
 }) {
+  const [hasMountedFlow, setHasMountedFlow] = useState(false);
+  if (graphReady && graphActive && !hasMountedFlow) setHasMountedFlow(true);
+  const shouldRenderFlow = graphReady && (graphActive || hasMountedFlow);
+
   return <section className={`graph-pane${mobileView !== "graph" ? " mobile-hidden" : ""}`} aria-label="模块依赖图">
     <div className="graph-toolbar">
       <div className="graph-title-group"><span className="toolbar-icon"><Waypoints size={16} /></span><div><h2>模块关系</h2><span>{graphLabel}{hiddenCount > 0 ? ` · 已隐藏 ${hiddenCount}` : ""}</span></div></div>
       <div className="graph-actions">
-        <label className="graph-directory-filter"><span className="sr-only">筛选图谱目录</span><select aria-label="筛选图谱目录" value={directory} onChange={(event) => onDirectoryChange(event.target.value)}><option value="">全部目录</option>{directories.map((item) => <option key={item} value={item}>{item}</option>)}</select></label>
-        {scopedFileCount <= 200 && scopedFileCount > 1 && <button onClick={onToggleScope} aria-label={showAll ? "查看当前关联" : "查看所选目录全图"} data-tooltip={showAll ? "查看当前关联" : "查看所选目录全图"}><Waypoints size={15} /></button>}
-        <button onClick={onLocateCurrent} aria-label="定位当前文件" data-tooltip="定位当前文件"><Crosshair size={15} /></button>
-        <button onClick={onResetLayout} aria-label="重置布局" data-tooltip="重置布局"><RotateCcw size={15} /></button>
+        <label className="graph-directory-filter"><span className="sr-only">筛选图谱目录</span><select aria-label="筛选图谱目录" value={directory} disabled={disabled} onChange={(event) => onDirectoryChange(event.target.value)}><option value="">全部目录</option>{directories.map((item) => <option key={item} value={item}>{item}</option>)}</select></label>
+        {scopedFileCount <= 200 && scopedFileCount > 1 && <button disabled={disabled} onClick={onToggleScope} aria-label={showAll ? "查看当前关联" : "查看所选目录全图"} data-tooltip={showAll ? "查看当前关联" : "查看所选目录全图"}><Waypoints size={15} /></button>}
+        <button disabled={disabled} onClick={onLocateCurrent} aria-label="定位当前文件" data-tooltip="定位当前文件"><Crosshair size={15} /></button>
+        <button disabled={disabled} onClick={onResetLayout} aria-label="重置布局" data-tooltip="重置布局"><RotateCcw size={15} /></button>
       </div>
     </div>
     <div ref={canvasRef} className="graph-canvas" aria-label="文件依赖关系图">
-      {graphReady && graphActive && <ReactFlowProvider><GraphFlowCanvas nodes={nodes} edges={edges} onNodesChange={onNodesChange} onNodeClick={onNodeClick} onInit={onInit} showAll={showAll} /></ReactFlowProvider>}
-      <div className="graph-legend"><span className="legend-sample"><i /></span><span>当前文件导入目标文件</span><span className="legend-divider" /><span className="legend-dot" />当前文件</div>
+      {shouldRenderFlow && <div className="graph-flow-mount" aria-hidden={!graphActive} style={{ visibility: graphActive ? "visible" : "hidden", pointerEvents: graphActive ? "auto" : "none" }}><ReactFlowProvider><GraphFlowCanvas nodes={nodes} edges={edges} onNodesChange={onNodesChange} onNodeClick={onNodeClick} onInit={onInit} showAll={showAll} /></ReactFlowProvider></div>}
+      <div className="graph-legend" aria-label="依赖图图例"><span className="legend-direction is-outgoing"><i />当前文件导入</span><span className="legend-direction is-incoming"><i />文件导入当前</span><span className="legend-divider" /><span className="legend-dot" />当前文件</div>
       <div className="graph-helper"><span>拖动节点整理视图</span><span className="helper-separator">·</span><span>滚轮缩放</span></div>
     </div>
   </section>;

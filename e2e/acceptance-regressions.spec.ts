@@ -5,6 +5,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { isGraphNodeWithinBounds, waitForStableGraphGeometry } from './helpers/graph-geometry';
+import { installResizeObserverProbe } from './helpers/resize-observer-probe';
 
 let modelServer: Server;
 let modelOrigin = '';
@@ -198,6 +199,7 @@ test('A2b explanation and route expire independently after a deep dependency cha
 });
 
 test('an expired AI route restores its progress without restoring stale source focus', async ({ page }) => {
+  const resizeProbe = await installResizeObserverProbe(page);
   const root = await mkdtemp(path.join(os.tmpdir(), 'repolens-review-reopen-stale-'));
   roots.push(root);
   await writeFile(path.join(root, 'main.ts'), "import { value } from './middle'; export const main = value;\n");
@@ -220,6 +222,7 @@ test('an expired AI route restores its progress without restoring stale source f
   await page.getByRole('tab', { name: '源码', exact: true }).click();
   await expect(page.locator('.source-line.is-focused')).toHaveCount(0);
   await expect(page.getByText(/旧行号定位已停用/)).toBeVisible();
+  expect(await resizeProbe.errors(), resizeProbe.logs.join('\n')).toEqual([]);
 });
 
 test('a delayed settings save cannot overwrite a newer unsaved draft', async ({ page }) => {
@@ -362,6 +365,7 @@ test('a settings read failure remains visible when the user edits the draft whil
 });
 
 test('repository config diagnostics show paths and messages beside an AI route and clear after repair', async ({ page }) => {
+  const resizeProbe = await installResizeObserverProbe(page);
   const root = await repository();
   await writeFile(path.join(root, 'tsconfig.json'), '{ "compilerOptions": { "baseUrl": ".",');
   await open(page, root);
@@ -397,6 +401,7 @@ test('repository config diagnostics show paths and messages beside an AI route a
   expect((await rescan).ok()).toBeTruthy();
   await expect(diagnostics).toContainText('无诊断');
   await expect(diagnostics).not.toContainText('TS1005');
+  expect(await resizeProbe.errors(), resizeProbe.logs.join('\n')).toEqual([]);
 });
 
 test('read and save failures are shown separately and a successful save clears both', async ({ page }) => {
@@ -495,6 +500,7 @@ test('a delayed settings save from the previous repository cannot overwrite the 
 });
 
 test('A3 identical cached route must keep its content identity and progress', async ({ page }) => {
+  const resizeProbe = await installResizeObserverProbe(page);
   const root = await repository();
   const snapshot = await open(page, root);
   await generate(page, '生成阅读路线');
@@ -512,6 +518,7 @@ test('A3 identical cached route must keep its content identity and progress', as
   const afterReload = await generate(page, '生成阅读路线');
   expect(afterReload.cached).toBe(true);
   await expect(page.getByRole('button', { name: '第 2 步：main.ts' })).toHaveAttribute('aria-current', 'step');
+  expect(await resizeProbe.errors(), resizeProbe.logs.join('\n')).toEqual([]);
 });
 
 test('A4 a failed open must not strand the previous repository', async ({ page }) => {
