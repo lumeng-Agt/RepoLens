@@ -8,6 +8,7 @@ import {
   useNodesState,
 } from "@xyflow/react";
 import dagre from "@dagrejs/dagre";
+import { separateOverlappingGraphNodes } from "@/data/graph-layout.mjs";
 import {
   BookOpenText,
   ArrowLeft,
@@ -18,7 +19,9 @@ import {
   Search,
   Waypoints,
   Sparkles,
+  BookOpen,
 } from "lucide-react";
+import { WorkspaceOverview } from "@/components/repolens/WorkspaceOverview";
 import {
   useCallback,
   useEffect,
@@ -44,12 +47,18 @@ import { parseTourProgress } from "@/data/tour-progress.mjs";
 import { createProgressSessionGate } from "@/data/progress-session.mjs";
 import { clearAllQuestionConversations, clearQuestionConversationWorkspace } from "@/data/question-recovery.mjs";
 import { enqueueWorkspacePersistence } from "@/data/workspace-persistence.mjs";
+import { acknowledgeReadingArtifactJournal, applyReadingArtifactJournal, createReadingArtifactJournal, hasReadingArtifactOperations, readingArtifactJournalCheckpoint, stageReadingArtifactChanges, type ReadingArtifactJournal } from "@/data/reading-artifact-journal.mjs";
+import { useWorkspacePersistenceStatus } from "@/data/useWorkspacePersistenceStatus";
 import { emptyNavigationHistory, moveNavigationHistory, pushNavigationHistory } from "@/data/navigation-history.mjs";
+import { initialNavigationState, navigationReducer, type StateUpdate } from "@/data/navigation-state.mjs";
 import { QuickOpenDialog } from "@/components/repolens/QuickOpenDialog";
+import { UsageGuideNotice, UsageGuidePanel, UsageGuideWelcome } from "@/components/repolens/UsageGuide";
+import { completeUsageGuideTask, createDefaultUsageGuidePreferences, hasExistingBrowserUse, hasExistingWorkspaceUse, normalizeUsageGuidePreferences, type UsageGuidePreferences, type UsageGuideTaskId } from "@/data/usage-guide.mjs";
 import type {
   FileRecord,
   AiPreview,
   RepositorySnapshot,
+  ReadingNote,
   SourceReference,
   AiRouteRecord,
   TourStep,
@@ -57,59 +66,8 @@ import type {
 import "@xyflow/react/dist/style.css";
 
 type MobileView = "files" | "graph" | "details";
-type NavigationState = {
-  selectedFileId: string; tourIndex: number; focusedLine: SourceReference | null;
-  focusOrigin: "none" | "reference" | "route"; focusRouteSignature: string | null;
-  completedSteps: string[]; graphDirectory: string;
-};
-type NavigationAction =
-  | { type: "select"; value: string | ((previous: string) => string) }
-  | { type: "tour"; value: number | ((previous: number) => number) }
-  | { type: "reference"; value: SourceReference | null | ((previous: SourceReference | null) => SourceReference | null); origin?: "reference" | "route"; routeSignature?: string }
-  | { type: "directory"; value: string }
-  | { type: "directory-select"; value: string; fileId: string; preserveFocus: boolean }
-  | { type: "select-file"; fileId: string; directory: string }
-  | { type: "reference-navigation"; reference: SourceReference; directory: string; origin?: "reference" | "route"; routeSignature?: string }
-  | { type: "completed"; value: string[] | ((previous: string[]) => string[]) }
-  | { type: "restore-progress"; stepIndex: number; completedSteps: string[]; step?: TourStep; routeSignature: string; routeStale: boolean }
-  | { type: "route-step"; stepIndex: number; step: TourStep; routeSignature: string; completedStepId?: string }
-  | { type: "restart-tour"; step: TourStep; routeSignature: string }
-  | { type: "snapshot"; selectedFileId: string; graphDirectory: string; clearFocus: boolean; resetTour: boolean };
-type StateUpdate<T> = T | ((previous: T) => T);
-
-function navigationReducer(state: NavigationState, action: NavigationAction): NavigationState {
-  if (action.type === "select") return { ...state, selectedFileId: typeof action.value === "function" ? action.value(state.selectedFileId) : action.value };
-  if (action.type === "tour") return { ...state, tourIndex: typeof action.value === "function" ? action.value(state.tourIndex) : action.value };
-  if (action.type === "reference") {
-    const reference = typeof action.value === "function" ? action.value(state.focusedLine) : action.value;
-    return { ...state, focusedLine: reference, focusOrigin: reference ? action.origin ?? "reference" : "none", focusRouteSignature: reference && action.origin === "route" ? action.routeSignature ?? null : null };
-  }
-  if (action.type === "directory") return { ...state, graphDirectory: action.value };
-  if (action.type === "directory-select") return { ...state, graphDirectory: action.value, selectedFileId: action.fileId, ...(action.preserveFocus ? {} : { focusedLine: null, focusOrigin: "none" as const, focusRouteSignature: null }) };
-  if (action.type === "select-file") return { ...state, selectedFileId: action.fileId, graphDirectory: action.directory, focusedLine: null, focusOrigin: "none", focusRouteSignature: null };
-  if (action.type === "reference-navigation") return { ...state, selectedFileId: action.reference.fileId, graphDirectory: action.directory, focusedLine: action.reference, focusOrigin: action.origin ?? "reference", focusRouteSignature: action.origin === "route" ? action.routeSignature ?? null : null };
-  if (action.type === "completed") return { ...state, completedSteps: typeof action.value === "function" ? action.value(state.completedSteps) : action.value };
-  if (action.type === "restore-progress") return {
-    ...state,
-    tourIndex: action.stepIndex,
-    completedSteps: action.completedSteps,
-    ...(action.step && !action.routeStale ? { selectedFileId: action.step.focusFileId, focusedLine: action.step.reference, focusOrigin: "route" as const, focusRouteSignature: action.routeSignature } : { focusedLine: null, focusOrigin: "none" as const, focusRouteSignature: null }),
-  };
-  if (action.type === "route-step") return {
-    ...state,
-    tourIndex: action.stepIndex,
-    selectedFileId: action.step.focusFileId,
-    graphDirectory: "",
-    focusedLine: action.step.reference,
-    focusOrigin: "route",
-    focusRouteSignature: action.routeSignature,
-    ...(action.completedStepId ? { completedSteps: state.completedSteps.includes(action.completedStepId) ? state.completedSteps : [...state.completedSteps, action.completedStepId] } : {}),
-  };
-  if (action.type === "restart-tour") return { ...state, tourIndex: 0, completedSteps: [], selectedFileId: action.step.focusFileId, graphDirectory: "", focusedLine: action.step.reference, focusOrigin: "route", focusRouteSignature: action.routeSignature };
-  return { ...state, selectedFileId: action.selectedFileId, graphDirectory: action.graphDirectory, ...(action.resetTour ? { tourIndex: 0, completedSteps: [] } : {}), ...(action.clearFocus ? { focusedLine: null, focusOrigin: "none", focusRouteSignature: null } : {}) };
-}
-
 const progressMemory = new Map<string, string>();
+const USAGE_GUIDE_STORAGE_KEY = "repolens:usage-guide:v1";
 
 const BOOT_SNAPSHOT: RepositorySnapshot = { id: "sample-loading", version: "loading", name: "RepoLens", description: "正在载入示例仓库", files: [], dependencies: [], tour: [], source: "sample" };
 
@@ -142,6 +100,18 @@ function readTourProgress(key: string) {
   const cookie = document.cookie.split(";").map((part) => part.trim()).find((part) => part.startsWith(`${cookieKey}=`));
   if (cookie) return decodeURIComponent(cookie.slice(cookieKey.length + 1));
   return null;
+}
+
+function readBrowserUsageGuide() {
+  try {
+    const raw = window.localStorage.getItem(USAGE_GUIDE_STORAGE_KEY);
+    let stored: unknown = null;
+    if (raw !== null) stored = JSON.parse(raw);
+    const keys = Array.from({ length: window.localStorage.length }, (_, index) => window.localStorage.key(index) ?? "");
+    return { available: true, present: raw !== null, stored, existingUse: hasExistingBrowserUse(keys) };
+  } catch (error) {
+    return { available: false, present: false, stored: null, existingUse: false, message: error instanceof Error ? error.message : "浏览器本地存储不可用。" };
+  }
 }
 
 function writeTourProgress(key: string, value: string) {
@@ -247,9 +217,9 @@ function layoutGraph(
       target: dependency.toId,
       type: "smoothstep",
       animated: false,
-      markerEnd: { type: MarkerType.ArrowClosed, width: 14, height: 14 },
+      markerEnd: { type: MarkerType.ArrowClosed, width: 14, height: 14, color: importsFromCurrent ? "var(--thread-outgoing)" : importsCurrent ? "var(--thread-incoming)" : "var(--border-strong)" },
       style: {
-        stroke: importsFromCurrent ? "#a8c68e" : importsCurrent ? "#9bb5df" : "#6c7787",
+        stroke: importsFromCurrent ? "var(--thread-outgoing)" : importsCurrent ? "var(--thread-incoming)" : "var(--border-strong)",
         strokeWidth: connected ? 1.8 : 1.15,
         opacity: connected ? 1 : 0.2,
       },
@@ -282,7 +252,7 @@ function AppShell() {
     repositoryReads.current.clear();
     return repositoryGate.current.begin();
   }, []);
-  const [navigation, dispatchNavigation] = useReducer(navigationReducer, { selectedFileId: "src/main.tsx", tourIndex: 0, focusedLine: null, focusOrigin: "none", focusRouteSignature: null, completedSteps: [], graphDirectory: "" });
+  const [navigation, dispatchNavigation] = useReducer(navigationReducer, initialNavigationState);
   const { selectedFileId, tourIndex, focusedLine, focusOrigin, focusRouteSignature, completedSteps, graphDirectory } = navigation;
   const setSelectedFileId = useCallback((value: StateUpdate<string>) => dispatchNavigation({ type: "select", value }), []);
   const setTourIndex = useCallback((value: StateUpdate<number>) => dispatchNavigation({ type: "tour", value }), []);
@@ -291,14 +261,35 @@ function AppShell() {
   const setGraphDirectory = useCallback((value: string) => dispatchNavigation({ type: "directory", value }), []);
   const [detailTab, setDetailTab] = useState("guide");
   const [searchQuery, setSearchQuery] = useState("");
+  const [searchQuestionScope, setSearchQuestionScope] = useState<{ workspaceId: string; fileIds: string[] }>({ workspaceId: "", fileIds: [] });
+  const questionExtraFileIds = searchQuestionScope.workspaceId === repositoryWorkspaceId(repository) ? searchQuestionScope.fileIds : [];
   const [quickOpen, setQuickOpen] = useState(false);
   const [layoutMode, setLayoutMode] = useState<"structure" | "reading">("structure");
   const [navigationHistory, setNavigationHistory] = useState(emptyNavigationHistory);
   const [repoPath, setRepoPath] = useState("");
   const [desktopMode] = useState(() => Boolean(globalThis.__REPOLENS_RUNTIME__?.desktop));
+  const [guidePreferences, setGuidePreferences] = useState<UsageGuidePreferences>(() => createDefaultUsageGuidePreferences());
+  const guidePreferencesRef = useRef(guidePreferences);
+  const [guideReady, setGuideReady] = useState(false);
+  const guidePersistenceAllowedRef = useRef(false);
+  const [guideStorageMessage, setGuideStorageMessage] = useState("");
+  const [showGuideWelcome, setShowGuideWelcome] = useState(false);
+  const [guidePanelOpen, setGuidePanelOpen] = useState(false);
+  const [guideNoticeAvailable, setGuideNoticeAvailable] = useState(false);
+  const [guideRepoRequest, setGuideRepoRequest] = useState(0);
+  const guideButtonRef = useRef<HTMLButtonElement>(null);
+  const guideInitializedRef = useRef(false);
+  const guideSaveSequenceRef = useRef(0);
+  const guideWriteQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const closeRepositoryRef = useRef<() => Promise<void>>(async () => {});
+  const guideTourPracticeRef = useRef<{ workspaceId: string; sessionVersion: number; origin: { fileId: string; line?: number }; destination: { fileId: string; line: number }; visited: boolean; returned: boolean } | null>(null);
+  const guideNavigationRef = useRef<{ repositoryId: string; sessionVersion: number; fileId: string; dependency: boolean } | null>(null);
   const [desktopBackendError, setDesktopBackendError] = useState("");
   const [repoBusy, setRepoBusy] = useState(false);
   const [savedDataClearBusy, setSavedDataClearBusy] = useState(false);
+  const [savedDataClearGeneration, setSavedDataClearGeneration] = useState(0);
+  const savedDataClearGenerationRef = useRef(0);
+  const savedDataClearActiveRef = useRef(false);
   const [questionClearVersion, setQuestionClearVersion] = useState(0);
   const [repoMessage, setRepoMessage] = useState("");
   const [loadedSource, setLoadedSource] = useState<{ fileId: string; repositoryId: string; revision?: string; text: string } | null>(null);
@@ -313,6 +304,13 @@ function AppShell() {
   const [aiSettingsBusy, setAiSettingsBusy] = useState(false);
   const [aiResultsByFile, setAiResultsByFile] = useState<Map<string, AiResultRecord>>(() => new Map());
   const [aiRoutesByRepository, setAiRoutesByRepository] = useState<Map<string, AiRouteRecord>>(() => new Map());
+  const [readingNotesByWorkspace, setReadingNotesByWorkspace] = useState<Map<string, ReadingNote[]>>(() => new Map());
+  const readingNotesRef = useRef(readingNotesByWorkspace);
+  useLayoutEffect(() => { readingNotesRef.current = readingNotesByWorkspace; }, [readingNotesByWorkspace]);
+  const [savedToursByWorkspace, setSavedToursByWorkspace] = useState<Map<string, AiRouteRecord[]>>(() => new Map());
+  const savedToursRef = useRef(savedToursByWorkspace);
+  useLayoutEffect(() => { savedToursRef.current = savedToursByWorkspace; }, [savedToursByWorkspace]);
+  const readingArtifactJournals = useRef(new Map<string, ReadingArtifactJournal<ReadingNote, AiRouteRecord>>());
   const [aiWorkflow, dispatchAiWorkflow] = useReducer(aiWorkflowReducer, initialAiWorkflowState);
   const { aiMessage, pendingAiMode, aiPreview, aiCandidates, selectedAiFiles, selectedAiRanges } = {
     aiMessage: aiWorkflow.message,
@@ -330,6 +328,66 @@ function AppShell() {
     ...aiSettingsDraft,
     configured: aiSettingsSaved.configured && !aiSettingsDirty && aiSettingsSessionReady && !aiSettingsBusy,
   };
+  const persistGuidePreferences = useCallback((preferences: UsageGuidePreferences): Promise<boolean> => {
+    if (!guidePersistenceAllowedRef.current) return Promise.resolve(false);
+    if (!desktopMode) {
+      try {
+        window.localStorage.setItem(USAGE_GUIDE_STORAGE_KEY, JSON.stringify(preferences));
+        setGuideStorageMessage("");
+        return Promise.resolve(true);
+      } catch (error) {
+        guidePersistenceAllowedRef.current = false;
+        setGuideStorageMessage(`使用指南只保存在当前页面：${error instanceof Error ? error.message : "浏览器存储不可用。"}`);
+        return Promise.resolve(false);
+      }
+    }
+    const requestId = ++guideSaveSequenceRef.current;
+    const operation = guideWriteQueueRef.current.then(async () => {
+      if (requestId !== guideSaveSequenceRef.current) return;
+      await localWorkspaceProvider.saveGuidePreferences(preferences);
+    });
+    guideWriteQueueRef.current = operation.catch(() => undefined);
+    return operation.then(() => {
+      if (requestId === guideSaveSequenceRef.current) setGuideStorageMessage("");
+      return true;
+    }).catch((error: Error) => {
+      if (requestId === guideSaveSequenceRef.current) setGuideStorageMessage(`使用指南只保存在当前页面：${error.message}`);
+      return false;
+    });
+  }, [desktopMode]);
+  const updateGuidePreferences = useCallback((value: UsageGuidePreferences | ((current: UsageGuidePreferences) => UsageGuidePreferences)) => {
+    const next = typeof value === "function" ? value(guidePreferencesRef.current) : value;
+    guidePreferencesRef.current = next;
+    setGuidePreferences(next);
+    if (guideReady) void persistGuidePreferences(next);
+    return next;
+  }, [guideReady, persistGuidePreferences]);
+  const initializeGuidePreferences = useCallback((stored: unknown, present: boolean, hasExistingUse: boolean, storageReady: boolean, warning?: string) => {
+    if (guideInitializedRef.current) return;
+    guideInitializedRef.current = true;
+    const normalized = present ? normalizeUsageGuidePreferences(stored) : null;
+    const invalidStoredValue = present && !normalized;
+    const blocked = !storageReady || invalidStoredValue;
+    let next = normalized ?? createDefaultUsageGuidePreferences();
+    if (blocked) {
+      next = { ...createDefaultUsageGuidePreferences(), welcomeHandled: true, noticeDismissed: true };
+      setGuideStorageMessage(warning ?? (invalidStoredValue ? "使用指南记录格式无效；为保护原记录，本次只在内存中使用。" : "使用指南记录读取失败；本次只在内存中使用。"));
+    } else if (!present && hasExistingUse) {
+      next = { ...next, welcomeHandled: true, noticeDismissed: false };
+      setGuideNoticeAvailable(true);
+    }
+    guidePreferencesRef.current = next;
+    setGuidePreferences(next);
+    guidePersistenceAllowedRef.current = !blocked;
+    setShowGuideWelcome(!next.welcomeHandled);
+    setGuideNoticeAvailable(next.welcomeHandled && !next.noticeDismissed);
+    setGuidePanelOpen(next.checklistOpen);
+    setGuideReady(true);
+    if (!blocked && !present && hasExistingUse) void persistGuidePreferences(next);
+  }, [persistGuidePreferences]);
+  const completeGuideTask = useCallback((task: UsageGuideTaskId) => {
+    updateGuidePreferences((previous) => completeUsageGuideTask(previous, task));
+  }, [updateGuidePreferences]);
   const [aiSettingsRevision, setAiSettingsRevision] = useState(0);
   const aiSettingsDraftRevision = useRef(0);
   const aiSettingsSaveSequence = useRef(0);
@@ -354,11 +412,14 @@ function AppShell() {
   const [nodePositions, setNodePositions] = useState(new Map<string, { x: number; y: number }>());
   const nodePositionsRef = useRef(nodePositions);
   useLayoutEffect(() => { nodePositionsRef.current = nodePositions; }, [nodePositions]);
+  const graphNodeDragging = useRef(false);
+  const graphLayoutAnchor = useRef<string | undefined>(undefined);
   const nodePositionsPersisted = useRef(new Map<string, string>());
   const dirtyNodePositions = useRef(new Map<string, Set<string>>());
   const pendingNodePositionRestore = useRef<{ key: string; workspaceId: string; signature: string } | null>(null);
   const [nodePositionsReadyKey, setNodePositionsReadyKey] = useState<string | null>(null);
   const [workspacePersistenceReadyKeys, setWorkspacePersistenceReadyKeys] = useState(new Set<string>());
+  const [workspaceReadFailures, setWorkspaceReadFailures] = useState(new Set<string>());
   const [graphReady, setGraphReady] = useState(false);
   const [graphSizeRevision, setGraphSizeRevision] = useState(0);
   const graphResizeRequest = useRef(0);
@@ -366,6 +427,12 @@ function AppShell() {
   const searchInputRef = useRef<HTMLInputElement>(null);
   const filesById = useMemo(() => new Map(repository.files.map((file) => [file.id, file])), [repository.files]);
   const workspaceId = repositoryWorkspaceId(repository);
+  const currentReadingNotes = readingNotesByWorkspace.get(workspaceId) ?? [];
+  const currentSavedTours = savedToursByWorkspace.get(workspaceId) ?? [];
+  const persistenceStatus = useWorkspacePersistenceStatus(workspaceId);
+  const activePersistenceKey = nodePositionSessionKey(repository);
+  const saveStatusLabel = savedDataClearBusy ? "正在清除" : workspaceReadFailures.has(activePersistenceKey) || persistenceStatus.phase === "memory" ? "仅在内存" : !workspacePersistenceReadyKeys.has(activePersistenceKey) ? "正在恢复" : persistenceStatus.phase === "saving" ? "保存中" : persistenceStatus.phase === "clearing" ? "正在清除" : "已保存";
+  const saveStatusDetail = workspaceReadFailures.has(activePersistenceKey) ? "读取保存数据失败，尚未确认磁盘记录；本页修改没有覆盖原数据。" : persistenceStatus.error || (saveStatusLabel === "仅在内存" ? "本页修改尚未确认写入磁盘。" : saveStatusLabel);
   const activeNodePositionKeyRef = useRef(nodePositionSessionKey(repository));
   useLayoutEffect(() => { activeNodePositionKeyRef.current = nodePositionSessionKey(repository); }, [repository]);
   const currentFile = filesById.get(selectedFileId) ?? repository.files[0] ?? EMPTY_FILE;
@@ -375,11 +442,20 @@ function AppShell() {
   const sourceMatches = loadedSource?.fileId === currentFile?.id && loadedSource.repositoryId === repository.id && loadedSource.revision === repository.revision;
   const sourceText = repository.source === "local" ? (sourceMatches ? loadedSource?.text ?? "" : "") : currentFile?.source ?? "";
   const sourceStatus = repository.source === "local" ? (sourceMatches ? "loaded" : sourceLoad?.key === sourceKey ? sourceLoad.status : "loading") : "loaded";
+  useEffect(() => {
+    const pending = guideNavigationRef.current;
+    if (!pending) return;
+    if (pending.repositoryId !== repository.id || pending.sessionVersion !== repositorySessionVersion) { guideNavigationRef.current = null; return; }
+    if (sourceStatus !== "loaded" || currentFile.id !== pending.fileId) return;
+    completeGuideTask("source");
+    if (pending.dependency) completeGuideTask("dependencies");
+    guideNavigationRef.current = null;
+  }, [completeGuideTask, currentFile.id, repository.id, repositorySessionVersion, sourceStatus]);
   const aiContextKey = `${workspaceId}:${repository.revision ?? repository.version}:${currentFile?.id ?? ""}:${aiSettingsRevision}`;
   useLayoutEffect(() => { aiContextRef.current = aiContextKey; }, [aiContextKey]);
   useLayoutEffect(() => { settingsSessionRef.current = { repositoryId: repository.id, sessionVersion: repositorySessionVersion }; }, [repository.id, repositorySessionVersion]);
   const aiRoute = aiRoutesByRepository.get(workspaceId) ?? null;
-  const aiRouteStale = aiRoute ? aiContextIsStale(aiRoute.contextFiles, repository) : false;
+  const aiRouteStale = aiRoute ? Boolean(aiRoute.stale) || aiContextIsStale(aiRoute.contextFiles, repository) : false;
   const activeTour = aiRoute?.steps ?? repository.tour;
   const activeRouteSignature = aiRoute?.signature ?? routeSignature(activeTour);
   const activeProgressKey = progressKey(repository, activeTour, aiRoute?.signature);
@@ -404,8 +480,36 @@ function AppShell() {
   const graphCandidateCount = scopedGraphFiles.length ? 1 + graphNeighborIds.length : 0;
   const graphHiddenCount = showAllGraph ? 0 : Math.max(0, graphCandidateCount - graphVisibleCount);
 
+  const persistReadingArtifactJournal = useCallback((snapshot: RepositorySnapshot, notes: ReadingNote[], tours: AiRouteRecord[]) => {
+    const targetWorkspaceId = repositoryWorkspaceId(snapshot);
+    const journal = readingArtifactJournals.current.get(targetWorkspaceId);
+    if (!journal || !hasReadingArtifactOperations(journal)) return Promise.resolve();
+    const checkpoint = readingArtifactJournalCheckpoint(journal);
+    const saveNotes = hasReadingArtifactOperations(journal, "notes");
+    const saveTours = hasReadingArtifactOperations(journal, "tours");
+    const saves: Promise<unknown>[] = [];
+    if (saveNotes) saves.push(enqueueWorkspacePersistence(targetWorkspaceId, async () => {
+      await localWorkspaceProvider.saveReadingNotes(workspaceSession(snapshot), notes);
+      const current = readingArtifactJournals.current.get(targetWorkspaceId);
+      if (current) readingArtifactJournals.current.set(targetWorkspaceId, acknowledgeReadingArtifactJournal(current, "notes", checkpoint));
+    }, { key: "reading-notes" }));
+    if (saveTours) saves.push(enqueueWorkspacePersistence(targetWorkspaceId, async () => {
+      await localWorkspaceProvider.saveTours(workspaceSession(snapshot), tours);
+      const current = readingArtifactJournals.current.get(targetWorkspaceId);
+      if (current) readingArtifactJournals.current.set(targetWorkspaceId, acknowledgeReadingArtifactJournal(current, "tours", checkpoint));
+    }, { key: "saved-tours" }));
+    return Promise.all(saves).then(() => undefined);
+  }, []);
+
   const restoreWorkspaceState = useCallback((snapshot: RepositorySnapshot, saved: LocalWorkspaceState) => {
+    initializeGuidePreferences(saved.guidePreferences ?? null, saved.guidePreferences != null, hasExistingWorkspaceUse(saved), saved.persistenceReady !== false, saved.warning);
     const positionsKey = nodePositionSessionKey(snapshot);
+    if (saved.persistenceReady === false) {
+      setWorkspacePersistenceReadyKeys((previous) => { const next = new Set(previous); next.delete(positionsKey); return next; });
+      setNodePositionsReadyKey((current) => current === positionsKey ? null : current);
+      setWorkspaceReadFailures((previous) => new Set(previous).add(positionsKey));
+      return saved.warning ?? "本地保存数据尚未成功读取；本页修改不会覆盖原记录。";
+    }
     const targetWorkspaceId = repositoryWorkspaceId(snapshot);
     const validSavedNodePositions = Object.fromEntries(Object.entries(saved.nodePositions).filter(([fileId, position]) =>
       Number.isFinite(position?.x) && Number.isFinite(position?.y) && snapshot.files.some((file) => file.id === fileId)));
@@ -423,13 +527,21 @@ function AppShell() {
     setAiResultsByFile((previous) => {
       const next = new Map(previous);
       for (const [fileId, value] of Object.entries(saved.aiResults)) {
-        if (value && typeof value === "object" && Array.isArray((value as AiResultRecord).__contextFiles)) next.set(`${repositoryWorkspaceId(snapshot)}:${fileId}`, value as AiResultRecord);
+        const resultKey = `${repositoryWorkspaceId(snapshot)}:${fileId}`;
+        if (!next.has(resultKey) && value && typeof value === "object" && Array.isArray((value as AiResultRecord).__contextFiles)) next.set(resultKey, value as AiResultRecord);
       }
       return next;
     });
     if (saved.aiRoute && saved.aiRoute.repositoryId === snapshot.id && Array.isArray(saved.aiRoute.steps) && Array.isArray(saved.aiRoute.contextFiles)) {
-      setAiRoutesByRepository((previous) => new Map(previous).set(repositoryWorkspaceId(snapshot), saved.aiRoute as unknown as AiRouteRecord));
+      setAiRoutesByRepository((previous) => previous.has(repositoryWorkspaceId(snapshot)) ? previous : new Map(previous).set(repositoryWorkspaceId(snapshot), saved.aiRoute as unknown as AiRouteRecord));
     }
+    const artifactWorkspaceId = repositoryWorkspaceId(snapshot);
+    const journal = readingArtifactJournals.current.get(artifactWorkspaceId) ?? createReadingArtifactJournal<ReadingNote, AiRouteRecord>();
+    readingArtifactJournals.current.set(artifactWorkspaceId, journal);
+    const restoredNotes = applyReadingArtifactJournal(Array.isArray(saved.readingNotes) ? saved.readingNotes.filter((item): item is ReadingNote => Boolean(item && typeof item.id === "string" && typeof item.fileId === "string" && typeof item.text === "string")) : [], journal, "notes");
+    const restoredTours = applyReadingArtifactJournal(Array.isArray(saved.savedTours) ? saved.savedTours as AiRouteRecord[] : [], journal, "tours");
+    const nextNotes = new Map(readingNotesRef.current); nextNotes.set(artifactWorkspaceId, restoredNotes); readingNotesRef.current = nextNotes; setReadingNotesByWorkspace(nextNotes);
+    const nextTours = new Map(savedToursRef.current); nextTours.set(artifactWorkspaceId, restoredTours); savedToursRef.current = nextTours; setSavedToursByWorkspace(nextTours);
     setNodePositions((previous) => {
       const prefix = `${repositoryWorkspaceId(snapshot)}:`;
       const next = new Map([...previous].filter(([key]) => !key.startsWith(prefix)));
@@ -443,8 +555,78 @@ function AppShell() {
       while (next.size > 64) next.delete(next.values().next().value as string);
       return next;
     });
+    setWorkspaceReadFailures((previous) => { const next = new Set(previous); next.delete(positionsKey); return next; });
+    if (hasReadingArtifactOperations(journal)) {
+      void persistReadingArtifactJournal(snapshot, restoredNotes, restoredTours).catch((error: Error) => setRepoMessage(`原有阅读记录已恢复，但本页改动尚未保存：${error.message}`));
+    }
     return saved.warning;
-  }, []);
+  }, [initializeGuidePreferences, persistReadingArtifactJournal]);
+
+  const retryWorkspaceRestore = useCallback(async () => {
+    const snapshot = repository;
+    const epoch = repositoryGate.current.current().epoch;
+    try {
+      const saved = await localWorkspaceProvider.get(repositoryWorkspaceId(snapshot));
+      if (!repositoryGate.current.isCurrent(epoch, snapshot.id)) return;
+      const warning = restoreWorkspaceState(snapshot, saved);
+      if (saved.persistenceReady === false) throw new Error(warning ?? "本地保存数据尚未成功读取。");
+      setRepoMessage(warning ? `保存数据已读取：${warning}` : "保存数据已恢复；本页待保存修改正在写入。");
+    } catch (error) {
+      if (!repositoryGate.current.isCurrent(epoch, snapshot.id)) return;
+      const failedKey = nodePositionSessionKey(snapshot);
+      setWorkspacePersistenceReadyKeys((current) => { const next = new Set(current); next.delete(failedKey); return next; });
+      setWorkspaceReadFailures((current) => new Set(current).add(failedKey));
+      setNodePositionsReadyKey((current) => current === failedKey ? null : current);
+      setRepoMessage(`保存数据读取失败；原记录已保留，可稍后重试：${error instanceof Error ? error.message : "本地存储不可用。"}`);
+    }
+  }, [repository, restoreWorkspaceState]);
+
+  const retryReadingArtifactSave = useCallback(async () => {
+    if (!workspacePersistenceReadyKeys.has(nodePositionSessionKey(repository))) return;
+    try {
+      await persistReadingArtifactJournal(repository, readingNotesRef.current.get(workspaceId) ?? [], savedToursRef.current.get(workspaceId) ?? []);
+      setRepoMessage("待保存的笔记和路线已写入本地存储。");
+    } catch (error) {
+      setRepoMessage(`笔记和路线仍未保存：${error instanceof Error ? error.message : "本地存储不可用。"}`);
+    }
+  }, [persistReadingArtifactJournal, repository, workspaceId, workspacePersistenceReadyKeys]);
+
+  useEffect(() => {
+    if (repository.source !== "local") return;
+    const activeRepositoryId = repository.id;
+    const activeWorkspaceId = workspaceId;
+    const epoch = repositoryGate.current.current().epoch;
+    let cancelled = false;
+    const controller = new AbortController();
+    localWorkspaceProvider.get(activeWorkspaceId, controller.signal).then((saved) => {
+      if (cancelled || !repositoryGate.current.isCurrent(epoch, activeRepositoryId)) return;
+      if (saved.persistenceReady === false) {
+        const failedKey = nodePositionSessionKey(repository);
+        setWorkspacePersistenceReadyKeys((current) => { const next = new Set(current); next.delete(failedKey); return next; });
+        setWorkspaceReadFailures((current) => new Set(current).add(failedKey));
+        setRepoMessage(saved.warning ?? "阅读记录读取失败；本页修改不会覆盖原有保存数据。");
+        return;
+      }
+      const restoredKey = nodePositionSessionKey(repository);
+      setWorkspacePersistenceReadyKeys((current) => new Set(current).add(restoredKey));
+      setWorkspaceReadFailures((current) => { const next = new Set(current); next.delete(restoredKey); return next; });
+      const journal = readingArtifactJournals.current.get(activeWorkspaceId) ?? createReadingArtifactJournal<ReadingNote, AiRouteRecord>();
+      readingArtifactJournals.current.set(activeWorkspaceId, journal);
+      const notes = applyReadingArtifactJournal(Array.isArray(saved.readingNotes) ? saved.readingNotes.filter((item): item is ReadingNote => Boolean(item && typeof item.id === "string" && typeof item.fileId === "string" && typeof item.text === "string")) : [], journal, "notes");
+      const tours = applyReadingArtifactJournal(Array.isArray(saved.savedTours) ? saved.savedTours as AiRouteRecord[] : [], journal, "tours");
+      const nextNotes = new Map(readingNotesRef.current); nextNotes.set(activeWorkspaceId, notes); readingNotesRef.current = nextNotes; setReadingNotesByWorkspace(nextNotes);
+      const nextTours = new Map(savedToursRef.current); nextTours.set(activeWorkspaceId, tours); savedToursRef.current = nextTours; setSavedToursByWorkspace(nextTours);
+      if (saved.aiRoute && Array.isArray(saved.aiRoute.steps) && Array.isArray(saved.aiRoute.contextFiles)) setAiRoutesByRepository((current) => current.has(activeWorkspaceId) ? current : new Map(current).set(activeWorkspaceId, saved.aiRoute as unknown as AiRouteRecord));
+      if (hasReadingArtifactOperations(journal)) void persistReadingArtifactJournal(repository, notes, tours).catch((error: Error) => setRepoMessage(`原有阅读记录已恢复，但本页改动尚未保存：${error.message}`));
+    }).catch((error: Error) => {
+      if (cancelled || error.name === "AbortError") return;
+      const failedKey = nodePositionSessionKey(repository);
+      setWorkspacePersistenceReadyKeys((current) => { const next = new Set(current); next.delete(failedKey); return next; });
+      setWorkspaceReadFailures((current) => new Set(current).add(failedKey));
+      setRepoMessage(`阅读记录读取失败；本页修改不会覆盖原有保存数据：${error.message}`);
+    });
+    return () => { cancelled = true; controller.abort(); };
+  }, [repository, repository.id, repository.source, workspaceId, persistReadingArtifactJournal]);
 
   useEffect(() => {
     const pending = pendingNodePositionRestore.current;
@@ -488,9 +670,11 @@ function AppShell() {
   useEffect(() => {
     let cancelled = false;
     const epoch = beginRepositorySession();
+    const storedGuide = desktopMode ? null : readBrowserUsageGuide();
     sampleRepositoryProvider.getSnapshot().then(async (snapshot) => {
       let warning: string | undefined;
       if (cancelled || !repositoryGate.current.isCurrent(epoch)) return;
+      if (storedGuide) initializeGuidePreferences(storedGuide.stored, storedGuide.present, storedGuide.existingUse, storedGuide.available, storedGuide.message);
       if (desktopMode) {
         try {
           const saved = await localWorkspaceProvider.get(repositoryWorkspaceId(snapshot));
@@ -501,8 +685,10 @@ function AppShell() {
           if (cancelled || !repositoryGate.current.isCurrent(epoch)) return;
           const failedKey = nodePositionSessionKey(snapshot);
           setWorkspacePersistenceReadyKeys((current) => { const next = new Set(current); next.delete(failedKey); return next; });
+          setWorkspaceReadFailures((current) => new Set(current).add(failedKey));
           setNodePositionsReadyKey((current) => current === failedKey ? null : current);
           warning = error instanceof Error ? error.message : "无法读取桌面保存数据。";
+          initializeGuidePreferences(null, false, false, false, warning);
         }
       }
       if (cancelled || !repositoryGate.current.activate(epoch, snapshot)) return;
@@ -510,9 +696,14 @@ function AppShell() {
       setRepository(snapshot);
       setSelectedFileId(snapshot.files[0]?.id ?? "");
       if (warning) setRepoMessage(`桌面保存数据读取失败；修改暂存于当前页面，原记录不会覆盖：${warning}`);
-    }).catch((error: Error) => { if (!cancelled && repositoryGate.current.isCurrent(epoch)) setRepoMessage(error.message); });
+    }).catch((error: Error) => {
+      if (!cancelled && repositoryGate.current.isCurrent(epoch)) {
+        if (storedGuide) initializeGuidePreferences(storedGuide.stored, storedGuide.present, storedGuide.existingUse, storedGuide.available, storedGuide.message);
+        setRepoMessage(error.message);
+      }
+    });
     return () => { cancelled = true; };
-  }, [beginRepositorySession, desktopMode, restoreWorkspaceState, setSelectedFileId]);
+  }, [beginRepositorySession, desktopMode, initializeGuidePreferences, restoreWorkspaceState, setSelectedFileId]);
 
   const initialLayout = useMemo(
     () => layoutGraph(repository, selectedFileId, showAllGraph, compactGraph, graphDirectory, nodePositions),
@@ -520,11 +711,14 @@ function AppShell() {
     [repository, selectedFileId, showAllGraph, compactGraph, graphDirectory, nodePositions],
   );
   const [nodes, setNodes, onNodesChangeBase] = useNodesState<GraphNode>(initialLayout.nodes);
+  const graphNodesRef = useRef<GraphNode[]>(nodes);
+  useLayoutEffect(() => { graphNodesRef.current = nodes; }, [nodes]);
   const edges = initialLayout.edges;
 
   useEffect(() => {
     const sameWorkspace = layoutOwner.current.repositoryId === workspaceId;
     const shouldReset = layoutOwner.current.version !== layoutVersion;
+    if (!sameWorkspace || shouldReset) graphLayoutAnchor.current = undefined;
     const present = new Set(repository.files.map((file) => `${workspaceId}:${file.id}`));
     // Drop removed files and clear positions only when an explicit layout reset occurs.
     setNodePositions((previous) => {
@@ -538,17 +732,48 @@ function AppShell() {
       return changed ? next : previous;
     });
     // Keep React Flow's controlled nodes synchronized with the repository and the saved drag positions.
-    setNodes((previous) => initialLayout.nodes.map((node) => {
-      const existing = previous.find((candidate) => candidate.id === node.id);
-      const position = !shouldReset ? nodePositions.get(`${workspaceId}:${node.id}`) ?? (sameWorkspace ? existing?.position : undefined) ?? node.position : node.position;
-      const dimensionsMatch = existing?.measured?.width === node.measured?.width && existing?.measured?.height === node.measured?.height;
-      return { ...node, ...(dimensionsMatch && existing?.measured ? { measured: existing.measured } : {}), position, selected: node.id === selectedFileId, data: { ...node.data, selected: node.id === selectedFileId } };
-    }));
+    const next = initialLayout.nodes.map((node) => {
+        const existing = graphNodesRef.current.find((candidate) => candidate.id === node.id);
+        const savedPosition = nodePositions.get(`${workspaceId}:${node.id}`);
+        const position = !shouldReset
+          ? graphNodeDragging.current
+            ? existing?.position ?? node.position
+            : savedPosition
+              ? node.position
+              : (sameWorkspace ? existing?.position : undefined) ?? node.position
+          : node.position;
+        const dimensionsMatch = existing?.measured?.width === node.measured?.width && existing?.measured?.height === node.measured?.height;
+        return { ...node, ...(dimensionsMatch && existing?.measured ? { measured: existing.measured } : {}), position, selected: node.id === selectedFileId, data: { ...node.data, selected: node.id === selectedFileId } };
+      });
+    const resolved = graphNodeDragging.current ? next : separateOverlappingGraphNodes(next, { gap: compactGraph ? 12 : 16, anchorId: graphLayoutAnchor.current });
+    setNodes(resolved);
+    if (!graphNodeDragging.current) {
+      const adjusted = resolved.filter((node, index) => node.position.x !== next[index].position.x || node.position.y !== next[index].position.y);
+      if (adjusted.length) setNodePositions((previous) => {
+        let changed = false;
+        const updated = new Map(previous);
+        for (const node of adjusted) {
+          const key = `${workspaceId}:${node.id}`;
+          const current = updated.get(key);
+          if (current?.x === node.position.x && current?.y === node.position.y) continue;
+          updated.set(key, node.position);
+          changed = true;
+        }
+        return changed ? updated : previous;
+      });
+    }
     layoutOwner.current = { version: layoutVersion, repositoryId: workspaceId };
-  }, [initialLayout, repository.id, workspaceId, repository.files, layoutVersion, selectedFileId, setNodes, nodePositions]);
+  }, [initialLayout, repository.id, workspaceId, repository.files, layoutVersion, selectedFileId, setNodes, nodePositions, compactGraph]);
 
   const onNodesChange = useCallback((changes: Parameters<typeof onNodesChangeBase>[0]) => {
     if (savedDataClearBusy) return;
+    const positionChanges = changes.filter((change) => change.type === "position");
+    const dragState = [...positionChanges].reverse().find((change) => typeof change.dragging === "boolean")?.dragging;
+    if (typeof dragState === "boolean") graphNodeDragging.current = dragState;
+    if (dragState === false) {
+      const completedDrag = [...positionChanges].reverse().find((change) => change.dragging === false && change.position);
+      if (completedDrag) graphLayoutAnchor.current = completedDrag.id;
+    }
     for (const change of changes) if (change.type === "position" && change.position) {
       setNodePositions((previous) => new Map(previous).set(`${workspaceId}:${change.id}`, change.position!));
       const positionsKey = nodePositionSessionKey(repository);
@@ -595,7 +820,7 @@ function AppShell() {
     const observer = new ResizeObserver(updateGraphSize);
     observer.observe(canvas);
     return () => { cancelAnimationFrame(frame); observer.disconnect(); };
-  }, []);
+  }, [showGuideWelcome]);
 
   useEffect(() => {
     const forceRestore = lastProgressRepoSessionVersion.current !== repositorySessionVersion;
@@ -720,7 +945,7 @@ function AppShell() {
     const previousReferenceFile = focusedLine ? filesById.get(focusedLine.fileId) : undefined;
     const nextReferenceFile = focusedLine ? snapshot.files.find((file) => file.id === focusedLine.fileId) : undefined;
     const referenceChanged = Boolean(focusedLine && (!previousReferenceFile || !nextReferenceFile || previousReferenceFile.contentHash !== nextReferenceFile.contentHash));
-    const routeExpired = Boolean(aiRoute && !aiRouteStale && aiContextIsStale(aiRoute.contextFiles, snapshot));
+    const routeExpired = Boolean(aiRoute && !aiRouteStale && (aiRoute.stale || aiContextIsStale(aiRoute.contextFiles, snapshot)));
     const expiredRouteFocus = routeExpired && focusOrigin === "route" && focusRouteSignature === aiRoute?.signature;
     setRepository(snapshot);
     clearAiContext();
@@ -768,6 +993,7 @@ function AppShell() {
           if (!openRequestGate.current.isCurrent(requestId) || !isCurrentRepositoryCommand(command)) return;
           const failedKey = nodePositionSessionKey(snapshot);
           setWorkspacePersistenceReadyKeys((current) => { const next = new Set(current); next.delete(failedKey); return next; });
+          setWorkspaceReadFailures((current) => new Set(current).add(failedKey));
           setNodePositionsReadyKey((current) => current === failedKey ? null : current);
           workspaceWarning = error instanceof Error ? error.message : "无法读取桌面保存数据。";
         }
@@ -777,6 +1003,7 @@ function AppShell() {
       if (!repositoryGate.current.activate(epoch, snapshot)) return;
       setRepositorySessionVersion((version) => version + 1);
       if (applySnapshot(snapshot, epoch)) {
+        completeGuideTask("repository");
         setRepoPath(path);
         setRepoMessage(workspaceWarning ? `仓库已打开；保存数据读取失败，修改暂存于当前页面，原记录不会覆盖：${workspaceWarning}` : "仓库已打开，正在监听文件变化。");
         if (desktopMode) {
@@ -793,7 +1020,7 @@ function AppShell() {
       if (openRequestController.current === controller) openRequestController.current = null;
       if (openRequestGate.current.isCurrent(requestId) && isCurrentRepositoryCommand(command)) setRepoBusy(false);
     }
-  }, [applySnapshot, beginRepositorySession, desktopMode, restoreWorkspaceState, savedDataClearBusy]);
+  }, [applySnapshot, beginRepositorySession, completeGuideTask, desktopMode, restoreWorkspaceState, savedDataClearBusy]);
   const openRepository = useCallback((event: React.FormEvent) => {
     event.preventDefault();
     void openRepositoryPath(repoPath);
@@ -981,6 +1208,8 @@ function AppShell() {
     setNavigationHistory((history) => pushNavigationHistory(history, current, destination));
   }, [selectedFileId, focusedLine]);
   const selectFile = useCallback((fileId: string, view: MobileView = "details", directoryOverride?: string) => {
+    guideNavigationRef.current = { repositoryId: repository.id, sessionVersion: repositorySessionVersion, fileId, dependency: false };
+    if (fileId === currentFile.id && sourceStatus === "loaded") { completeGuideTask("source"); guideNavigationRef.current = null; }
     recordNavigation({ fileId });
     clearAiContext();
     const nextDirectory = directoryOverride !== undefined ? directoryOverride : graphDirectory && !fileId.startsWith(`${graphDirectory}/`) ? "" : graphDirectory;
@@ -988,9 +1217,14 @@ function AppShell() {
     setDetailTab(layoutMode === "reading" ? "source" : "guide");
     setMobileView(view);
     setSearchQuery(""); focusTreeFile(fileId); focusGraphFile(fileId);
-  }, [clearAiContext, focusTreeFile, focusGraphFile, graphDirectory, layoutMode, recordNavigation]);
+  }, [clearAiContext, completeGuideTask, currentFile.id, focusTreeFile, focusGraphFile, graphDirectory, layoutMode, recordNavigation, repository.id, repositorySessionVersion, sourceStatus]);
 
   const openReference = useCallback((reference: SourceReference) => {
+    const dependency = repository.dependencies.some((edge) => (edge.fromId === currentFile.id || edge.toId === currentFile.id) && edge.reference.fileId === reference.fileId && edge.reference.line === reference.line);
+    guideNavigationRef.current = { repositoryId: repository.id, sessionVersion: repositorySessionVersion, fileId: reference.fileId, dependency };
+    if (reference.fileId === currentFile.id && sourceStatus === "loaded") {
+      completeGuideTask("source"); if (dependency) completeGuideTask("dependencies"); guideNavigationRef.current = null;
+    }
     recordNavigation({ fileId: reference.fileId, line: reference.line, ...(reference.endLine ? { endLine: reference.endLine } : {}) });
     clearAiContext();
     const nextDirectory = graphDirectory && !reference.fileId.startsWith(`${graphDirectory}/`) ? "" : graphDirectory;
@@ -998,16 +1232,18 @@ function AppShell() {
     setDetailTab("source");
     setMobileView("details");
     setSearchQuery(""); focusTreeFile(reference.fileId); focusGraphFile(reference.fileId);
-  }, [clearAiContext, focusTreeFile, focusGraphFile, graphDirectory, recordNavigation]);
+  }, [clearAiContext, completeGuideTask, currentFile.id, focusTreeFile, focusGraphFile, graphDirectory, recordNavigation, repository.dependencies, repository.id, repositorySessionVersion, sourceStatus]);
 
   const openTourReference = useCallback((reference: SourceReference) => {
+    guideNavigationRef.current = { repositoryId: repository.id, sessionVersion: repositorySessionVersion, fileId: reference.fileId, dependency: false };
+    if (reference.fileId === currentFile.id && sourceStatus === "loaded") { completeGuideTask("source"); guideNavigationRef.current = null; }
     recordNavigation({ fileId: reference.fileId, line: reference.line, ...(reference.endLine ? { endLine: reference.endLine } : {}) });
     clearAiContext();
     const nextDirectory = graphDirectory && !reference.fileId.startsWith(`${graphDirectory}/`) ? "" : graphDirectory;
     dispatchNavigation({ type: "reference-navigation", reference, directory: nextDirectory, origin: "route", routeSignature: activeRouteSignature });
     setDetailTab("source"); setMobileView("details"); setSearchQuery("");
     focusTreeFile(reference.fileId); focusGraphFile(reference.fileId);
-  }, [activeRouteSignature, clearAiContext, focusTreeFile, focusGraphFile, graphDirectory, recordNavigation]);
+  }, [activeRouteSignature, clearAiContext, completeGuideTask, currentFile.id, focusTreeFile, focusGraphFile, graphDirectory, recordNavigation, repository.id, repositorySessionVersion, sourceStatus]);
 
   const navigateHistory = useCallback((direction: -1 | 1) => {
     const moved = moveNavigationHistory(navigationHistory, direction);
@@ -1015,6 +1251,10 @@ function AppShell() {
     setNavigationHistory(moved.state);
     clearAiContext();
     const location = moved.location;
+    const practice = guideTourPracticeRef.current;
+    if (practice && direction === -1 && practice.workspaceId === workspaceId && practice.sessionVersion === repositorySessionVersion && location.fileId === practice.origin.fileId && (practice.origin.line === undefined ? location.line === undefined : location.line === practice.origin.line)) practice.returned = true;
+    guideNavigationRef.current = { repositoryId: repository.id, sessionVersion: repositorySessionVersion, fileId: location.fileId, dependency: false };
+    if (location.fileId === currentFile.id && sourceStatus === "loaded") { completeGuideTask("source"); guideNavigationRef.current = null; }
     const nextDirectory = graphDirectory && !location.fileId.startsWith(`${graphDirectory}/`) ? "" : graphDirectory;
     if (location.line) {
       dispatchNavigation({ type: "reference-navigation", reference: { fileId: location.fileId, line: location.line, ...(location.endLine ? { endLine: location.endLine } : {}) }, directory: nextDirectory });
@@ -1025,7 +1265,7 @@ function AppShell() {
     }
     setMobileView("details"); setSearchQuery("");
     focusTreeFile(location.fileId); focusGraphFile(location.fileId);
-  }, [navigationHistory, filesById, clearAiContext, graphDirectory, layoutMode, focusTreeFile, focusGraphFile]);
+  }, [navigationHistory, filesById, clearAiContext, completeGuideTask, currentFile.id, graphDirectory, layoutMode, focusTreeFile, focusGraphFile, repository.id, repositorySessionVersion, sourceStatus, workspaceId]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -1045,6 +1285,16 @@ function AppShell() {
     const nextIndex = Math.max(0, Math.min(activeTour.length - 1, index));
     if (!activeTour.length || aiRouteStale || savedDataClearBusy) return;
     const step = activeTour[nextIndex];
+    if (nextIndex !== tourIndex && activeTour.length > 1) {
+      guideTourPracticeRef.current = {
+        workspaceId,
+        sessionVersion: repositorySessionVersion,
+        origin: { fileId: selectedFileId, ...(focusedLine?.fileId === selectedFileId ? { line: focusedLine.line } : {}) },
+        destination: { fileId: step.reference.fileId, line: step.reference.line },
+        visited: false,
+        returned: false,
+      };
+    }
     recordNavigation({ fileId: step.reference.fileId, line: step.reference.line, ...(step.reference.endLine ? { endLine: step.reference.endLine } : {}) });
     clearAiContext();
     dispatchNavigation({ type: "route-step", stepIndex: nextIndex, step, routeSignature: activeRouteSignature, ...(markCurrentComplete ? { completedStepId: activeTour[tourIndex].id } : {}) });
@@ -1052,7 +1302,7 @@ function AppShell() {
     setDetailTab("source");
     setMobileView("details");
     setSearchQuery(""); focusTreeFile(step.focusFileId); focusGraphFile(step.focusFileId);
-  }, [tourIndex, activeTour, activeRouteSignature, aiRouteStale, clearAiContext, focusTreeFile, focusGraphFile, savedDataClearBusy, recordNavigation]);
+  }, [tourIndex, activeTour, activeRouteSignature, aiRouteStale, clearAiContext, focusTreeFile, focusGraphFile, savedDataClearBusy, recordNavigation, workspaceId, repositorySessionVersion, selectedFileId, focusedLine]);
 
   const resetTour = useCallback(() => {
     if (!activeTour.length || aiRouteStale || savedDataClearBusy) return;
@@ -1064,6 +1314,14 @@ function AppShell() {
     setSearchQuery(""); focusTreeFile(activeTour[0].focusFileId); focusGraphFile(activeTour[0].focusFileId);
   }, [activeTour, activeRouteSignature, aiRouteStale, clearAiContext, focusTreeFile, focusGraphFile, savedDataClearBusy]);
 
+  useEffect(() => {
+    const practice = guideTourPracticeRef.current;
+    if (!practice) return;
+    if (practice.workspaceId !== workspaceId || practice.sessionVersion !== repositorySessionVersion) { guideTourPracticeRef.current = null; return; }
+    if (sourceStatus === "loaded" && selectedFileId === practice.destination.fileId && focusedLine?.fileId === practice.destination.fileId && focusedLine.line === practice.destination.line) practice.visited = true;
+    if (practice.visited && practice.returned) { guideTourPracticeRef.current = null; completeGuideTask("tour"); }
+  }, [completeGuideTask, focusedLine, repositorySessionVersion, selectedFileId, sourceStatus, workspaceId]);
+
   const resetGraph = useCallback(() => {
     if (savedDataClearBusy) return;
     setNodePositions((previous) => new Map([...previous].filter(([id]) => !id.startsWith(`${workspaceId}:`))));
@@ -1071,16 +1329,92 @@ function AppShell() {
     window.requestAnimationFrame(() => focusGraphFile(currentFile.id));
   }, [currentFile.id, focusGraphFile, workspaceId, savedDataClearBusy]);
 
-  const removeRecentRepository = useCallback(async (repositoryId: string) => {
+  const removeRecentRepository = useCallback(async (targetId: string) => {
     try {
-      await localWorkspaceProvider.removeRecent(repositoryId);
+      await localWorkspaceProvider.removeRecent(targetId);
       const saved = await localWorkspaceProvider.get(workspaceId);
       setRecentRepositories(saved.recentRepositories);
     } catch (error) { setRepoMessage(`无法移除最近仓库：${error instanceof Error ? error.message : "本地存储不可用。"}`); }
   }, [workspaceId]);
 
+  const saveReadingNotes = useCallback((notes: ReadingNote[], expected?: { repositoryId: string; workspaceId: string; sessionVersion: number; clearGeneration: number }): Promise<boolean> => {
+    const targetId = workspaceId;
+    const snapshot = repository;
+    const epoch = repositoryGate.current.current().epoch;
+    const sessionVersion = repositorySessionVersion;
+    if (savedDataClearActiveRef.current || expected && (expected.repositoryId !== snapshot.id || expected.workspaceId !== targetId || expected.sessionVersion !== sessionVersion || expected.clearGeneration !== savedDataClearGenerationRef.current) || !repositoryGate.current.isCurrent(epoch, snapshot.id)) return Promise.resolve(false);
+    const previousNotes = readingNotesRef.current.get(targetId) ?? [];
+    const journal = readingArtifactJournals.current.get(targetId) ?? createReadingArtifactJournal<ReadingNote, AiRouteRecord>();
+    const stagedJournal = stageReadingArtifactChanges(journal, "notes", previousNotes, notes);
+    readingArtifactJournals.current.set(targetId, stagedJournal);
+    const next = new Map(readingNotesRef.current); next.set(targetId, notes);
+    readingNotesRef.current = next;
+    setReadingNotesByWorkspace(next);
+    const restoreKey = nodePositionSessionKey(snapshot);
+    if (!workspacePersistenceReadyKeys.has(restoreKey) || workspaceReadFailures.has(restoreKey)) {
+      setRepoMessage("阅读记录已保留在当前页面；尚未成功读取原记录，暂不写入磁盘。恢复成功后会合并并保存。");
+      return Promise.resolve(false);
+    }
+    const checkpoint = readingArtifactJournalCheckpoint(stagedJournal);
+    return enqueueWorkspacePersistence(targetId, () => localWorkspaceProvider.saveReadingNotes(workspaceSession(snapshot), notes), { key: "reading-notes" }).then((result) => {
+      if (result && "skipped" in result && result.skipped) return false;
+      const current = readingArtifactJournals.current.get(targetId);
+      if (current) readingArtifactJournals.current.set(targetId, acknowledgeReadingArtifactJournal(current, "notes", checkpoint));
+      return true;
+    }).catch((error: Error) => {
+      if (repositoryGate.current.isCurrent(epoch, snapshot.id)) setRepoMessage(`阅读记录仅保存在当前页面：${error.message}`);
+      return false;
+    });
+  }, [repository, repositorySessionVersion, workspaceId, workspacePersistenceReadyKeys, workspaceReadFailures]);
+
+  const saveTours = useCallback((tours: AiRouteRecord[], expected?: { repositoryId: string; workspaceId: string; sessionVersion: number; clearGeneration: number }): Promise<boolean> => {
+    const targetId = workspaceId;
+    const snapshot = repository;
+    const epoch = repositoryGate.current.current().epoch;
+    const sessionVersion = repositorySessionVersion;
+    if (savedDataClearActiveRef.current || expected && (expected.repositoryId !== snapshot.id || expected.workspaceId !== targetId || expected.sessionVersion !== sessionVersion || expected.clearGeneration !== savedDataClearGenerationRef.current) || !repositoryGate.current.isCurrent(epoch, snapshot.id)) return Promise.resolve(false);
+    const previousTours = savedToursRef.current.get(targetId) ?? [];
+    const journal = readingArtifactJournals.current.get(targetId) ?? createReadingArtifactJournal<ReadingNote, AiRouteRecord>();
+    const stagedJournal = stageReadingArtifactChanges(journal, "tours", previousTours, tours);
+    readingArtifactJournals.current.set(targetId, stagedJournal);
+    const next = new Map(savedToursRef.current); next.set(targetId, tours); savedToursRef.current = next; setSavedToursByWorkspace(next);
+    const restoreKey = nodePositionSessionKey(snapshot);
+    if (!workspacePersistenceReadyKeys.has(restoreKey) || workspaceReadFailures.has(restoreKey)) {
+      setRepoMessage("阅读路线已保留在当前页面；尚未成功读取原记录，暂不写入磁盘。恢复成功后会合并并保存。");
+      return Promise.resolve(false);
+    }
+    const checkpoint = readingArtifactJournalCheckpoint(stagedJournal);
+    return enqueueWorkspacePersistence(targetId, () => localWorkspaceProvider.saveTours(workspaceSession(snapshot), tours), { key: "saved-tours" }).then((result) => {
+      if (result && "skipped" in result && result.skipped) return false;
+      const current = readingArtifactJournals.current.get(targetId);
+      if (current) readingArtifactJournals.current.set(targetId, acknowledgeReadingArtifactJournal(current, "tours", checkpoint));
+      return true;
+    }).catch((error: Error) => {
+      if (repositoryGate.current.isCurrent(epoch, snapshot.id)) setRepoMessage(`阅读路线仅保存在当前页面：${error.message}`);
+      return false;
+    });
+  }, [repository, repositorySessionVersion, workspaceId, workspacePersistenceReadyKeys, workspaceReadFailures]);
+
+  const activateSavedTour = useCallback((route: AiRouteRecord) => {
+    if (route.stale || aiContextIsStale(route.contextFiles, repository)) { setRepoMessage("这条路线引用的源码已变化或尚未校验；请重新生成或手动更新路线引用后再开始。"); return; }
+    if (!route.steps.length) { setRepoMessage("这条路线没有有效步骤。"); return; }
+    clearAiContext();
+    setAiRoutesByRepository((previous) => new Map(previous).set(workspaceId, route));
+    dispatchNavigation({ type: "restart-tour", step: route.steps[0], routeSignature: route.signature });
+    setDetailTab("source"); setMobileView("details"); setRepoMessage("");
+    const restoreKey = nodePositionSessionKey(repository);
+    if (!desktopMode || (workspacePersistenceReadyKeys.has(restoreKey) && !workspaceReadFailures.has(restoreKey))) {
+      void enqueueWorkspacePersistence(workspaceId, () => localWorkspaceProvider.saveAiRoute(workspaceSession(repository), route)).catch((error: Error) => {
+        setRepoMessage(`路线已打开，但未能保存为当前路线：${error.message}`);
+      });
+    } else setRepoMessage("路线已在当前页面打开；保存数据恢复完成后再写入磁盘。");
+  }, [clearAiContext, desktopMode, repository, workspaceId, workspacePersistenceReadyKeys, workspaceReadFailures]);
+
   const clearCurrentSavedData = useCallback(async () => {
     if (!desktopMode || repository.id === BOOT_SNAPSHOT.id || savedDataClearBusy || repoBusy) return;
+    savedDataClearActiveRef.current = true;
+    savedDataClearGenerationRef.current += 1;
+    setSavedDataClearGeneration(savedDataClearGenerationRef.current);
     setSavedDataClearBusy(true);
     clearAiContext();
     try {
@@ -1091,6 +1425,9 @@ function AppShell() {
       });
       setAiResultsByFile((previous) => new Map([...previous].filter(([key]) => !key.startsWith(`${workspaceId}:`))));
       setAiRoutesByRepository((previous) => { const next = new Map(previous); next.delete(workspaceId); return next; });
+      setReadingNotesByWorkspace((previous) => { const next = new Map(previous); next.delete(workspaceId); readingNotesRef.current = next; return next; });
+      setSavedToursByWorkspace((previous) => { const next = new Map(previous); next.delete(workspaceId); savedToursRef.current = next; return next; });
+      readingArtifactJournals.current.set(workspaceId, createReadingArtifactJournal<ReadingNote, AiRouteRecord>());
       setNodePositions((previous) => new Map([...previous].filter(([key]) => !key.startsWith(`${workspaceId}:`))));
       nodePositionsPersisted.current.delete(nodePositionSessionKey(repository));
       dirtyNodePositions.current.delete(workspaceId);
@@ -1098,27 +1435,42 @@ function AppShell() {
       setTourIndex(0); setCompletedSteps([]); setQuestionClearVersion((value) => value + 1); setRecentRepositories((previous) => previous.filter((item) => (item.workspaceId ?? item.id) !== workspaceId));
       setRepoMessage("已清除此仓库的本地保存结果、路线、进度和节点位置。");
     } catch (error) { setRepoMessage(`无法清除此仓库的保存数据：${error instanceof Error ? error.message : "本地存储不可用。"}`); }
-    finally { setSavedDataClearBusy(false); }
+    finally { savedDataClearActiveRef.current = false; setSavedDataClearBusy(false); }
   }, [clearAiContext, desktopMode, repository, savedDataClearBusy, setTourIndex, setCompletedSteps, workspaceId, repoBusy]);
 
   const clearAllSavedData = useCallback(async () => {
     if (savedDataClearBusy || repoBusy) return;
+    savedDataClearActiveRef.current = true;
+    savedDataClearGenerationRef.current += 1;
+    setSavedDataClearGeneration(savedDataClearGenerationRef.current);
     setSavedDataClearBusy(true);
+    guideSaveSequenceRef.current += 1;
+    await guideWriteQueueRef.current;
     clearAiContext();
     try {
+      let guideClearWarning = "";
       await clearAllQuestionConversations(async () => {
         const restoreBrowserProgress = stageBrowserProgressClear();
         try { await localWorkspaceProvider.clearAll(); }
         catch (error) { restoreBrowserProgress(); throw error; }
       }, [workspaceId]);
-      setRecentRepositories([]); setAiResultsByFile(new Map()); setAiRoutesByRepository(new Map()); setNodePositions(new Map());
+      if (!desktopMode) {
+        try { window.localStorage.removeItem(USAGE_GUIDE_STORAGE_KEY); setGuideStorageMessage(""); }
+        catch (error) { guideClearWarning = `已清除其他本地数据，但浏览器未允许移除使用指南偏好：${error instanceof Error ? error.message : "存储不可用。"}`; }
+      }
+      setRecentRepositories([]); setAiResultsByFile(new Map()); setAiRoutesByRepository(new Map()); setReadingNotesByWorkspace(new Map()); readingNotesRef.current = new Map(); setSavedToursByWorkspace(new Map()); savedToursRef.current = new Map(); setNodePositions(new Map());
+      readingArtifactJournals.current.clear();
       progressMemory.clear();
       nodePositionsPersisted.current.clear();
       dirtyNodePositions.current.clear();
       setTourIndex(0); setCompletedSteps([]); setQuestionClearVersion((value) => value + 1); setRepoMessage("已清除全部 RepoLens 本地保存数据。");
+      const freshGuide = createDefaultUsageGuidePreferences();
+      guidePreferencesRef.current = freshGuide; setGuidePreferences(freshGuide);
+      setShowGuideWelcome(true); setGuidePanelOpen(false); setGuideNoticeAvailable(false); setGuideStorageMessage(guideClearWarning);
+      guideTourPracticeRef.current = null; guideNavigationRef.current = null;
     } catch (error) { setRepoMessage(`无法清除全部保存数据：${error instanceof Error ? error.message : "本地存储不可用。"}`); }
-    finally { setSavedDataClearBusy(false); }
-  }, [clearAiContext, savedDataClearBusy, setTourIndex, setCompletedSteps, repoBusy, workspaceId]);
+    finally { savedDataClearActiveRef.current = false; setSavedDataClearBusy(false); }
+  }, [clearAiContext, desktopMode, savedDataClearBusy, setTourIndex, setCompletedSteps, repoBusy, workspaceId]);
 
   const locateCurrentGraph = useCallback(() => {
     focusGraphFile(currentFile.id);
@@ -1176,6 +1528,84 @@ function AppShell() {
     });
     await loadSample(command, epoch);
   };
+  useLayoutEffect(() => { closeRepositoryRef.current = closeRepository; });
+  const closeUsageGuidePanel = useCallback(() => {
+    setGuidePanelOpen(false);
+    updateGuidePreferences((previous) => ({ ...previous, checklistOpen: false }));
+  }, [updateGuidePreferences]);
+  const openUsageGuidePanel = useCallback(() => {
+    setShowGuideWelcome(false);
+    setGuidePanelOpen(true);
+    setGuideNoticeAvailable(false);
+    updateGuidePreferences((previous) => ({ ...previous, checklistOpen: true, noticeDismissed: true }));
+  }, [updateGuidePreferences]);
+  const openGuideWelcome = useCallback(() => {
+    closeUsageGuidePanel();
+    setShowGuideWelcome(true);
+  }, [closeUsageGuidePanel]);
+  const handleTryExample = useCallback(() => {
+    setShowGuideWelcome(false);
+    setGuidePanelOpen(true);
+    updateGuidePreferences((previous) => ({ ...previous, welcomeHandled: true, checklistOpen: true, noticeDismissed: true }));
+    if (repository.source === "local") void closeRepositoryRef.current();
+  }, [repository.source, updateGuidePreferences]);
+  const handleSkipWelcome = useCallback(() => {
+    setShowGuideWelcome(false);
+    setGuidePanelOpen(false);
+    updateGuidePreferences((previous) => ({ ...previous, welcomeHandled: true, checklistOpen: false, noticeDismissed: true }));
+    setGuideNoticeAvailable(false);
+  }, [updateGuidePreferences]);
+  const handleOpenRepositoryFromGuide = useCallback(() => {
+    setShowGuideWelcome(false);
+    setGuidePanelOpen(false);
+    setMobileView("files");
+    updateGuidePreferences((previous) => ({ ...previous, welcomeHandled: true, checklistOpen: false, noticeDismissed: true }));
+    setGuideNoticeAvailable(false);
+    setGuideRepoRequest((request) => request + 1);
+  }, [updateGuidePreferences]);
+  const dismissGuideNotice = useCallback(() => {
+    setGuideNoticeAvailable(false);
+    updateGuidePreferences((previous) => ({ ...previous, noticeDismissed: true }));
+  }, [updateGuidePreferences]);
+  const resetUsageGuide = useCallback(() => {
+    const reset = createDefaultUsageGuidePreferences();
+    updateGuidePreferences(reset);
+    setGuidePanelOpen(false);
+    setShowGuideWelcome(true);
+  }, [updateGuidePreferences]);
+  const startUsageGuideTask = useCallback((task: UsageGuideTaskId | "practice-example") => {
+    closeUsageGuidePanel();
+    if (task === "source") { setDetailTab("source"); setMobileView("details"); setQuickOpen(true); return; }
+    if (task === "dependencies") {
+      setDetailTab("guide"); setMobileView("details");
+      window.requestAnimationFrame(() => document.querySelector(".relation-section")?.scrollIntoView({ block: "nearest", behavior: "smooth" }));
+      return;
+    }
+    if (task === "tour") {
+      const nextIndex = tourIndex < activeTour.length - 1 ? tourIndex + 1 : Math.max(0, tourIndex - 1);
+      goToStep(nextIndex, nextIndex > tourIndex);
+      return;
+    }
+    if (task === "note") {
+      setDetailTab("guide"); setMobileView("details");
+      window.requestAnimationFrame(() => document.querySelector(".reading-artifacts")?.scrollIntoView({ block: "nearest", behavior: "smooth" }));
+      return;
+    }
+    if (task === "repository") { handleOpenRepositoryFromGuide(); return; }
+    if (task === "practice-example") {
+      if (repository.source === "local") void closeRepositoryRef.current();
+      else setRepoMessage("当前已在示例仓库中；可以从路线栏选择下一步继续练习。");
+    }
+  }, [activeTour.length, closeUsageGuidePanel, goToStep, handleOpenRepositoryFromGuide, repository.source, tourIndex]);
+  useEffect(() => {
+    if (!guideRepoRequest) return;
+    const frame = window.requestAnimationFrame(() => document.getElementById("repository-path")?.focus());
+    if (desktopMode) {
+      void window.repoLens?.selectDirectory().then((selectedPath) => { if (selectedPath) setRepoPath(selectedPath); })
+        .catch((error: unknown) => setRepoMessage(error instanceof Error ? error.message : "无法选择本地目录。"));
+    }
+    return () => window.cancelAnimationFrame(frame);
+  }, [desktopMode, guideRepoRequest]);
   const rescanRepository = async () => {
     if (savedDataClearBusy) return;
     const repositoryId = repository.id; const epoch = repositoryGate.current.current().epoch; const controller = new AbortController();
@@ -1227,7 +1657,7 @@ function AppShell() {
       if (requestId === aiSettingsSaveSequence.current) { aiSettingsBusyRef.current = false; setAiSettingsBusy(false); }
     }
   };
-  const previewAi = async (mode: AiMode, fileIds?: string[]) => {
+  const previewAi = async (mode: AiMode, fileIds?: string[], goal?: string) => {
     if (savedDataClearBusy) return;
     if (desktopBackendError) { setRepoMessage(desktopBackendError); return; }
     if (!aiSettings.configured) { clearAiContext(); dispatchAiWorkflow({ type: "message", message: "请先保存完整的模型服务地址、模型名称和密钥，再预览发送范围。" }); return; }
@@ -1235,17 +1665,17 @@ function AppShell() {
     const preserveScope = aiWorkflow.mode === mode && aiCandidates.length > 0;
     clearAiContext(preserveScope);
     const requestId = ++aiRequestSequence.current;
-    const requestContext = JSON.stringify([contextKey, mode, fileIds ?? null, graphDirectory, selectedAiRanges]);
+    const requestContext = JSON.stringify([contextKey, mode, goal ?? null, fileIds ?? null, graphDirectory, selectedAiRanges]);
     const controller = new AbortController();
     aiAbortController.current = controller;
     dispatchAiWorkflow({ type: "start", requestId, stage: "previewing", contextKey: requestContext, mode, preserveScope });
     try {
-      const value = await localExplanationProvider.preview(repository, currentFile.id, mode, fileIds, graphDirectory || undefined, selectedAiRanges, controller.signal);
+      const value = await localExplanationProvider.preview(repository, currentFile.id, mode, fileIds, graphDirectory || undefined, selectedAiRanges, controller.signal, goal);
       if (aiRequestSequence.current !== requestId || aiContextRef.current !== contextKey) return;
       if (value.scopeRequired) {
         const previousFiles = selectedAiFiles.filter((id) => value.candidates.some((file) => file.fileId === id));
         const selectedFiles = previousFiles.includes(currentFile.id) ? previousFiles : [currentFile.id, ...previousFiles];
-        const ranges = Object.fromEntries(value.candidates.map((file) => [file.fileId, selectedAiRanges[file.fileId] ?? { startLine: 1, endLine: file.lineCount }]));
+        const ranges = Object.fromEntries(value.candidates.map((file) => [file.fileId, selectedAiRanges[file.fileId] ?? file.suggestedRange ?? { startLine: 1, endLine: file.lineCount }]));
         dispatchAiWorkflow({ type: "scopeRequired", requestId, contextKey: requestContext, candidates: value.candidates, selectedFiles, ranges, message: `范围超过 ${value.maxFiles} 个文件或 ${value.maxCharacters.toLocaleString()} 字符上限，请选择要纳入的文件后重新预览。` });
         return;
       }
@@ -1276,17 +1706,20 @@ function AppShell() {
           entryFileId: value.entryFileId,
           revision: value.revision,
           title: String(value.result.title),
+          goal: preview.goal,
           steps: value.result.steps as { fileId: string; purpose: string; references: { fileId: string; startLine: number; endLine?: number }[] }[],
           contextFiles,
         }, (fileId: string) => filesById.get(fileId)?.name ?? fileId);
         setAiRoutesByRepository((previous) => new Map(previous).set(workspaceId, nextRoute));
-        if (desktopMode) {
+        saveTours([...currentSavedTours.filter((route) => route.signature !== nextRoute.signature), nextRoute]);
+        const restoreKey = nodePositionSessionKey(repository);
+        if (!desktopMode || (workspacePersistenceReadyKeys.has(restoreKey) && !workspaceReadFailures.has(restoreKey))) {
           try {
-            const saved = await enqueueWorkspacePersistence(workspaceId, () => localWorkspaceProvider.saveAiRoute(savedWorkspaceSession, nextRoute as unknown as Record<string, unknown>));
+            const saved = await enqueueWorkspacePersistence(workspaceId, () => localWorkspaceProvider.saveAiRoute(savedWorkspaceSession, nextRoute as AiRouteRecord));
             if (saved && "skipped" in saved && saved.skipped) return;
           }
-          catch (error) { setRepoMessage(`路线已生成，但未能写入桌面保存数据：${error instanceof Error ? error.message : "存储不可用。"}`); }
-        }
+          catch (error) { setRepoMessage(`路线已生成，但未能保存当前路线：${error instanceof Error ? error.message : "存储不可用。"}`); }
+        } else setRepoMessage("路线已生成并保留在当前页面；保存数据恢复完成后再写入磁盘。");
         if (aiRequestSequence.current !== requestId || aiContextRef.current !== contextKey) return;
         setSearchQuery(""); setCollapsedFolders([]);
         finalMessage = "AI 阅读路线已生成；选中步骤即可定位文件和源码。";
@@ -1309,8 +1742,10 @@ function AppShell() {
     finally { if (aiRequestSequence.current === requestId && aiAbortController.current === controller) aiAbortController.current = null; }
   };
 
+  if (guideReady && showGuideWelcome) return <UsageGuideWelcome onTryExample={handleTryExample} onOpenRepository={handleOpenRepositoryFromGuide} onSkip={handleSkipWelcome} />;
+
   return (
-    <main className="app-shell">
+    <main className={`app-shell${activeTour.length ? "" : " is-analysis-only"}${layoutMode === "reading" ? " is-reading-mode" : ""}`}>
       <a className="skip-link" href="#repository-workspace">跳到仓库工作区</a>
       <header className="topbar">
         <div className="brand-lockup">
@@ -1334,28 +1769,34 @@ function AppShell() {
               <button type="button" className={layoutMode === "reading" ? "is-active" : ""} aria-pressed={layoutMode === "reading"} onClick={() => { setLayoutMode("reading"); setDetailTab("source"); }}>阅读</button>
               <button type="button" className={layoutMode === "structure" ? "is-active" : ""} aria-pressed={layoutMode === "structure"} onClick={() => { setLayoutMode("structure"); setDetailTab("guide"); }}>结构</button>
             </div>
+            <button ref={guideButtonRef} type="button" className="repo-action usage-guide-trigger" aria-label="使用指南" title="使用指南" disabled={!guideReady} onClick={openUsageGuidePanel}><BookOpen size={14} /><span>使用指南</span></button>
           </div>
+          {repository.source === "local" && <><span className={`workspace-save-status is-${saveStatusLabel === "已保存" ? "saved" : saveStatusLabel === "正在恢复" || saveStatusLabel === "保存中" || saveStatusLabel === "正在清除" ? "busy" : "memory"}`} role="status" aria-label={`本地保存状态：${saveStatusLabel}`} title={saveStatusDetail}>{saveStatusLabel}</span>{workspaceReadFailures.has(activePersistenceKey) && <button type="button" className="repo-action" disabled={savedDataClearBusy} onClick={() => void retryWorkspaceRestore()}>重试恢复</button>}{persistenceStatus.phase === "memory" && <button type="button" className="repo-action" disabled={savedDataClearBusy || !workspacePersistenceReadyKeys.has(activePersistenceKey)} onClick={() => void retryReadingArtifactSave()}>重试保存</button>}</>}
           {repository.source === "sample" && <span className="tour-status"><Sparkles size={14} />预置导览</span>}
           {repository.source === "local" && <><button className="repo-action" onClick={rescanRepository} disabled={repoBusy || savedDataClearBusy || Boolean(desktopBackendError)}>{repository.origin?.kind === "github" ? "检查远端更新" : "重新扫描"}</button><button className="repo-action" onClick={closeRepository} disabled={savedDataClearBusy || Boolean(desktopBackendError)}>返回示例</button></>}
-          <span className="version-stamp">v{repository.version}</span>
+          <span className="version-stamp" title={`版本 ${repository.version}`}>v{repository.version}</span>
         </div>
       </header>
       {desktopBackendError && <div className="desktop-backend-alert" role="alert">本地服务不可用：{desktopBackendError}</div>}
+      {guideNoticeAvailable && !guidePreferences.noticeDismissed && <UsageGuideNotice onOpen={openUsageGuidePanel} onDismiss={dismissGuideNotice} />}
+      <UsageGuidePanel open={guidePanelOpen} completedTaskIds={guidePreferences.completedTaskIds} repositoryName={repository.name} hasDependencies={repository.dependencies.length > 0} hasTour={activeTour.length > 1} canAddNote={repository.source === "local"} returnFocusRef={guideButtonRef} onClose={closeUsageGuidePanel} onStartTask={startUsageGuideTask} onOpenWelcome={openGuideWelcome} onResetProgress={resetUsageGuide} storageMessage={guideStorageMessage} />
 
       <nav className="mobile-tabs" aria-label="工作区面板">
-        <button className={mobileView === "files" ? "is-active" : ""} onClick={() => setMobileView("files")}>
+        <button aria-pressed={mobileView === "files"} className={mobileView === "files" ? "is-active" : ""} onClick={() => setMobileView("files")}>
           <ListTree size={15} />文件
         </button>
-        <button className={mobileView === "graph" ? "is-active" : ""} onClick={() => { setMobileView("graph"); focusGraphFile(currentFile.id); }}>
+        <button aria-pressed={mobileView === "graph"} className={mobileView === "graph" ? "is-active" : ""} onClick={() => { setMobileView("graph"); focusGraphFile(currentFile.id); }}>
           <Waypoints size={15} />依赖图
         </button>
-        <button className={mobileView === "details" ? "is-active" : ""} onClick={() => setMobileView("details")}>
+        <button aria-pressed={mobileView === "details"} className={mobileView === "details" ? "is-active" : ""} onClick={() => setMobileView("details")}>
           <BookOpenText size={15} />详情
         </button>
         <button type="button" aria-label="快速打开文件" onClick={() => setQuickOpen(true)}>
           <Search size={15} />打开
         </button>
       </nav>
+
+      <WorkspaceOverview repository={repository} stepCount={activeTour.length} compact={layoutMode === "reading"} notes={currentReadingNotes} tours={currentSavedTours} results={[...aiResultsByFile.entries()].filter(([key, value]) => key.startsWith(`${workspaceId}:`) && value.__repositoryId === repository.id).map(([, value]) => value)} onSelectFile={(fileId) => selectFile(fileId, "details")} />
 
       <section id="repository-workspace" className={`workspace-grid${layoutMode === "reading" ? " is-reading-mode" : ""}`}>
         <DirectoryPanel
@@ -1385,6 +1826,15 @@ function AppShell() {
           collapsedFolders={collapsedFolders}
           onToggleFolder={(path) => setCollapsedFolders((previous) => previous.includes(path) ? previous.filter((item) => item !== path) : [...previous, path])}
           onSelectFile={(file) => selectFile(file.id, "details")}
+          onOpenSearchResult={(fileId, line) => openReference({ fileId, line })}
+          onAddSearchResult={(fileIds) => {
+            const targetWorkspaceId = repositoryWorkspaceId(repository);
+            const nextFileIds = [...new Set([...(searchQuestionScope.workspaceId === targetWorkspaceId ? searchQuestionScope.fileIds : []), ...fileIds])];
+            if (nextFileIds.length > 12) { setRepoMessage("问答范围最多包含 12 个文件；请减少已选文件后再添加。 "); return; }
+            setSearchQuestionScope({ workspaceId: targetWorkspaceId, fileIds: nextFileIds });
+            const firstFileId = fileIds[0];
+            if (firstFileId) { selectFile(firstFileId, "details"); setDetailTab("questions"); }
+          }}
           searchInputRef={searchInputRef}
         />
 
@@ -1402,6 +1852,9 @@ function AppShell() {
           canvasRef={graphCanvasRef}
           nodes={nodes}
           edges={edges}
+          repository={repository}
+          currentFileId={currentFile.id}
+          onOpenReference={openReference}
           onNodesChange={onNodesChange}
           onNodeClick={handleNodeClick}
           onInit={setFlow}
@@ -1428,6 +1881,10 @@ function AppShell() {
           detailTab={detailTab}
           questionStorageBusy={savedDataClearBusy}
           questionClearVersion={questionClearVersion}
+          savedDataClearGeneration={savedDataClearGeneration}
+          savedDataClearBusy={savedDataClearBusy}
+          questionExtraFileIds={questionExtraFileIds}
+          onClearQuestionExtraFiles={() => setSearchQuestionScope({ workspaceId: repositoryWorkspaceId(repository), fileIds: [] })}
           onDetailTabChange={setDetailTab}
           onOpenReference={openReference}
           aiSettings={aiSettings}
@@ -1458,6 +1915,13 @@ function AppShell() {
           focusedLine={focusedLine}
           onClearFocus={() => setFocusedLine(null)}
           codeViewportRef={codeViewportRef}
+          readingNotes={currentReadingNotes}
+          savedTours={currentSavedTours}
+          sessionVersion={repositorySessionVersion}
+          onSaveReadingNotes={saveReadingNotes}
+          onSaveTours={saveTours}
+          onActivateTour={activateSavedTour}
+          onGuideNoteCreated={() => completeGuideTask("note")}
         />
       </section>
 

@@ -1,8 +1,8 @@
 import { ChevronRight, Code2 } from "lucide-react";
-import type { FileRecord, SourceReference } from "@/data/model";
+import type { AiSavedResult, FileRecord, SourceReference } from "@/data/model";
 import type { AiMode } from "@/data/explanation-provider";
 
-export type AiResultRecord = Record<string, unknown> & {
+export type AiResultRecord = AiSavedResult & {
   __repositoryId: string;
   __entryFileId: string;
   __revision: string;

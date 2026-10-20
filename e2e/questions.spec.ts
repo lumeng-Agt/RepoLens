@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -46,7 +46,7 @@ test("read-only question flow previews first, confirms source scope, cites lines
       const body = request.postDataJSON() as Record<string, unknown>;
       seenPreviewBodies.push(body);
       if (questionPreviewCalls === 1) expect(generateCalls).toBe(0);
-      const fileIds = Array.isArray(body.fileIds) ? body.fileIds as string[] : ["src/main.ts", "src/dep.ts"];
+      const fileIds = Array.isArray(body.fileIds) ? body.fileIds as string[] : questionPreviewCalls === 1 ? ["src/main.ts"] : ["src/main.ts", "src/dep.ts"];
       return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
         scopeRequired: false,
         preview: { id: `question-preview-${questionPreviewCalls}`, repositoryId: snapshot.id, revision, entryFileId: "src/main.ts", mode: "question", baseUrl: "https://model.example/v1", model: "mock-model", files: fileIds.map((fileId) => ({ fileId, startLine: 1, endLine: 2, contentHash: fileId === "src/main.ts" ? "main-hash" : "dep-hash" })), characters: source.length + 12, expiresAt: Date.now() + 600_000, question: body.question, history: body.history ?? [] },
@@ -54,7 +54,10 @@ test("read-only question flow previews first, confirms source scope, cites lines
     }
     if (url.pathname === "/api/ai/generate") {
       generateCalls += 1;
-      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ result: { answer: "main 返回依赖导出的 value。", insufficientEvidence: false, references: [{ fileId: "src/main.ts", startLine: 2, endLine: 2 }] }, cached: false, revision, repositoryId: snapshot.id, entryFileId: "src/main.ts", mode: "question" }) });
+      const result = generateCalls === 1
+        ? { answer: "当前范围无法确认该实现细节。", insufficientEvidence: true, references: [] }
+        : { answer: "main 返回依赖导出的 value。", insufficientEvidence: false, references: [{ fileId: "src/main.ts", startLine: 2, endLine: 2 }] };
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ result, cached: false, revision, repositoryId: snapshot.id, entryFileId: "src/main.ts", mode: "question" }) });
     }
     if (url.pathname === "/api/source") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ source, repositoryId: snapshot.id, revision }) });
     if (url.pathname === "/api/close") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true }) });
@@ -76,8 +79,17 @@ test("read-only question flow previews first, confirms source scope, cites lines
   expect(questionPreviewCalls).toBe(1);
   expect(generateCalls).toBe(0);
   await page.getByRole("button", { name: "确认发送并获取引用回答" }).click();
-  await expect(page.getByText("main 返回依赖导出的 value。")).toBeVisible();
+  await expect(page.getByText("当前范围无法确认该实现细节。")).toBeVisible();
+  await page.getByRole("button", { name: "引用不足，补充文件" }).click();
+  await expect(page.getByRole("region", { name: "补充问答源码范围" })).toBeVisible();
+  await page.getByRole("checkbox", { name: "src/dep.ts" }).check();
+  await page.getByRole("button", { name: "重新预览补充范围" }).click();
+  await expect(page.getByRole("region", { name: "问答发送确认" })).toBeVisible();
+  expect(seenPreviewBodies.at(-1)?.fileIds).toEqual(["src/main.ts", "src/dep.ts"]);
   expect(generateCalls).toBe(1);
+  await page.getByRole("button", { name: "确认发送并获取引用回答" }).click();
+  await expect(page.getByText("main 返回依赖导出的 value。")).toBeVisible();
+  expect(generateCalls).toBe(2);
   await expect.poll(() => savedConversations.length).toBeGreaterThan(0);
   await page.getByRole("button", { name: /src\/main\.ts · 第 2–2 行/ }).click();
   await expect(page.getByRole("tab", { name: "源码", exact: true })).toHaveAttribute("data-state", "active");
@@ -90,9 +102,11 @@ test("read-only question flow previews first, confirms source scope, cites lines
   const followUp = seenPreviewBodies.at(-1);
   expect(followUp?.history).toEqual([
     { role: "user", content: "What does main return?" },
+    { role: "assistant", content: "当前范围无法确认该实现细节。" },
+    { role: "user", content: "What does main return?" },
     { role: "assistant", content: "main 返回依赖导出的 value。" },
   ]);
-  expect(generateCalls).toBe(1);
+  expect(generateCalls).toBe(2);
   await page.getByRole("button", { name: "删除对话" }).click();
 });
 

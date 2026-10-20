@@ -465,6 +465,8 @@ test("GitHub AI verification preserves remote identity, revision, cache, and wor
       ? { title: "从入口理解数据流", steps: [task.entryFileId, "src/summary.ts", "src/status.ts"].map((fileId, index) => ({
         fileId,
         purpose: ["找到演示入口", "阅读摘要组织", "查看状态统计"][index],
+        relationship: index === 0 ? "选定入口" : "沿静态依赖继续阅读",
+        question: `第 ${index + 1} 步要确认什么？`,
         references: [{ fileId, startLine: Number(sourceRange(fileId)?.[2] ?? 1), endLine: Number(sourceRange(fileId)?.[3] ?? sourceRange(fileId)?.[2] ?? 1) }],
       })) }
       : { role: `${task.entryFileId} 文件职责`, keyPoints: ["依据所选入口生成"], references: [{ fileId: task.entryFileId, startLine: Number(sourceRange(task.entryFileId)?.[2] ?? 1), endLine: Number(sourceRange(task.entryFileId)?.[3] ?? sourceRange(task.entryFileId)?.[2] ?? 1) }] };

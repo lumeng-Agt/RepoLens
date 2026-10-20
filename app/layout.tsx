@@ -3,7 +3,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "RepoLens — 仓库导览",
-  description: "交互式浏览示例代码仓库的目录、导入关系和源码阅读路线。",
+  description: "在只读工作区探索本地和 GitHub 代码库的目录、静态依赖、源码与阅读路线。",
   other: {
     "codex-preview": "development",
   },

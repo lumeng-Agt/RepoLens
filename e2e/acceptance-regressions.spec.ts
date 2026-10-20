@@ -1,10 +1,10 @@
-import { test, expect, type Page } from '@playwright/test';
+import { test, expect, createReturningPage, type Page } from './fixtures';
 import { createServer, request as httpRequest, type Server } from 'node:http';
 import { mkdir, mkdtemp, rm, unlink, writeFile } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { isGraphNodeWithinBounds, waitForStableGraphGeometry } from './helpers/graph-geometry';
+import { graphNodesAreSeparated, isGraphNodeWithinBounds, waitForStableGraphGeometry } from './helpers/graph-geometry';
 import { installResizeObserverProbe } from './helpers/resize-observer-probe';
 
 let modelServer: Server;
@@ -33,6 +33,8 @@ test.beforeAll(async () => {
         return routeFiles.slice(0, 3).map((file, index) => ({
           fileId: file[1],
           purpose: `阅读路线第 ${index + 1} 步`,
+          relationship: index === 0 ? '选定入口' : '沿静态依赖继续阅读',
+          question: `第 ${index + 1} 步需要理解什么？`,
           references: [{ fileId: file[1], startLine: Number(file[2]) }],
         }));
       })() }
@@ -59,13 +61,15 @@ async function repository(source = 'export const a = 1;\nexport const b = 2;\nex
 }
 
 async function open(page: Page, root: string) {
-  await page.goto('/');
+  if (page.url() === 'about:blank') await page.goto('/');
   await page.getByRole('button', { name: '第 1 步：从入口开始' }).waitFor();
   await page.getByLabel('本地仓库路径').fill(root);
   const responsePromise = page.waitForResponse((response) => response.url() === `${apiOrigin}/api/open`);
   await page.getByRole('button', { name: '打开仓库', exact: true }).click();
   const snapshot = await (await responsePromise).json();
   await expect(page.getByRole('treeitem', { name: 'main.ts', exact: true })).toBeVisible();
+  await page.getByRole('tab', { name: '讲解', exact: true }).click();
+  await expect(page.getByText('AI 讲解（按需生成）', { exact: true })).toBeVisible();
   await page.getByLabel('兼容服务地址').fill(modelOrigin);
   await page.getByLabel('模型名称').fill('review-mock');
   await page.getByLabel('API 密钥').fill('review-only-key');
@@ -755,7 +759,7 @@ test('A5 changing graph directory must retain the new directory filter', async (
 });
 
 test('mobile graph toolbar separates repository statistics from touch controls', async ({ browser }) => {
-  const page = await browser.newPage({ viewport: { width: 375, height: 812 } });
+  const page = await createReturningPage(browser, { viewport: { width: 375, height: 812 } });
   await page.goto('/');
   await page.getByRole('button', { name: '依赖图' }).click();
   const title = page.locator('.graph-title-group');
@@ -789,7 +793,7 @@ test('mobile graph toolbar separates repository statistics from touch controls',
 
 test('all three target viewports can follow, complete, restart, and return to the selected graph node', async ({ browser }) => {
   for (const viewport of [{ width: 1440, height: 900 }, { width: 1024, height: 768 }, { width: 375, height: 812 }]) {
-    const page = await browser.newPage({ viewport });
+    const page = await createReturningPage(browser, { viewport });
     await page.goto('/');
     const steps = page.locator('.tour-step');
     await expect(steps).toHaveCount(5);
@@ -873,10 +877,10 @@ test('current node remains visible after resizing a graph with several neighbors
 });
 
 test('stable graph geometry waits through a briefly visible position before checking the final position', async ({ page }) => {
-  await page.setContent(`<div class="graph-canvas"><div class="react-flow__viewport" style="transform: translate(0px, 0px) scale(1)"><div class="graph-file-card is-selected">node</div></div></div>
-    <style>.graph-canvas{position:relative;width:400px;height:300px}.react-flow__viewport{position:absolute;inset:0}.graph-file-card{position:absolute;left:50px;top:50px;width:80px;height:40px}</style>`);
+  await page.setContent(`<div class="graph-canvas"><div class="react-flow__viewport" style="transform: translate(0px, 0px) scale(1)"><div class="react-flow__node" data-id="node.ts"><div class="graph-file-card is-selected">node</div></div></div></div>
+    <style>.graph-canvas{position:relative;width:400px;height:300px}.react-flow__viewport{position:absolute;inset:0}.react-flow__node{position:absolute;left:50px;top:50px;width:80px;height:40px}</style>`);
   await page.evaluate(() => {
-    const node = document.querySelector('.graph-file-card') as HTMLElement;
+    const node = document.querySelector('.react-flow__node') as HTMLElement;
     let frame = 0;
     const moveAfterTransientFrame = () => {
       if (frame === 0) (window as Window & { __transientInside?: boolean }).__transientInside = node.getBoundingClientRect().right < 400;
@@ -946,4 +950,80 @@ test('dragged node positions survive a live repository update', async ({ page })
   await expect(page.getByRole('treeitem', { name: 'extra.ts', exact: true })).toBeVisible({ timeout: 10_000 });
   await expect.poll(() => node.evaluate((element) => (element as HTMLElement).style.transform)).toBe(draggedTransform);
   expect(graphIssues).toEqual([]);
+});
+
+test('graph separates file cards when a drag would make them overlap', async ({ page }) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'repolens-node-overlap-'));
+  roots.push(root);
+  await writeFile(path.join(root, 'main.ts'), "import { value } from './dep'; export const main = value;\n");
+  await writeFile(path.join(root, 'dep.ts'), 'export const value = 1;\n');
+  await openOnly(page, root);
+  await expect(page.locator('.graph-flow-host')).toHaveAttribute('data-nodes-initialized', 'true');
+
+  const main = page.locator('.react-flow__node[data-id="main.ts"]');
+  const dependency = page.locator('.react-flow__node[data-id="dep.ts"]');
+  const beforeGeometry = await waitForStableGraphGeometry(page, { expectedNodeIds: ['main.ts', 'dep.ts'], minimumNodeCount: 2 });
+  const mainBox = await main.boundingBox();
+  const dependencyBox = await dependency.boundingBox();
+  if (!mainBox || !dependencyBox) throw new Error('Graph nodes must have measurable bounds before dragging.');
+  const initialPositions = await page.locator('.react-flow__node').evaluateAll((elements) => Object.fromEntries(
+    elements.map((element) => [element.getAttribute('data-id')!, (element as HTMLElement).style.transform]),
+  ));
+  const start = { x: mainBox.x + mainBox.width / 2, y: mainBox.y + mainBox.height / 2 };
+  const target = { x: dependencyBox.x + dependencyBox.width / 2, y: dependencyBox.y + dependencyBox.height / 2 };
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down();
+  await page.mouse.move(target.x, target.y, { steps: 8 });
+  await page.mouse.up();
+
+  const droppedTransform = await main.evaluate((element) => (element as HTMLElement).style.transform);
+  const draggedGeometry = await waitForStableGraphGeometry(page, { expectedNodeIds: ['main.ts', 'dep.ts'], minimumNodeCount: 2 });
+  const draggedPositions = await page.locator('.react-flow__node').evaluateAll((elements) => Object.fromEntries(
+    elements.map((element) => [element.getAttribute('data-id')!, (element as HTMLElement).style.transform]),
+  ));
+  expect(Object.keys(draggedPositions)).toHaveLength(2);
+  expect(droppedTransform).not.toBe(initialPositions['main.ts']);
+  expect(draggedPositions['main.ts']).toBe(droppedTransform);
+  expect(draggedPositions['main.ts']).not.toBe(draggedPositions['dep.ts']);
+  expect(draggedPositions['dep.ts']).not.toBe(initialPositions['dep.ts']);
+  expect(graphNodesAreSeparated(draggedGeometry)).toBe(true);
+
+  await dependency.click();
+  await waitForStableGraphGeometry(page);
+  await main.click();
+  await waitForStableGraphGeometry(page);
+  await dependency.click();
+  await waitForStableGraphGeometry(page);
+  const selectedPositions = await page.locator('.react-flow__node').evaluateAll((elements) => Object.fromEntries(
+    elements.map((element) => [element.getAttribute('data-id')!, (element as HTMLElement).style.transform]),
+  ));
+  expect(selectedPositions).toEqual(draggedPositions);
+});
+
+test('stable graph measurement observes moving neighbors and checks their final geometry', async ({ page }) => {
+  await page.setContent(`
+    <div class="graph-canvas" style="position:relative;width:800px;height:600px">
+      <div class="react-flow__viewport" style="position:absolute;inset:0;transform:translate(0px, 0px) scale(1)">
+        <div class="react-flow__node" data-id="selected.ts" style="position:absolute;width:160px;height:68px;left:40px;top:40px"><div class="graph-file-card is-selected"></div></div>
+        <div class="react-flow__node" data-id="neighbor.ts" style="position:absolute;width:160px;height:68px;left:120px;top:40px"><div class="graph-file-card"></div></div>
+      </div>
+    </div>`);
+  await page.evaluate(() => {
+    let frame = 0;
+    const neighbor = document.querySelector<HTMLElement>('[data-id="neighbor.ts"]')!;
+    const move = () => {
+      frame += 1;
+      neighbor.style.top = frame <= 3 ? '240px' : frame <= 30 ? `${frame % 2 ? 80 : 240}px` : '80px';
+      (window as Window & { graphMovementFrames?: number }).graphMovementFrames = frame;
+      if (frame < 31) requestAnimationFrame(move);
+    };
+    requestAnimationFrame(move);
+  });
+
+  const geometry = await waitForStableGraphGeometry(page, { expectedNodeIds: ['selected.ts', 'neighbor.ts'], minimumNodeCount: 2 });
+  const movementFrames = await page.evaluate(() => (window as Window & { graphMovementFrames?: number }).graphMovementFrames ?? 0);
+  expect(movementFrames).toBeGreaterThanOrEqual(31);
+  expect(geometry.nodes.map((node) => node.id)).toEqual(['neighbor.ts', 'selected.ts']);
+  expect(graphNodesAreSeparated(geometry)).toBe(false);
+  await expect(waitForStableGraphGeometry(page, { timeoutMs: 100, expectedNodeIds: ['missing.ts'], minimumNodeCount: 2 })).rejects.toThrow('Graph geometry did not stabilize');
 });

@@ -1,4 +1,4 @@
-import { test, expect, type Page } from '@playwright/test';
+import { test, expect, type Page } from './fixtures';
 import { installResizeObserverProbe } from './helpers/resize-observer-probe';
 import { createServer, type Server } from 'node:http';
 import { mkdtemp, mkdir, writeFile, unlink, rm } from 'node:fs/promises';
@@ -22,7 +22,7 @@ test.beforeAll(async () => {
     modelCalls += 1;
     const entry = files.some((file) => file[1] === 'main.ts') ? 'main.ts' : files[0][1];
     const result = prompt.includes('steps 需 3 到 7 个')
-      ? { title: '独立验收路线', steps: ['main.ts', 'a.ts', 'main.ts'].map((fileId, index) => ({ fileId, purpose: `阅读 ${index + 1}`, references: [{ fileId, startLine: 1 }] })) }
+      ? { title: '独立验收路线', steps: ['main.ts', 'a.ts', 'main.ts'].map((fileId, index) => ({ fileId, purpose: `阅读 ${index + 1}`, relationship: index === 0 ? '选定入口' : '沿静态依赖继续阅读', question: `第 ${index + 1} 步需要理解什么？`, references: [{ fileId, startLine: 1 }] })) }
       : { role: `已保存讲解:${entry}`, keyPoints: ['本地模拟结果'], references: [{ fileId: entry, startLine: 1 }] };
     response.writeHead(200, { 'Content-Type': 'application/json' });
     response.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(result) } }] }));

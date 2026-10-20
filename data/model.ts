@@ -10,6 +10,8 @@ export type ImportRecord = {
   resolution?: "file" | "package";
 };
 
+export type SymbolDetail = { name: string; kind: "function" | "class" | "interface" | "type" | "enum" | "method"; startLine: number; endLine: number };
+
 export type FileRecord = {
   id: string;
   path: string;
@@ -21,6 +23,7 @@ export type FileRecord = {
   language?: string;
   contentHash?: string;
   symbols?: string[];
+  symbolDetails?: SymbolDetail[];
   imports: ImportRecord[];
 };
 
@@ -31,6 +34,7 @@ export type DependencyEdge = {
   specifier: string;
   kind?: "import" | "export" | "dynamic" | "require" | "style" | "from-import" | "package";
   resolution?: "file" | "package";
+  resolutionBasis?: "relative-path" | "config-alias" | "typescript-resolution" | "python-module" | "python-submodule" | "go-package-expanded";
   typeOnly?: boolean;
   reference: SourceReference;
 };
@@ -41,6 +45,8 @@ export type TourStep = {
   focusFileId: string;
   description: string;
   reference: SourceReference;
+  relationship?: string;
+  question?: string;
 };
 
 export type RepositorySnapshot = {
@@ -79,6 +85,7 @@ export type AiPreview = {
   revision: string;
   entryFileId: string;
   mode: "explanation" | "route" | "question";
+  goal?: string;
   baseUrl: string;
   model: string;
   files: { fileId: string; startLine: number; endLine: number; contentHash: string; reasons?: string[] }[];
@@ -95,8 +102,141 @@ export type AiRouteRecord = {
   entryFileId: string;
   revision: string;
   title: string;
+  goal?: string;
   signature: string;
-  sourceSteps: { fileId: string; purpose: string; references: { fileId: string; startLine: number; endLine?: number | null }[] }[];
+  sourceSteps: { fileId: string; purpose: string; relationship?: string; question?: string; references: { fileId: string; startLine: number; endLine?: number | null }[] }[];
   steps: TourStep[];
   contextFiles: { fileId: string; contentHash: string }[];
+  /** Imported references may be retained for their notes while navigation remains disabled. */
+  stale?: boolean;
+};
+
+export type AiSavedResult = {
+  /** Older saved results may predate one or more of these metadata fields. */
+  __repositoryId?: string;
+  __entryFileId?: string;
+  __revision?: string;
+  __mode?: "explanation" | "route" | "question";
+  __contextFiles?: { fileId: string; contentHash: string }[];
+  __routeSteps?: TourStep[];
+  role?: string;
+  title?: string;
+  answer?: string;
+  keyPoints?: string[];
+  references?: { fileId: string; startLine: number; endLine?: number }[];
+  steps?: { fileId: string; purpose: string; references: { fileId: string; startLine: number; endLine?: number }[] }[];
+  insufficientEvidence?: boolean;
+  /** Preserve forward-compatible fields when reading older or newer local records. */
+  [key: string]: unknown;
+};
+
+export type AiQuestionReference = {
+  fileId: string;
+  startLine: number;
+  endLine?: number;
+};
+
+export type AiQuestionMessage = {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  references: AiQuestionReference[];
+  contextFiles: { fileId: string; contentHash: string; startLine?: number; endLine?: number }[];
+  claims?: { text: string; referenceIndices: number[] }[];
+  insufficientEvidence?: boolean;
+  stale?: boolean;
+};
+
+export type AiQuestionConversation = {
+  id: string;
+  title: string;
+  messages: AiQuestionMessage[];
+  updatedAt: number;
+};
+
+export type SearchRequest = {
+  repositoryId: string;
+  revision: string;
+  query: string;
+  offset?: number;
+  pathPrefix?: string;
+  language?: string;
+  matchCase?: boolean;
+  wholeWord?: boolean;
+  regex?: boolean;
+  excludeTests?: boolean;
+};
+
+export type SearchResult = {
+  fileId: string;
+  path: string;
+  language: string;
+  line: number;
+  text: string;
+  contextStartColumn: number;
+  contextEndColumn: number;
+  lineLength: number;
+  matchStartColumn: number;
+  matchEndColumn: number;
+};
+
+export type SearchResponse = {
+  revision: string;
+  filesSearched: number;
+  offset: number;
+  pageSize: number;
+  total: number;
+  results: SearchResult[];
+  hasMore: boolean;
+  capped: boolean;
+};
+
+export type RepositoryOverview = {
+  revision: string;
+  readme: { path: string; summary: string | null } | null;
+  manifests: string[];
+  candidates: { fileId: string; path: string; reason: string }[];
+  directories: { name: string; files: number }[];
+  languages: { name: string; files: number }[];
+  tests: string[];
+  testCount: number;
+  diagnosticCount: number;
+  limitations: string;
+};
+
+export type DependencyQuery = {
+  fromFileId: string;
+  toFileId?: string;
+  direction: "imports" | "imported-by";
+  kind: "path" | "impact" | "cycle";
+};
+
+export type DependencyPathResult = {
+  status: "found" | "not-found" | "missing";
+  files?: string[];
+  edgeIds?: string[];
+};
+
+export type ReadingNote = {
+  id: string;
+  fileId: string;
+  path: string;
+  startLine: number;
+  endLine?: number;
+  text: string;
+  contentHash: string;
+  commit?: string;
+  createdAt: number;
+  stale?: boolean;
+  kind: "note" | "bookmark" | "question";
+};
+
+export type RevisionComparison = {
+  revision: string;
+  mode: "working-tree" | "commits";
+  baseCommit: string;
+  headCommit: string;
+  files: { status: "added" | "modified" | "deleted" | "renamed"; path: string; oldPath?: string }[];
+  diff: string;
+  limits: { maxFiles: number; maxDiffBytes: number };
 };

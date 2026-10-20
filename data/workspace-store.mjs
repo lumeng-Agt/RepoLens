@@ -5,7 +5,7 @@ import path from "node:path";
 const VERSION = 1;
 const MAX_STORE_BYTES = 64 * 1024 * 1024;
 const MAX_PROGRESS_BYTES = 16 * 1024;
-const emptyState = () => ({ version: VERSION, recentRepositories: [], aiResults: {}, aiRoutes: {}, progress: {}, nodePositions: {}, conversations: {} });
+const emptyState = () => ({ version: VERSION, recentRepositories: [], aiResults: {}, aiRoutes: {}, progress: {}, nodePositions: {}, conversations: {}, readingNotes: {}, savedTours: {}, guidePreferences: null });
 const clone = (value) => structuredClone(value);
 
 class UnsupportedStoreVersionError extends Error {}
@@ -14,9 +14,10 @@ function validateState(value) {
   if (!value || typeof value !== "object" || value.version !== VERSION) throw new UnsupportedStoreVersionError("工作区存储版本不受支持。");
   const state = emptyState();
   state.recentRepositories = Array.isArray(value.recentRepositories) ? value.recentRepositories.filter((item) => item && typeof item.id === "string" && typeof item.name === "string" && typeof item.location === "string").slice(0, 20) : [];
-  for (const key of ["aiResults", "aiRoutes", "progress", "nodePositions", "conversations"]) {
+  for (const key of ["aiResults", "aiRoutes", "progress", "nodePositions", "conversations", "readingNotes", "savedTours"]) {
     if (value[key] && typeof value[key] === "object" && !Array.isArray(value[key])) state[key] = value[key];
   }
+  if (Object.hasOwn(value, "guidePreferences")) state.guidePreferences = value.guidePreferences;
   return state;
 }
 
@@ -124,7 +125,7 @@ export function createWorkspaceStore(directory) {
 
   function removeRepositoryFromState(target, repositoryId) {
     target.recentRepositories = target.recentRepositories.filter((item) => (item.workspaceId ?? item.id) !== repositoryId);
-    delete target.aiResults[repositoryId]; delete target.aiRoutes[repositoryId];
+    delete target.aiResults[repositoryId]; delete target.aiRoutes[repositoryId]; delete target.readingNotes[repositoryId]; delete target.savedTours[repositoryId];
     delete target.nodePositions[repositoryId]; delete target.conversations[repositoryId];
     for (const key of Object.keys(target.progress)) if (key.startsWith(`repolens:${repositoryId}:`)) delete target.progress[key];
   }
@@ -181,7 +182,7 @@ export function createWorkspaceStore(directory) {
   }
 
   return {
-    async get() { await load(); await writeQueue; return { ...clone(state), warning: storageMessage || undefined }; },
+    async get() { await load(); await writeQueue; return { ...clone(state), persistenceReady: loaded, warning: storageMessage || undefined }; },
     async getRepository(repositoryId) {
       await load(); await writeQueue;
       const prefix = `repolens:${repositoryId}:`;
@@ -193,6 +194,10 @@ export function createWorkspaceStore(directory) {
         progress: Object.fromEntries(Object.entries(state.progress).filter(([key]) => key.startsWith(prefix))),
         nodePositions: clone(state.nodePositions[repositoryId] ?? {}),
         conversations: clone(state.conversations[repositoryId] ?? []),
+        readingNotes: clone(state.readingNotes[repositoryId] ?? []),
+        savedTours: clone(state.savedTours[repositoryId] ?? []),
+        guidePreferences: clone(state.guidePreferences),
+        persistenceReady: loaded,
         warning: storageMessage || undefined,
       };
     },
@@ -226,6 +231,15 @@ export function createWorkspaceStore(directory) {
       if (!Array.isArray(conversations) || conversations.length > 100) throw new Error("问答会话数量超出限制。");
       return mutate((current) => { current.conversations[repositoryId] = conversations; });
     },
+    async saveReadingNotes(repositoryId, notes) {
+      if (!Array.isArray(notes) || notes.length > 10_000) throw new Error("阅读笔记数量超出限制。");
+      return mutate((current) => { current.readingNotes[repositoryId] = notes; });
+    },
+    async saveTours(repositoryId, tours) {
+      if (!Array.isArray(tours) || tours.length > 100) throw new Error("保存路线数量超出限制。");
+      return mutate((current) => { current.savedTours[repositoryId] = tours; });
+    },
+    async saveGuidePreferences(preferences) { return mutate((current) => { current.guidePreferences = preferences; }); },
     async clearRepository(repositoryId) {
       return mutate((current) => removeRepositoryFromState(current, repositoryId), () => cleanManagedCopies(repositoryId));
     },

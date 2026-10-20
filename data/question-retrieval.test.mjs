@@ -31,3 +31,15 @@ test("question retrieval marks weak evidence and returns deterministic ties", ()
   assert.deepEqual(result.candidates.map((item) => item.id), ["src/main.ts", "src/store.ts", "src/view.tsx"]);
   assert.ok(result.candidates.find((item) => item.id === "src/store.ts").reasons.includes("未发现直接匹配，可手动确认"));
 });
+
+test("question retrieval suggests the matching symbol definition and includes its exact lines", () => {
+  const detailedFiles = [
+    { ...files[0], symbolDetails: [{ name: "formatTask", kind: "function", startLine: 2, endLine: 6 }] },
+    { id: "src/other.ts", path: "src/other.ts", symbols: ["formatTask"], symbolDetails: [{ name: "formatTask", kind: "function", startLine: 10, endLine: 12 }] },
+  ];
+  const result = rankQuestionCandidates({ files: detailedFiles, dependencies: [], sourceById: new Map(), entryFileId: "src/main.ts", question: "How does formatTask work?" });
+  const match = result.candidates.find((candidate) => candidate.id === "src/main.ts");
+  assert.deepEqual(match.suggestedRange, { startLine: 2, endLine: 6 });
+  assert.ok(match.reasons.some((reason) => reason.includes("命中符号定义：formatTask")));
+  assert.deepEqual(result.candidates.find((candidate) => candidate.id === "src/other.ts").suggestedRange, { startLine: 10, endLine: 12 });
+});

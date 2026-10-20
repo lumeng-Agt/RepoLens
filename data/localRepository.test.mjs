@@ -16,9 +16,9 @@ test("indexes Python and Go static imports without executing project code", asyn
   await writeFile(path.join(root, "src", "__init__.py"), "");
   await writeFile(path.join(root, "src", "main.py"), "from .tasks import Task\nimport json\nimport importlib\nmodule = importlib.import_module(name)\n");
   await writeFile(path.join(root, "src", "tasks", "__init__.py"), "from .model import Task\n");
-  await writeFile(path.join(root, "src", "tasks", "model.py"), "class Task: pass\n");
+  await writeFile(path.join(root, "src", "tasks", "model.py"), "class Task:\n    def run(self):\n        return 1\n");
   await writeFile(path.join(root, "main.go"), 'package main\nimport (\n "fmt"\n task "example.com/repolens-fixture/internal/task"\n _ "example.com/repolens-fixture/internal/task/metrics"\n)\nfunc main() { fmt.Println(task.Name) }\n');
-  await writeFile(path.join(root, "internal", "task", "task.go"), "package task\nconst Name = \"task\"\n");
+  await writeFile(path.join(root, "internal", "task", "task.go"), "package task\ntype Task struct{}\nfunc (Task) Run() int { return 1 }\nconst Name = \"task\"\n");
   await writeFile(path.join(root, "internal", "task", "metrics.go"), "//go:build windows\n\npackage task\n");
   const indexed = await scanRepository(root);
   const files = new Map(indexed.snapshot.files.map((file) => [file.id, file]));
@@ -31,7 +31,41 @@ test("indexes Python and Go static imports without executing project code", asyn
   assert.ok(indexed.snapshot.unresolved.some((item) => item.fileId === "src/main.py" && item.specifier === "json" && item.kind === "standard-library"));
   assert.ok(indexed.snapshot.unresolved.some((item) => item.fileId === "src/main.py" && item.specifier === "<动态模块导入>" && item.kind === "dynamic"));
   assert.ok(indexed.snapshot.diagnostics.some((item) => item.path === "internal/task/metrics.go" && /未按运行平台筛选/.test(item.message)));
+  assert.ok(files.get("src/tasks/model.py")?.symbolDetails?.some((symbol) => symbol.name === "Task" && symbol.kind === "class" && symbol.startLine === 1));
+  assert.ok(files.get("src/tasks/model.py")?.symbolDetails?.some((symbol) => symbol.name === "run" && symbol.kind === "method" && symbol.startLine === 2));
+  assert.ok(files.get("main.go")?.symbolDetails?.some((symbol) => symbol.name === "main" && symbol.kind === "function" && symbol.startLine === 7));
+  assert.ok(files.get("internal/task/task.go")?.symbolDetails?.some((symbol) => symbol.name === "Run" && symbol.kind === "method" && symbol.startLine === 3));
+  assert.ok(indexed.snapshot.dependencies.some((edge) => edge.fromId === "main.go" && edge.resolutionBasis === "go-package-expanded"));
   assert.equal(indexed.stats.sourceParseCount, 7);
+});
+
+test("indexes TypeScript symbol definition ranges and explains relative versus configured-alias edges", async (context) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "repolens-symbol-outline-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(path.join(root, "src"), { recursive: true });
+  await writeFile(path.join(root, "tsconfig.json"), JSON.stringify({ compilerOptions: { baseUrl: ".", paths: { "@logic/*": ["src/*"] } } }));
+  await writeFile(path.join(root, "src/main.ts"), [
+    'import { run } from "@logic/logic";',
+    'import { relative } from "./relative";',
+    "export interface Options {", "  enabled: boolean;", "}",
+    "export function start() {", "  return run();", "}",
+    "export const create = () => new Engine();",
+    "export class Engine {",
+    "  run() { return true; }",
+    "}",
+  ].join("\n") + "\n");
+  await writeFile(path.join(root, "src/logic.ts"), "export function run() { return true; }\n");
+  await writeFile(path.join(root, "src/relative.ts"), "export const relative = true;\n");
+  const indexed = await scanRepository(root);
+  const file = indexed.snapshot.files.find((item) => item.id === "src/main.ts");
+  const symbols = new Map(file.symbolDetails.map((item) => [item.name, item]));
+  assert.deepEqual(symbols.get("Options"), { name: "Options", kind: "interface", startLine: 3, endLine: 5 });
+  assert.deepEqual(symbols.get("start"), { name: "start", kind: "function", startLine: 6, endLine: 8 });
+  assert.deepEqual(symbols.get("create"), { name: "create", kind: "function", startLine: 9, endLine: 9 });
+  assert.deepEqual(symbols.get("Engine"), { name: "Engine", kind: "class", startLine: 10, endLine: 12 });
+  assert.deepEqual(symbols.get("run"), { name: "run", kind: "method", startLine: 11, endLine: 11 });
+  assert.ok(indexed.snapshot.dependencies.some((edge) => edge.toId === "src/logic.ts" && edge.resolutionBasis === "config-alias"));
+  assert.ok(indexed.snapshot.dependencies.some((edge) => edge.toId === "src/relative.ts" && edge.resolutionBasis === "relative-path"));
 });
 
 test("recognizes Python dynamic imports only when they are actual calls", async (context) => {

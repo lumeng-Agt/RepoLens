@@ -265,14 +265,14 @@ export async function scanRepository(inputPath, previous = null, { mode = "verif
     if (!canReuseWithoutRead) sourceReadCount += 1;
     const contentHash = canReuseWithoutRead ? old.contentHash : digest(source);
     const contentChanged = !old || old.contentHash !== contentHash;
-    const parsedStructure = contentChanged ? await extractFileStructure(source, absolute, relative) : { imports: old.imports, symbols: old.symbols ?? [] };
+    const parsedStructure = contentChanged ? await extractFileStructure(source, absolute, relative) : { imports: old.imports, symbols: old.symbols ?? [], symbolDetails: old.symbolDetails ?? [] };
     const parsedImports = parsedStructure.imports;
     if (contentChanged) parsedFileCount += 1;
     const ext = path.extname(relative).slice(1).toLowerCase();
     const kind = ["css", "scss", "sass", "less"].includes(ext) ? "style" : ["py", "pyi"].includes(ext) ? "python" : ext === "go" ? "go" : "typescript";
     const language = ["py", "pyi"].includes(ext) ? "python" : ext;
     const conditionalGo = kind === "go" && /(?:^|\n)\s*\/\/(?:go:build|\+build)\b/.test(source);
-    files.set(relative, { id: relative, path: relative, name: path.basename(relative), kind, role: kind === "python" ? "Python 模块" : kind === "go" ? conditionalGo ? "Go 条件编译文件" : "Go 源文件" : path.basename(relative), summary: "本地仓库文件；当前内容来自静态分析。", imports: parsedImports, symbols: parsedStructure.symbols, contentHash, language });
+    files.set(relative, { id: relative, path: relative, name: path.basename(relative), kind, role: kind === "python" ? "Python 模块" : kind === "go" ? conditionalGo ? "Go 条件编译文件" : "Go 源文件" : path.basename(relative), summary: "本地仓库文件；当前内容来自静态分析。", imports: parsedImports, symbols: parsedStructure.symbols, symbolDetails: parsedStructure.symbolDetails ?? [], contentHash, language });
     if (parsedStructure.diagnostic) diagnostics.push({ path: relative, message: parsedStructure.diagnostic });
     if (conditionalGo) diagnostics.push({ path: relative, message: "此 Go 文件带有条件编译标记；当前可阅读源码，但图谱未按运行平台筛选构建文件。" });
     sourceCache.set(relative, source);
@@ -292,7 +292,7 @@ export async function scanRepository(inputPath, previous = null, { mode = "verif
         const target = resolvePythonImport(file.path, imported.specifier, known, pythonFiles);
         let resolvedMember = false;
         if (target) {
-          dependencies.push({ id: `${file.id}::${target}::${imported.line}`, fromId: file.id, toId: target, specifier: imported.specifier, kind: imported.kind, resolution: "file", typeOnly: false, reference: { fileId: file.id, line: imported.line } });
+          dependencies.push({ id: `${file.id}::${target}::${imported.line}`, fromId: file.id, toId: target, specifier: imported.specifier, kind: imported.kind, resolution: "file", resolutionBasis: "python-module", typeOnly: false, reference: { fileId: file.id, line: imported.line } });
         }
         const packageRoots = target
           ? path.posix.basename(target).startsWith("__init__.") ? [path.posix.dirname(target)] : []
@@ -310,7 +310,7 @@ export async function scanRepository(inputPath, previous = null, { mode = "verif
             continue;
           }
           resolvedMember = true;
-          dependencies.push({ id: `${file.id}::${memberPath}::${imported.line}`, fromId: file.id, toId: memberPath, specifier: imported.specifier ? `${imported.specifier}.${member}` : member, kind: imported.kind, resolution: "file", typeOnly: false, reference: { fileId: file.id, line: imported.line } });
+          dependencies.push({ id: `${file.id}::${memberPath}::${imported.line}`, fromId: file.id, toId: memberPath, specifier: imported.specifier ? `${imported.specifier}.${member}` : member, kind: imported.kind, resolution: "file", resolutionBasis: "python-submodule", typeOnly: false, reference: { fileId: file.id, line: imported.line } });
         }
         if (!target && !resolvedMember) {
           const rootModule = imported.specifier.replace(/^\.+/, "").split(".")[0];
@@ -327,7 +327,7 @@ export async function scanRepository(inputPath, previous = null, { mode = "verif
         const packageDirectory = resolveGoPackage(imported.specifier, goModules);
         const targets = packageDirectory ? goFiles.filter((candidate) => path.posix.dirname(candidate) === packageDirectory && !path.posix.basename(candidate).endsWith("_test.go")) : [];
         if (targets.length) {
-          for (const target of targets) dependencies.push({ id: `${file.id}::${target}::${imported.line}`, fromId: file.id, toId: target, specifier: imported.specifier, kind: "package", resolution: "package", typeOnly: false, reference: { fileId: file.id, line: imported.line } });
+          for (const target of targets) dependencies.push({ id: `${file.id}::${target}::${imported.line}`, fromId: file.id, toId: target, specifier: imported.specifier, kind: "package", resolution: "package", resolutionBasis: "go-package-expanded", typeOnly: false, reference: { fileId: file.id, line: imported.line } });
         } else {
           const rootImport = imported.specifier.split("/")[0];
           const standard = !rootImport.includes(".") && GO_STDLIB.has(rootImport);
@@ -348,7 +348,7 @@ export async function scanRepository(inputPath, previous = null, { mode = "verif
         const base = path.resolve(path.dirname(fromAbsolute), imported.specifier);
         target = extensions.map((extension) => path.relative(root, `${base}${extension}`).split(path.sep).join("/")).find((candidate) => known.has(candidate)) ?? "";
       }
-      if (target && known.has(target)) dependencies.push({ id: `${file.id}::${target}::${imported.line}`, fromId: file.id, toId: target, specifier: imported.specifier, kind: imported.kind, typeOnly: imported.typeOnly, resolution: "file", reference: { fileId: file.id, line: imported.line } });
+      if (target && known.has(target)) dependencies.push({ id: `${file.id}::${target}::${imported.line}`, fromId: file.id, toId: target, specifier: imported.specifier, kind: imported.kind, typeOnly: imported.typeOnly, resolution: "file", resolutionBasis: tsResolutionBasis(imported.specifier, options), reference: { fileId: file.id, line: imported.line } });
       else unresolved.push({ fileId: file.id, specifier: imported.specifier, line: imported.line, kind: imported.kind, external: !imported.specifier.startsWith(".") && !imported.specifier.startsWith("/") && !imported.specifier.startsWith("<") });
     }
   }
@@ -363,7 +363,7 @@ export async function scanRepository(inputPath, previous = null, { mode = "verif
   ]).sort(([left], [right]) => String(left).localeCompare(String(right)));
   const stableConfigHashes = [...configHashes].map(([fileName, hash]) => [fingerprintPath(root, fileName), hash]).sort(([left], [right]) => left.localeCompare(right));
   const stableLanguageConfigHashes = [...languageConfigHashes].sort(([left], [right]) => left.localeCompare(right));
-  const fingerprint = digest(JSON.stringify({ files: [...files.values()].map(({ id, contentHash }) => [id, contentHash]), dependencies: dependencies.map(({ fromId, toId, specifier, kind, typeOnly, resolution, reference }) => [fromId, toId, specifier, kind, typeOnly, resolution, reference.line]), unresolved, ignoreContents, configHashes: stableConfigHashes, configState, languageConfigHashes: stableLanguageConfigHashes, goModules }));
+  const fingerprint = digest(JSON.stringify({ files: [...files.values()].map(({ id, contentHash, symbolDetails }) => [id, contentHash, symbolDetails]), dependencies: dependencies.map(({ fromId, toId, specifier, kind, typeOnly, resolution, resolutionBasis, reference }) => [fromId, toId, specifier, kind, typeOnly, resolution, resolutionBasis, reference.line]), unresolved, ignoreContents, configHashes: stableConfigHashes, configState, languageConfigHashes: stableLanguageConfigHashes, goModules }));
   const sequence = previous?.snapshot.sequence ? previous.snapshot.sequence + (previous.snapshot.revision === fingerprint ? 0 : 1) : 1;
   const snapshot = { id, version: fingerprint.slice(0, 16), revision: fingerprint, sequence, name: path.basename(root), description: root, source: "local", diagnostics: [...diagnostics, ...unresolved.map((item) => ({ path: item.fileId, message: `${item.external ? "外部依赖" : "未解析引用"}: ${item.specifier}（第 ${item.line} 行）` }))], files: [...files.values()], dependencies, unresolved, tour: [], configPath: [...configHashes].filter(([, hash]) => hash !== "missing").map(([config]) => path.relative(root, config).split(path.sep).join("/")) };
   return { root, snapshot, files, sourceCache, metadata, ignoreContents, configHashes, configCache, languageConfigHashes, goModules, stats: { mode: scanMode, candidateCount: paths.length, indexedCount: files.size, parsedFileCount, sourceReadCount, sourceParseCount: parsedFileCount, configReadCount: scanStats.configReadCount, configParseCount, languageConfigReadCount: languageConfigContents.size, languageConfigParseCount, durationMs: performance.now() - startedAt } };
@@ -463,13 +463,15 @@ async function extractFileStructure(source, fileName, relativePath) {
   const extension = path.extname(fileName).toLowerCase();
   if ([".py", ".pyi"].includes(extension)) return parsePolyglot(source, relativePath, "python");
   if (extension === ".go") return parsePolyglot(source, relativePath, "go");
-  return { imports: extractImports(source, fileName), symbols: [] };
+  if ([".css", ".scss", ".sass", ".less"].includes(extension)) return { imports: extractCssImports(source), symbols: [], symbolDetails: [] };
+  return parseTypeScriptStructure(source, fileName);
 }
 
-function extractImports(source, fileName) {
-  if ([".css", ".scss", ".sass", ".less"].includes(path.extname(fileName).toLowerCase())) {
-    return [...source.matchAll(/@import\s+["']([^"']+)["']/g)].map((match) => ({ specifier: match[1], line: source.slice(0, match.index).split("\n").length, kind: "style", typeOnly: false }));
-  }
+function extractCssImports(source) {
+  return [...source.matchAll(/@import\s+["']([^"']+)["']/g)].map((match) => ({ specifier: match[1], line: source.slice(0, match.index).split("\n").length, kind: "style", typeOnly: false }));
+}
+
+function parseTypeScriptStructure(source, fileName) {
   const extension = path.extname(fileName).toLowerCase();
   const kind = extension === ".tsx" ? ts.ScriptKind.TSX : extension === ".jsx" ? ts.ScriptKind.JSX : [".ts", ".mts", ".cts"].includes(extension) ? ts.ScriptKind.TS : ts.ScriptKind.JS;
   const ast = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true, kind);
@@ -489,5 +491,45 @@ function extractImports(source, fileName) {
     ts.forEachChild(node, visit);
   }
   visit(ast);
-  return imports;
+  const symbolDetails = [];
+  const symbolKeys = new Set();
+  const addSymbol = (name, symbolKind, node) => {
+    if (!name) return;
+    const start = ast.getLineAndCharacterOfPosition(node.getStart(ast)).line + 1;
+    const key = `${name}:${start}`;
+    if (symbolKeys.has(key)) return;
+    symbolKeys.add(key);
+    const end = ast.getLineAndCharacterOfPosition(Math.max(node.getStart(ast), node.getEnd() - 1)).line + 1;
+    symbolDetails.push({ name, kind: symbolKind, startLine: start, endLine: end });
+  };
+  const addMembers = (members) => {
+    for (const member of members) {
+      if (!member.name) continue;
+      const name = ts.isIdentifier(member.name) || ts.isPrivateIdentifier(member.name) || ts.isStringLiteral(member.name) ? member.name.text : undefined;
+      if (!name) continue;
+      if (ts.isMethodDeclaration(member) || ts.isMethodSignature(member) || ts.isConstructorDeclaration(member) || ts.isGetAccessorDeclaration(member) || ts.isSetAccessorDeclaration(member)) addSymbol(name, "method", member);
+      else if (ts.isPropertyDeclaration(member) && member.initializer && (ts.isArrowFunction(member.initializer) || ts.isFunctionExpression(member.initializer))) addSymbol(name, "method", member);
+    }
+  };
+  for (const statement of ast.statements) {
+    if (ts.isFunctionDeclaration(statement)) addSymbol(statement.name?.text, "function", statement);
+    else if (ts.isClassDeclaration(statement)) { addSymbol(statement.name?.text, "class", statement); addMembers(statement.members); }
+    else if (ts.isInterfaceDeclaration(statement)) { addSymbol(statement.name.text, "interface", statement); addMembers(statement.members); }
+    else if (ts.isTypeAliasDeclaration(statement)) addSymbol(statement.name.text, "type", statement);
+    else if (ts.isEnumDeclaration(statement)) addSymbol(statement.name.text, "enum", statement);
+    else if (ts.isVariableStatement(statement)) for (const declaration of statement.declarationList.declarations) {
+      if (ts.isIdentifier(declaration.name) && declaration.initializer && (ts.isArrowFunction(declaration.initializer) || ts.isFunctionExpression(declaration.initializer))) addSymbol(declaration.name.text, "function", declaration);
+    }
+    if (symbolDetails.length >= 200) break;
+  }
+  return { imports, symbols: symbolDetails.map((item) => item.name), symbolDetails };
+}
+
+function tsResolutionBasis(specifier, options) {
+  if (specifier.startsWith(".") || specifier.startsWith("/")) return "relative-path";
+  for (const pattern of Object.keys(options.paths ?? {})) {
+    const wildcard = pattern.indexOf("*");
+    if (wildcard < 0 ? pattern === specifier : specifier.startsWith(pattern.slice(0, wildcard)) && specifier.endsWith(pattern.slice(wildcard + 1))) return "config-alias";
+  }
+  return "typescript-resolution";
 }

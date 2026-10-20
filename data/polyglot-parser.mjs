@@ -74,10 +74,20 @@ function pythonImports(rootNode) {
       imports.push({ specifier, line, kind: "dynamic", typeOnly: false });
     }
   }
-  const symbols = descendants(rootNode, new Set(["class_definition", "function_definition"]))
-    .map((node) => node.childForFieldName("name")?.text)
-    .filter(Boolean).slice(0, 200);
-  return { imports, symbols };
+  const symbolDetails = descendants(rootNode, new Set(["class_definition", "function_definition"]))
+    .flatMap((node) => {
+      const name = node.childForFieldName("name")?.text;
+      if (!name) return [];
+      let ancestor = node.parent;
+      let insideClass = false;
+      while (ancestor && ancestor.type !== "module") {
+        if (ancestor.type === "class_definition") { insideClass = true; break; }
+        ancestor = ancestor.parent;
+      }
+      const kind = node.type === "class_definition" ? "class" : insideClass ? "method" : "function";
+      return [{ name, kind, startLine: node.startPosition.row + 1, endLine: node.endPosition.row + (node.endPosition.column > 0 ? 1 : 0) }];
+    }).slice(0, 200);
+  return { imports, symbols: symbolDetails.map((symbol) => symbol.name), symbolDetails };
 }
 
 function unquoteGo(value) {
@@ -90,20 +100,21 @@ function goImports(rootNode) {
     const source = node.childForFieldName("path");
     return source ? [{ specifier: unquoteGo(source.text), line: node.startPosition.row + 1, kind: "package", typeOnly: false }] : [];
   });
-  const symbols = descendants(rootNode, new Set(["function_declaration", "method_declaration", "type_spec", "const_spec", "var_spec"]))
+  const symbolDetails = descendants(rootNode, new Set(["function_declaration", "method_declaration", "type_spec"]))
     .flatMap((node) => {
       const name = node.childForFieldName("name")?.text;
-      if (name) return [name];
-      return node.children.flatMap((child) => child.type === "identifier" ? [child.text] : []);
+      if (!name) return [];
+      const kind = node.type === "type_spec" ? "type" : node.type === "method_declaration" ? "method" : "function";
+      return [{ name, kind, startLine: node.startPosition.row + 1, endLine: node.endPosition.row + (node.endPosition.column > 0 ? 1 : 0) }];
     }).slice(0, 200);
-  return { imports, symbols };
+  return { imports, symbols: symbolDetails.map((symbol) => symbol.name), symbolDetails };
 }
 
 export async function parsePolyglot(source, filePath, language) {
   const parser = await parserFor(language);
   parser.reset();
   const tree = parser.parse(source);
-  if (!tree) return { imports: [], symbols: [], diagnostic: "Tree-sitter 未能解析此文件。" };
+  if (!tree) return { imports: [], symbols: [], symbolDetails: [], diagnostic: "Tree-sitter 未能解析此文件。" };
   try {
     const parsed = language === "python" ? pythonImports(tree.rootNode) : goImports(tree.rootNode);
     return { ...parsed, ...(tree.rootNode.hasError() ? { diagnostic: `${filePath} 包含语法错误；已尽力提取静态引用。` } : {}) };

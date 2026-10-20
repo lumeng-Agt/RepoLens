@@ -5,7 +5,7 @@ import { localApiOrigin } from "./runtime-config";
 const LOCAL_API_ORIGIN = localApiOrigin();
 
 export type AiMode = "explanation" | "route" | "question";
-export type AiScopeCandidate = { fileId: string; characters: number; lineCount: number; oversizedLines: number[]; reasons?: string[] };
+export type AiScopeCandidate = { fileId: string; characters: number; lineCount: number; oversizedLines: number[]; reasons?: string[]; suggestedRange?: { startLine: number; endLine: number } };
 export type AiLineRange = { startLine: number; endLine: number };
 export type AiPreviewResponse = { scopeRequired: false; preview: AiPreview } | { scopeRequired: true; candidates: AiScopeCandidate[]; maxFiles: number; maxCharacters: number; retrievalInsufficient?: boolean };
 export type AiGenerationResult = { result: Record<string, unknown>; cached: boolean; revision: string; repositoryId: string; entryFileId: string; mode: AiMode };
@@ -34,7 +34,7 @@ async function requestPreview(url: string, init?: RequestInit): Promise<AiPrevie
 }
 
 export interface ExplanationProvider {
-  preview(repository: RepositorySnapshot, fileId: string, mode: AiMode, fileIds?: string[], scopePrefix?: string, ranges?: Record<string, AiLineRange>, signal?: AbortSignal): Promise<AiPreviewResponse>;
+  preview(repository: RepositorySnapshot, fileId: string, mode: AiMode, fileIds?: string[], scopePrefix?: string, ranges?: Record<string, AiLineRange>, signal?: AbortSignal, goal?: string): Promise<AiPreviewResponse>;
   generate(preview: AiPreview, signal: AbortSignal): Promise<AiGenerationResult>;
   saveSettings(settings: { baseUrl: string; model: string; apiKey: string }): Promise<{ baseUrl: string; model: string; configured: boolean }>;
   getSettings(): Promise<{ baseUrl: string; model: string; configured: boolean }>;
@@ -42,8 +42,8 @@ export interface ExplanationProvider {
 }
 
 export const localExplanationProvider: ExplanationProvider = {
-  preview(repository, fileId, mode, fileIds, scopePrefix, ranges, signal) {
-    return requestPreview(`${LOCAL_API_ORIGIN}/api/ai/preview`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repositoryId: repository.id, fileId, mode, fileIds, scopePrefix, ranges }), signal });
+  preview(repository, fileId, mode, fileIds, scopePrefix, ranges, signal, goal) {
+    return requestPreview(`${LOCAL_API_ORIGIN}/api/ai/preview`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repositoryId: repository.id, fileId, mode, fileIds, scopePrefix, ranges, goal }), signal });
   },
   previewQuestion(repository, fileId, question, history, fileIds, ranges, signal) {
     return requestPreview(`${LOCAL_API_ORIGIN}/api/ai/question/preview`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repositoryId: repository.id, fileId, question, history, fileIds, ranges }), signal });

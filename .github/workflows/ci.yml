@@ -1,0 +1,68 @@
+name: RepoLens CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: repolens-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - node: 24
+            profile: full
+          - node: 22
+            profile: compatibility
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Install browser for browser-backed regression tests
+        run: npx playwright install chromium
+      - name: Run full local verification
+        if: matrix.profile == 'full'
+        run: npm run verify
+      - name: Verify clean committed source export
+        if: matrix.profile == 'full'
+        run: node scripts/verify-clean-source.mjs
+      - name: Run Node 22 type check
+        if: matrix.profile == 'compatibility'
+        run: npm run typecheck
+      - name: Run Node 22 tests
+        if: matrix.profile == 'compatibility'
+        run: npm test
+      - name: Preserve failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: repolens-ci-node-${{ matrix.node }}-evidence
+          path: |
+            .artifacts/verify/**/*.log
+            .artifacts/verify/**/summary.json
+            .artifacts/browser-failures/**
+            .artifacts/startup-failures/**
+            .artifacts/clean-source/**/*.log
+            .artifacts/clean-source/**/summary.json
+            .artifacts/clean-source/**/failure.txt
+            .artifacts/desktop-candidates/**/package-and-smoke.log
+            .artifacts/desktop-candidates/**/CANDIDATE-ONLY.txt
+            test-results/**
+            playwright-report/**
+          if-no-files-found: ignore
+          retention-days: 14

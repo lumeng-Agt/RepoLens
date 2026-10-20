@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import { localWorkspaceProvider } from "@/data/providers";
+import { localRepositoryProvider, localWorkspaceProvider } from "@/data/providers";
 import { localExplanationProvider, type AiGenerationResult, type AiLineRange, type AiPreviewResponse, type AiQuestionHistoryItem, type AiScopeCandidate } from "@/data/explanation-provider";
 import type { AiPreview, FileRecord, RepositorySnapshot, SourceReference } from "@/data/model";
 import { acknowledgeQuestionConversationSave, clearQuestionConversationSaveError, enqueueQuestionConversationSave, failQuestionConversationRead, getQuestionConversationGeneration, getQuestionConversationOperations, getQuestionConversationReadError, getQuestionConversationSaveError, getQuestionConversationView, isQuestionConversationClearPending, recordQuestionConversationChanges, restoreQuestionConversations, setQuestionConversationSaveError } from "@/data/question-recovery.mjs";
@@ -10,7 +10,8 @@ type QaMessage = {
   role: "user" | "assistant";
   content: string;
   references: QaReference[];
-  contextFiles: { fileId: string; contentHash: string }[];
+  contextFiles: { fileId: string; contentHash: string; startLine?: number; endLine?: number }[];
+  claims?: { text: string; referenceIndices: number[] }[];
   insufficientEvidence?: boolean;
   stale?: boolean;
 };
@@ -24,9 +25,10 @@ function validConversation(value: unknown): value is QaConversation {
     message && typeof message.id === "string" && ["user", "assistant"].includes(message.role) && typeof message.content === "string" && Array.isArray(message.references) && Array.isArray(message.contextFiles));
 }
 
-export function QuestionPanel({ repository, currentFile, filesById, onOpenReference, backendAvailable = true, active = false, storageBusy = false, clearVersion = 0 }: {
+export function QuestionPanel({ repository, currentFile, filesById, onOpenReference, backendAvailable = true, active = false, storageBusy = false, clearVersion = 0, additionalFileIds = [], onClearAdditionalFiles }: {
   repository: RepositorySnapshot; currentFile: FileRecord; filesById: Map<string, FileRecord>; onOpenReference: (reference: SourceReference) => void; backendAvailable?: boolean;
   active?: boolean; storageBusy?: boolean; clearVersion?: number;
+  additionalFileIds?: string[]; onClearAdditionalFiles?: () => void;
 }) {
   const workspaceId = repository.workspaceId ?? repository.id;
   const sessionKey = `${workspaceId}:${repository.persistenceSessionId ?? ""}`;
@@ -43,12 +45,18 @@ export function QuestionPanel({ repository, currentFile, filesById, onOpenRefere
     return error ? { sessionKey, message: error } : null;
   });
   const [question, setQuestion] = useState("");
+  const [supplementQuestion, setSupplementQuestion] = useState("");
+  const [supplementFileIds, setSupplementFileIds] = useState<string[]>([]);
+  const [supplementFilter, setSupplementFilter] = useState("");
   const [stage, setStage] = useState<"idle" | "previewing" | "scope" | "ready" | "generating" | "error">("idle");
   const [message, setMessage] = useState("");
   const [previewState, setPreviewState] = useState<PreviewState | null>(null);
   const [candidates, setCandidates] = useState<AiScopeCandidate[]>([]);
   const [selectedFiles, setSelectedFiles] = useState<string[]>([]);
   const [ranges, setRanges] = useState<Record<string, AiLineRange>>({});
+  const [evidence, setEvidence] = useState<{ messageId: string; referenceIndex: number; fileId: string; startLine: number; source: string; status: "loading" | "loaded" | "error"; error?: string } | null>(null);
+  const evidenceSequence = useRef(0);
+  const evidenceController = useRef<AbortController | null>(null);
   const [scopeContextKey, setScopeContextKey] = useState("");
   const requestSequence = useRef(0);
   const requestController = useRef<AbortController | null>(null);
@@ -126,9 +134,11 @@ export function QuestionPanel({ repository, currentFile, filesById, onOpenRefere
 
   useEffect(() => {
     invalidateRequest();
+    evidenceSequence.current += 1;
+    evidenceController.current?.abort(); evidenceController.current = null;
     // Leaving the tab, changing context, or clearing saved data releases request state immediately.
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    setPreviewState(null); setCandidates([]); setStage("idle");
+    setPreviewState(null); setCandidates([]); setStage("idle"); setEvidence(null);
     if (active && !storageBusy) setMessage("");
     return invalidateRequest;
   }, [active, currentFile.id, invalidateRequest, repository.id, repository.revision, repository.source, sessionKey, storageBusy, workspaceId]);
@@ -165,7 +175,49 @@ export function QuestionPanel({ repository, currentFile, filesById, onOpenRefere
   }), []);
 
   const isStale = useCallback((entry: QaMessage) => entry.stale === true || entry.contextFiles.some((context) => filesById.get(context.fileId)?.contentHash !== context.contentHash), [filesById]);
+  const showEvidence = async (entry: QaMessage, reference: QaReference, referenceIndex: number) => {
+    if (isStale(entry)) return;
+    const context = entry.contextFiles.find((item) => item.fileId === reference.fileId);
+    if (!context || !context.startLine || !context.endLine || reference.startLine < context.startLine || (reference.endLine ?? reference.startLine) > context.endLine) {
+      setEvidence({ messageId: entry.id, referenceIndex, fileId: reference.fileId, startLine: reference.startLine, source: "", status: "error", error: "此引用超出了生成时确认的发送范围。" });
+      return;
+    }
+    const requestId = ++evidenceSequence.current;
+    evidenceController.current?.abort(); const controller = new AbortController(); evidenceController.current = controller;
+    setEvidence({ messageId: entry.id, referenceIndex, fileId: reference.fileId, startLine: reference.startLine, source: "", status: "loading" });
+    try {
+      const source = await localRepositoryProvider.getSource(repository.id, repository.revision, reference.fileId, controller.signal);
+      if (evidenceSequence.current !== requestId || isStale(entry)) return;
+      const lines = source.split("\n"); const endLine = Math.min(reference.endLine ?? reference.startLine, reference.startLine + 39);
+      setEvidence({ messageId: entry.id, referenceIndex, fileId: reference.fileId, startLine: reference.startLine, source: lines.slice(reference.startLine - 1, endLine).map((line, index) => `${reference.startLine + index}  ${line}`).join("\n"), status: "loaded" });
+    } catch (error) { if (evidenceSequence.current === requestId && (error as Error).name !== "AbortError") setEvidence({ messageId: entry.id, referenceIndex, fileId: reference.fileId, startLine: reference.startLine, source: "", status: "error", error: error instanceof Error ? error.message : "无法读取引用证据。" }); }
+  };
   const displayMessages = useMemo(() => currentConversation?.messages ?? [], [currentConversation]);
+  const priorQuestionByMessage = useMemo(() => {
+    const result = new Map<string, string>();
+    let priorQuestion = "";
+    for (const entry of displayMessages) {
+      if (entry.role === "user") priorQuestion = entry.content;
+      else if (priorQuestion) result.set(entry.id, priorQuestion);
+    }
+    return result;
+  }, [displayMessages]);
+  const beginSupplement = (entry: QaMessage) => {
+    const priorQuestion = priorQuestionByMessage.get(entry.id);
+    if (!priorQuestion) return;
+    invalidateRequest();
+    setEvidence(null);
+    setSupplementQuestion(priorQuestion);
+    setSupplementFileIds([...new Set(entry.contextFiles.map((context) => context.fileId))].slice(0, 12));
+    setSupplementFilter("");
+    setQuestion(priorQuestion);
+    setPreviewState(null); setCandidates([]); setStage("idle");
+    setMessage("选择需要补充的源码；下一步会重新预览，确认前不会发送模型请求。");
+  };
+  const visibleSupplementFiles = useMemo(() => {
+    const query = supplementFilter.trim().toLocaleLowerCase();
+    return [...repository.files].filter((file) => !query || file.path.toLocaleLowerCase().includes(query)).sort((left, right) => left.path.localeCompare(right.path));
+  }, [repository.files, supplementFilter]);
 
   useEffect(() => {
     if (loadedSessionKey !== sessionKey) return;
@@ -190,10 +242,12 @@ export function QuestionPanel({ repository, currentFile, filesById, onOpenRefere
     activeRequestContext.current = contextKey;
     setPreviewState(null); setStage("previewing"); setMessage("正在本地整理相关源码范围；尚未向模型发送内容。");
     try {
-      const value: AiPreviewResponse = await localExplanationProvider.previewQuestion(repository, currentFile.id, trimmed, history, fileIds, ranges, controller.signal);
+      const requestedFileIds = fileIds ?? (additionalFileIds.length ? additionalFileIds : undefined);
+      const value: AiPreviewResponse = await localExplanationProvider.previewQuestion(repository, currentFile.id, trimmed, history, requestedFileIds, ranges, controller.signal);
       if (requestSequence.current !== id) return;
       if (value.scopeRequired) {
-        const chosen = selectedFiles.filter((fileId) => value.candidates.some((candidate) => candidate.fileId === fileId));
+        const preferred = new Set([...(fileIds ?? []), ...(fileIds === undefined ? additionalFileIds : [])]);
+        const chosen = [...new Set([...selectedFiles, ...preferred])].filter((fileId) => value.candidates.some((candidate) => candidate.fileId === fileId));
         const defaultSelection = chosen.length ? chosen : value.candidates.slice(0, Math.min(12, value.candidates.length)).map((candidate) => candidate.fileId);
         const nextRanges = Object.fromEntries(value.candidates.map((candidate) => [candidate.fileId, ranges[candidate.fileId] ?? { startLine: 1, endLine: candidate.lineCount }]));
         setCandidates(value.candidates); setSelectedFiles(defaultSelection); setRanges(nextRanges); setScopeContextKey(contextKey); setStage("scope");
@@ -222,11 +276,12 @@ export function QuestionPanel({ repository, currentFile, filesById, onOpenRefere
       const response: AiGenerationResult = await localExplanationProvider.generate(state.preview, controller.signal);
       if (requestSequence.current !== id || response.repositoryId !== repository.id || response.revision !== repository.revision || response.mode !== "question") return;
       const result = response.result;
-      const contextFiles = state.preview.files.map(({ fileId, contentHash }) => ({ fileId, contentHash }));
+      const contextFiles = state.preview.files.map(({ fileId, contentHash, startLine, endLine }) => ({ fileId, contentHash, startLine, endLine }));
       const userMessage: QaMessage = { id: crypto.randomUUID(), role: "user", content: state.question, references: [], contextFiles };
       const answerMessage: QaMessage = {
         id: crypto.randomUUID(), role: "assistant", content: String(result.answer ?? ""),
         references: Array.isArray(result.references) ? result.references as QaReference[] : [], contextFiles,
+        claims: Array.isArray(result.claims) ? result.claims as { text: string; referenceIndices: number[] }[] : undefined,
         insufficientEvidence: result.insufficientEvidence === true,
       };
       const nextId = activeId || crypto.randomUUID();
@@ -240,6 +295,7 @@ export function QuestionPanel({ repository, currentFile, filesById, onOpenRefere
       // effect alone can be cancelled by the unmount immediately after an answer.
       persistConversations(updatedConversations);
       setActiveId(nextId); setQuestion(""); setPreviewState(null); setStage("idle");
+      onClearAdditionalFiles?.();
       setMessage(response.cached ? "回答已从本地服务缓存恢复。" : "回答已保存到此设备；源码仅按本次确认发送。引用可以定位，但仍需人工判断解释是否准确。");
     } catch (error) {
       if (requestSequence.current === id && (error as Error).name !== "AbortError") { setStage("error"); setMessage(error instanceof Error ? error.message : "问答请求失败。"); }
@@ -269,6 +325,7 @@ export function QuestionPanel({ repository, currentFile, filesById, onOpenRefere
     {storageBusy && <p className="question-feedback" role="status">正在清除本地保存数据，问答操作已暂停。</p>}
     <fieldset disabled={!backendAvailable || storageBusy} style={{ border: 0, margin: 0, minWidth: 0, padding: 0 }}>
     <section className="question-panel" aria-label="源码问答">
+    {additionalFileIds.length > 0 && <div className="question-feedback" role="status">已从源码搜索加入 {additionalFileIds.length} 个候选文件。预览时仍需核对发送范围。<button type="button" onClick={onClearAdditionalFiles}>清除候选</button></div>}
     <div className="question-toolbar">
       <label><span className="sr-only">问答会话</span><select aria-label="问答会话" value={activeId} onChange={(event) => { cancel(); setActiveId(event.target.value); }}>
         {!visibleConversations.length && <option value="">新问答</option>}
@@ -282,11 +339,18 @@ export function QuestionPanel({ repository, currentFile, filesById, onOpenRefere
       {displayMessages.map((entry) => <article className={`question-message is-${entry.role}${isStale(entry) ? " is-stale" : ""}`} key={entry.id}>
         <div className="question-message-heading"><strong>{entry.role === "user" ? "你" : "RepoLens 回答"}</strong>{isStale(entry) && <span>依据源码已变化，回答过期</span>}</div>
         <p className="question-message-body">{entry.content}</p>
+        {entry.claims?.map((claim, claimIndex) => <p className="question-claim" key={`${entry.id}:claim:${claimIndex}`}>{claim.text} <span>{claim.referenceIndices.map((referenceIndex) => <button key={referenceIndex} type="button" disabled={isStale(entry) || !entry.references[referenceIndex]} onClick={() => { const reference = entry.references[referenceIndex]; if (reference) void showEvidence(entry, reference, referenceIndex); }}>证据 {referenceIndex + 1}</button>)}</span></p>)}
         {entry.insufficientEvidence && <small className="question-insufficient">已标记为无法从本次源码范围判断。</small>}
-        {entry.references.length > 0 && <div className="question-references">{entry.references.map((reference, index) => <button key={`${reference.fileId}:${reference.startLine}:${index}`} disabled={isStale(entry)} onClick={() => onOpenReference({ fileId: reference.fileId, line: reference.startLine, ...(reference.endLine ? { endLine: reference.endLine } : {}) })}>{reference.fileId} · 第 {reference.startLine}–{reference.endLine ?? reference.startLine} 行</button>)}</div>}
+        {entry.role === "assistant" && <button type="button" className="question-retry" onClick={() => beginSupplement(entry)}>引用不足，补充文件</button>}
+        {entry.references.length > 0 && <div className="question-references">{entry.references.map((reference, index) => <span key={`${reference.fileId}:${reference.startLine}:${index}`}><button disabled={isStale(entry)} onClick={() => onOpenReference({ fileId: reference.fileId, line: reference.startLine, ...(reference.endLine ? { endLine: reference.endLine } : {}) })}>{reference.fileId} · 第 {reference.startLine}–{reference.endLine ?? reference.startLine} 行</button><button type="button" disabled={isStale(entry)} onClick={() => void showEvidence(entry, reference, index)}>查看证据 {index + 1}</button></span>)}</div>}
         {entry.role === "user" && <button type="button" className="question-retry" onClick={() => retryMessage(entry.content)}>重新预览此问题</button>}
       </article>)}
     </div>
+    {evidence && <aside className="question-evidence" aria-label="回答证据"><div><strong>证据对照 · {evidence.fileId}:{evidence.startLine}</strong><button type="button" onClick={() => setEvidence(null)}>关闭</button></div>{evidence.status === "loading" ? <p>正在读取已确认范围内的源码…</p> : evidence.status === "error" ? <p role="alert">{evidence.error}</p> : <><pre>{evidence.source}</pre><button type="button" onClick={() => onOpenReference({ fileId: evidence.fileId, line: evidence.startLine })}>跳转到完整源码</button><small>引用可定位不代表结论已被证明，请人工核对源码是否支持回答。</small></>}</aside>}
+    {supplementQuestion && <section className="question-supplement" aria-label="补充问答源码范围"><strong>补充源码后重新预览</strong><p>问题：{supplementQuestion}</p><label>筛选文件<input aria-label="筛选补充文件" value={supplementFilter} onChange={(event) => setSupplementFilter(event.target.value)} placeholder="输入路径关键词" /></label><div>{visibleSupplementFiles.map((file) => {
+      const checked = supplementFileIds.includes(file.id);
+      return <label key={`supplement:${file.id}`}><input type="checkbox" checked={checked} disabled={!checked && supplementFileIds.length >= 12} onChange={(event) => setSupplementFileIds((current) => event.target.checked ? [...current, file.id] : current.filter((id) => id !== file.id))} /><span>{file.path}</span></label>;
+    })}</div><small>已选 {supplementFileIds.length}/12 个文件。选择后会重新生成发送预览。</small><button type="button" disabled={!supplementFileIds.length || stage === "previewing" || stage === "generating"} onClick={() => { const prompt = supplementQuestion; setSupplementQuestion(""); void startPreview(prompt, supplementFileIds); }}>重新预览补充范围</button><button type="button" onClick={() => setSupplementQuestion("")}>取消</button></section>}
     <form className="question-input-form" onSubmit={submitQuestion}>
       <label htmlFor="repository-question">提问或追问</label>
       <textarea id="repository-question" value={question} maxLength={12000} onChange={(event) => changeQuestion(event.target.value)} placeholder={`关于 ${currentFile.path}，我想了解…`} disabled={stage === "generating" || stage === "previewing"} />

@@ -1,3 +1,5 @@
+import { rankQuestionCandidates } from "./question-retrieval.mjs";
+
 /** Build a deterministic candidate set from static dependency edges. */
 export function collectAiCandidates(snapshot, entryFileId, mode) {
   if (!snapshot.files.some((file) => file.id === entryFileId)) throw new Error("目标文件已不存在，请重新选择文件。");
@@ -14,6 +16,36 @@ export function collectAiCandidates(snapshot, entryFileId, mode) {
     }
   }
   return [...selected].sort((a, b) => a.localeCompare(b));
+}
+
+/** Rank route context against the user's reading goal while keeping the entry and graph candidates available. */
+export function rankGoalCandidates(snapshot, entryFileId, goal, sourceById) {
+  const graphCandidates = collectAiCandidates(snapshot, entryFileId, "route");
+  const allowed = new Set(graphCandidates);
+  const ranking = rankQuestionCandidates({ files: snapshot.files, dependencies: snapshot.dependencies, sourceById, entryFileId, question: goal });
+  const candidates = ranking.candidates.filter((candidate) => allowed.has(candidate.id));
+  const entry = candidates.find((candidate) => candidate.id === entryFileId);
+  const ranked = candidates.filter((candidate) => candidate.id !== entryFileId).sort((left, right) => right.score - left.score || left.id.localeCompare(right.id));
+  const matched = ranked.filter((candidate) => candidate.score > 3);
+  const selected = [entryFileId, ...matched.map((candidate) => candidate.id)];
+  for (const candidate of ranked) {
+    if (selected.length >= Math.min(3, candidates.length)) break;
+    if (!selected.includes(candidate.id)) selected.push(candidate.id);
+  }
+  return {
+    candidates: [entry, ...ranked].filter(Boolean),
+    selectedFileIds: selected,
+    retrievalInsufficient: ranking.retrievalInsufficient,
+  };
+}
+
+/** Keep explicit user-selected question files available for a fresh preview, even when retrieval did not rank them. */
+export function questionCandidateIds(snapshot, entryFileId, question, sourceById, requestedFileIds = []) {
+  const ranked = rankQuestionCandidates({ files: snapshot.files, dependencies: snapshot.dependencies, sourceById, entryFileId, question });
+  const known = new Set(snapshot.files.map((file) => file.id));
+  const ids = [...ranked.candidates.map((candidate) => candidate.id)];
+  for (const id of requestedFileIds) if (known.has(id) && !ids.includes(id)) ids.push(id);
+  return { candidates: ids, ranking: ranked.candidates, retrievalInsufficient: ranked.retrievalInsufficient };
 }
 
 /** Select, validate, and slice the exact source ranges approved for a preview. */

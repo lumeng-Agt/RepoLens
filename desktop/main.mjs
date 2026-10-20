@@ -6,6 +6,7 @@ import { randomBytes } from "node:crypto";
 import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { isTrustedDesktopSender, isTrustedDesktopUrl } from "./security-policy.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(here, "..");
@@ -160,7 +161,7 @@ async function createMainWindow(uiOrigin) {
   });
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   mainWindow.webContents.on("will-navigate", (event, url) => {
-    if (!url.startsWith(uiOrigin + "/")) event.preventDefault();
+    if (!isTrustedDesktopUrl(url, uiOrigin)) event.preventDefault();
   });
   mainWindow.once("ready-to-show", () => { if (process.env.REPOLENS_SMOKE_HIDDEN !== "1") mainWindow?.show(); });
   await mainWindow.loadURL(`${uiOrigin}/`);
@@ -176,7 +177,8 @@ async function start() {
   const apiPort = await reservePort();
   const apiOrigin = `http://127.0.0.1:${apiPort}`;
   const uiOrigin = await startUiServer(apiOrigin);
-  ipcMain.handle("repository:select-directory", async () => {
+  ipcMain.handle("repository:select-directory", async (event) => {
+    if (!isTrustedDesktopSender(event, mainWindow?.webContents, uiOrigin)) throw new Error("未授权的桌面目录选择请求。");
     const result = await dialog.showOpenDialog(mainWindow, { title: "打开本地仓库", properties: ["openDirectory"] });
     return result.canceled ? null : result.filePaths[0] ?? null;
   });
@@ -207,7 +209,14 @@ async function start() {
   if (secondInstancePendingFocus) { secondInstancePendingFocus = false; focusMainWindow(); }
 }
 
-ipcMain.handle("desktop:quit", () => app.quit());
+ipcMain.handle("desktop:quit", (event) => {
+  const uiOrigin = uiServer?.address()?.port ? `http://127.0.0.1:${uiServer.address().port}` : "";
+  if (!isTrustedDesktopSender(event, mainWindow?.webContents, uiOrigin)) {
+    const senderFrame = event?.senderFrame;
+    throw new Error(`未授权的桌面退出请求（sender=${event?.sender === mainWindow?.webContents}, primaryFrame=${senderFrame === event?.sender?.mainFrame}, frameUrl=${senderFrame?.url ?? "unavailable"}, expectedOrigin=${uiOrigin || "unavailable"}）。`);
+  }
+  app.quit();
+});
 function reportBackendFailure(message) {
   if (backendFailure || quitting) return;
   backendFailure = message;

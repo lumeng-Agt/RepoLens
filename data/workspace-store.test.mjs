@@ -14,16 +14,52 @@ test("workspace store persists recents, results, route progress, and positions w
   await store.touchRecent({ id: "local-project", name: "Project", location: "D:\\project" });
   await store.saveAiResult("local-project", "src/index.py", { answer: "An explanation", references: [{ fileId: "src/index.py", startLine: 3 }], contentHashes: [{ fileId: "src/index.py", hash: "abc" }] });
   await store.saveAiRoute("local-project", { title: "Route", signature: "route-hash", steps: [] });
+  const note = { id: "note-1", fileId: "src/index.py", path: "src/index.py", startLine: 3, text: "Check this branch", contentHash: "abc", createdAt: 1, kind: "note" };
+  await store.saveReadingNotes("local-project", [note]);
+  await store.saveTours("local-project", [{ title: "Route", signature: "route-hash", steps: [] }]);
   const key = "repolens:local-project:route-hash";
   await store.saveProgress("local-project", key, JSON.stringify({ stepIndex: 2, completedSteps: ["one"] }));
   await store.saveNodePositions("local-project", { "src/index.py": { x: 12, y: 34 } });
   const restored = await createWorkspaceStore(directory).getRepository("local-project");
+  assert.equal(restored.persistenceReady, true);
   assert.equal(restored.recentRepositories[0].name, "Project");
   assert.equal(restored.aiResults["src/index.py"].answer, "An explanation");
   assert.equal(restored.aiRoute.signature, "route-hash");
+  assert.deepEqual(restored.readingNotes, [note]);
+  assert.equal(restored.savedTours[0].signature, "route-hash");
   assert.equal(restored.progress[key].includes('"stepIndex":2'), true);
   assert.deepEqual(restored.nodePositions["src/index.py"], { x: 12, y: 34 });
   assert.doesNotMatch(await readFile(path.join(directory, "workspace-v1.json"), "utf8"), /sourceText|rawSource|"source"\s*:/);
+});
+
+test("reading artifacts are workspace-scoped and removed by the existing clear operation", async (context) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "repolens-reading-artifacts-"));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const store = createWorkspaceStore(directory);
+  const note = { id: "n", fileId: "a.ts", path: "a.ts", startLine: 1, text: "note", contentHash: "h", createdAt: 1, kind: "bookmark" };
+  await store.saveReadingNotes("workspace-a", [note]);
+  await store.saveTours("workspace-a", [{ signature: "tour-a", steps: [] }]);
+  assert.deepEqual((await store.getRepository("workspace-b")).readingNotes, []);
+  assert.equal((await store.clearRepository("workspace-a")).persisted, true);
+  const cleared = await createWorkspaceStore(directory).getRepository("workspace-a");
+  assert.deepEqual(cleared.readingNotes, []);
+  assert.deepEqual(cleared.savedTours, []);
+});
+
+test("usage guide preferences are global, survive repository clearing, and are removed by clear-all", async (context) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "repolens-guide-preferences-"));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const store = createWorkspaceStore(directory);
+  const preferences = { version: 1, welcomeHandled: true, completedTaskIds: ["source"], checklistOpen: false, noticeDismissed: true };
+  await store.saveGuidePreferences(preferences);
+  await store.saveReadingNotes("workspace-a", [{ id: "n1", fileId: "a.ts", path: "a.ts", startLine: 1, text: "note", contentHash: "h", createdAt: 1, kind: "note" }]);
+
+  assert.deepEqual((await store.getRepository("workspace-a")).guidePreferences, preferences);
+  await store.clearRepository("workspace-a");
+  assert.deepEqual((await createWorkspaceStore(directory).getRepository("workspace-a")).guidePreferences, preferences);
+
+  await store.clearAll();
+  assert.equal((await createWorkspaceStore(directory).getRepository("workspace-a")).guidePreferences, null);
 });
 
 test("workspace store limits recents and quarantines damaged records while staying usable", async (context) => {
@@ -35,6 +71,7 @@ test("workspace store limits recents and quarantines damaged records while stayi
   await writeFile(path.join(directory, "workspace-v1.json"), "{invalid", "utf8");
   const damaged = createWorkspaceStore(directory);
   const snapshot = await damaged.get();
+  assert.equal(snapshot.persistenceReady, true, "successfully quarantined corruption can recover into a new writable store");
   assert.equal(snapshot.recentRepositories.length, 0);
   assert.match(snapshot.warning, /无法读取本地保存数据/);
   assert.ok((await readdir(directory)).some((name) => name.includes(".corrupt-")));
@@ -103,10 +140,12 @@ test("a transient initial read failure retries before any write can replace the 
   try {
     const store = createWorkspaceStore(directory);
     const failedRead = await store.getRepository("repo");
+    assert.equal(failedRead.persistenceReady, false, "an unconfirmed read must remain non-writable");
     assert.match(failedRead.warning, /无法读取本地保存数据/);
 
     denyRead = false;
     const restored = await store.getRepository("repo");
+    assert.equal(restored.persistenceReady, true);
     assert.deepEqual(restored.conversations, original, "a later read must reload the intact file");
     assert.equal((await store.saveNodePositions("other-repo", { "src/main.ts": { x: 1, y: 2 } })).persisted, true);
     assert.deepEqual(JSON.parse(await actualReadFile(file, "utf8")).conversations.repo, original);

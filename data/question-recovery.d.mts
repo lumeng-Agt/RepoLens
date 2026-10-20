@@ -3,7 +3,8 @@ export type QuestionRecoveryMessage = {
   role: "user" | "assistant";
   content: string;
   references: { fileId: string; startLine: number; endLine?: number }[];
-  contextFiles: { fileId: string; contentHash: string }[];
+  contextFiles: { fileId: string; contentHash: string; startLine?: number; endLine?: number }[];
+  claims?: { text: string; referenceIndices: number[] }[];
   insufficientEvidence?: boolean;
   stale?: boolean;
 };

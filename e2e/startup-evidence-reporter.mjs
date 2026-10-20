@@ -1,5 +1,6 @@
 import { preserveFailureEvidence } from '../scripts/startup-evidence.mjs';
 import { unlink } from 'node:fs/promises';
+import path from 'node:path';
 
 export default class StartupEvidenceReporter {
   async onTestEnd(test, result) {
@@ -11,6 +12,7 @@ export default class StartupEvidenceReporter {
       errors: result.errors,
       attachments: result.attachments,
       serverLogPath: process.env.REPOLENS_E2E_SERVER_LOG,
+      destinationRoot: path.join(process.cwd(), '.artifacts', 'browser-failures'),
     });
     console.error(`RepoLens browser failure evidence preserved at ${evidence.destination}`);
   }

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { clearWorkspacePersistence, enqueueWorkspacePersistence, getKnownWorkspacePersistenceIds } from "./workspace-persistence.mjs";
+import { clearWorkspacePersistence, enqueueWorkspacePersistence, getKnownWorkspacePersistenceIds, getWorkspacePersistenceStatus, subscribeWorkspacePersistence } from "./workspace-persistence.mjs";
 
 function deferred() {
   let resolve;
@@ -70,4 +70,51 @@ test("overlapping workspace and clear-all operations are serialized without reop
   release.resolve();
   await Promise.all([write, currentClear, allClear]);
   assert.deepEqual(events, ["write", "clear-current", "clear-all"]);
+});
+
+test("workspace persistence status distinguishes writing, durable saves, and memory-only failures", async () => {
+  const workspaceId = `persistence-status-${crypto.randomUUID()}`;
+  const started = deferred();
+  const release = deferred();
+  let notifications = 0;
+  const unsubscribe = subscribeWorkspacePersistence(workspaceId, () => { notifications += 1; });
+  const write = enqueueWorkspacePersistence(workspaceId, async () => {
+    started.resolve();
+    await release.promise;
+    return { ok: true };
+  });
+  await started.promise;
+  assert.deepEqual(getWorkspacePersistenceStatus(workspaceId), { phase: "saving", pending: 1, error: "" });
+  release.resolve();
+  await write;
+  assert.deepEqual(getWorkspacePersistenceStatus(workspaceId), { phase: "saved", pending: 0, error: "" });
+  assert.deepEqual(await enqueueWorkspacePersistence(workspaceId, async () => ({ skipped: true })), { skipped: true });
+  assert.deepEqual(getWorkspacePersistenceStatus(workspaceId), { phase: "saved", pending: 0, error: "" });
+
+  await assert.rejects(enqueueWorkspacePersistence(workspaceId, async () => ({ ok: false, warning: "disk unavailable" })), /disk unavailable/);
+  assert.deepEqual(getWorkspacePersistenceStatus(workspaceId), { phase: "memory", pending: 0, error: "disk unavailable" });
+  assert.ok(notifications >= 5);
+  unsubscribe();
+});
+
+test("a successful write in one category cannot clear another category's failed save", async () => {
+  const workspaceId = `persistence-independent-failures-${crypto.randomUUID()}`;
+  await assert.rejects(enqueueWorkspacePersistence(workspaceId, async () => ({ ok: false, warning: "笔记写入失败" }), { key: "reading-notes" }), /笔记写入失败/);
+  await enqueueWorkspacePersistence(workspaceId, async () => ({ ok: true }), { key: "saved-tours" });
+  assert.deepEqual(getWorkspacePersistenceStatus(workspaceId), { phase: "memory", pending: 0, error: "笔记写入失败" });
+  await enqueueWorkspacePersistence(workspaceId, async () => ({ ok: true }), { key: "reading-notes" });
+  assert.deepEqual(getWorkspacePersistenceStatus(workspaceId), { phase: "saved", pending: 0, error: "" });
+});
+
+test("clear success removes category failure markers after its write barrier", async () => {
+  const workspaceId = `persistence-clear-failures-${crypto.randomUUID()}`;
+  await assert.rejects(enqueueWorkspacePersistence(workspaceId, async () => { throw new Error("note failed"); }, { key: "reading-notes" }), /note failed/);
+  await clearWorkspacePersistence([workspaceId], async () => ({ ok: true }));
+  assert.deepEqual(getWorkspacePersistenceStatus(workspaceId), { phase: "saved", pending: 0, error: "" });
+});
+
+test("a skipped write does not leave the save indicator stuck in progress", async () => {
+  const workspaceId = `persistence-skipped-${crypto.randomUUID()}`;
+  await enqueueWorkspacePersistence(workspaceId, async () => ({ skipped: true }));
+  assert.deepEqual(getWorkspacePersistenceStatus(workspaceId), { phase: "idle", pending: 0, error: "" });
 });

@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { createServer as createViteServer } from "vite";
 import { chromium } from "@playwright/test";
 import { createWorkspaceStore } from "../data/workspace-store.mjs";
+import { createAiRouteRecord } from "../data/ai-route.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const directories = [];
@@ -24,8 +25,10 @@ async function openDesktopPage({ localTour = [] } = {}) {
   const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "repolens-recovery-regression-"));
   directories.push(temporaryDirectory);
   const store = createWorkspaceStore(temporaryDirectory);
+  await store.saveGuidePreferences({ version: 1, welcomeHandled: true, completedTaskIds: [], checklistOpen: false, noticeDismissed: true });
   const workspaceWrites = [];
   const heldProgressWrites = [];
+  const heldSourceReads = [];
   const workspaceReads = [];
   const heldWorkspaceReads = [];
   const workspaceReadWaiters = [];
@@ -90,6 +93,10 @@ async function openDesktopPage({ localTour = [] } = {}) {
       if (payload.action === "progress") await store.saveProgress(payload.workspaceId, payload.key, payload.value);
       if (payload.action === "node-positions") await store.saveNodePositions(payload.workspaceId, payload.positions);
       if (payload.action === "conversations") await store.saveConversations(payload.workspaceId, payload.conversations);
+      if (payload.action === "reading-notes") await store.saveReadingNotes(payload.workspaceId, payload.notes);
+      if (payload.action === "saved-tours") await store.saveTours(payload.workspaceId, payload.tours);
+      if (payload.action === "guide-preferences") await store.saveGuidePreferences(payload.preferences);
+      if (payload.action === "ai-route") await store.saveAiRoute(payload.workspaceId, payload.record);
       if (payload.action === "clear-repository") await store.clearRepository(payload.workspaceId);
       if (payload.action === "clear-all") await store.clearAll();
       response.writeHead(200, { "Content-Type": "application/json" });
@@ -140,6 +147,17 @@ async function openDesktopPage({ localTour = [] } = {}) {
       return;
     }
     if (url.pathname === "/api/events") { response.writeHead(204).end(); return; }
+    if (url.pathname === "/api/source" && request.method === "GET") {
+      const held = heldSourceReads.shift();
+      if (held) {
+        held.started.resolve();
+        await held.release.promise;
+      }
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ source: "export const value = 1;" }));
+      held?.settled.resolve();
+      return;
+    }
     response.writeHead(200, { "Content-Type": "application/json" });
     response.end(JSON.stringify(url.pathname.endsWith("/source") ? { source: "export const value = 1;" } : { configured: false, baseUrl: "", model: "" }));
   });
@@ -152,6 +170,7 @@ async function openDesktopPage({ localTour = [] } = {}) {
   const browser = await chromium.launch();
   browsers.push(browser);
   const page = await browser.newPage();
+  await page.addInitScript(() => localStorage.setItem("repolens:usage-guide:v1", JSON.stringify({ version: 1, welcomeHandled: true, completedTaskIds: [], checklistOpen: false, noticeDismissed: true })));
   page.setDefaultTimeout(8000);
   page.setDefaultNavigationTimeout(12000);
   await page.addInitScript((origin) => { window.__REPOLENS_RUNTIME__ = { desktop: true, apiOrigin: origin }; }, apiOrigin);
@@ -180,6 +199,12 @@ async function openDesktopPage({ localTour = [] } = {}) {
       heldProgressWrites.push(control);
       return control;
     },
+    holdNextSourceRead: () => {
+      const started = deferred(); const release = deferred(); const settled = deferred();
+      const control = { started, release, settled };
+      heldSourceReads.push(control);
+      return control;
+    },
     waitForWorkspaceRead: (repositoryId, count) => {
       if (workspaceReads.filter((id) => id === repositoryId).length >= count) return Promise.resolve();
       return new Promise((resolve) => workspaceReadWaiters.push({ repositoryId, count, resolve }));
@@ -187,6 +212,12 @@ async function openDesktopPage({ localTour = [] } = {}) {
     get generationCalls() { return generationCalls; },
     origin: `http://127.0.0.1:${vite.httpServer.address().port}`,
   };
+}
+
+async function dismissWelcomeAfterClear(page) {
+  const welcome = page.getByRole("heading", { name: "从这里开始读懂一个仓库" });
+  await welcome.waitFor({ state: "visible", timeout: 5_000 }).catch(() => {});
+  if (await welcome.isVisible().catch(() => false)) await page.getByRole("button", { name: "跳过指引，直接进入工作区" }).click();
 }
 
 after(async () => {
@@ -242,6 +273,44 @@ test("failed local workspace restore never replaces saved conversations with an 
   assert.equal(recovered.conversations.length, 2);
   assert.ok(recovered.conversations.some((conversation) => conversation.id === "saved-conversation"), "retry preserves the original conversation");
   assert.ok(recovered.conversations.some((conversation) => conversation.id !== "saved-conversation" && conversation.title === "新对话"), "retry merges the conversation created during the outage");
+});
+
+test("reading notes and routes edited during a failed restore merge with the saved records", async () => {
+  const app = await openDesktopPage();
+  const originalNote = { id: "saved-note", fileId: "main.ts", path: "main.ts", startLine: 1, text: "原有笔记", contentHash: "h1", createdAt: 10, kind: "note" };
+  const originalRoute = createAiRouteRecord({ repositoryId: "recovery-local", entryFileId: "main.ts", revision: "r1", title: "原有路线", steps: [{ fileId: "main.ts", purpose: "原有步骤", relationship: "入口", question: "原有问题", references: [{ fileId: "main.ts", startLine: 1 }] }], contextFiles: [{ fileId: "main.ts", contentHash: "h1" }] });
+  await app.store.saveReadingNotes("recovery-local", [originalNote]);
+  await app.store.saveTours("recovery-local", [originalRoute]);
+  await app.page.goto(app.origin);
+  await app.page.locator("#repository-path").fill("recovery-fixture");
+  await app.page.getByRole("button", { name: "打开仓库", exact: true }).click();
+  await app.page.locator(".detail-file-title strong").getByText("main.ts", { exact: true }).waitFor({ state: "visible" });
+  await app.page.getByRole("tab", { name: "讲解", exact: true }).click();
+  await app.page.getByRole("button", { name: "重试恢复", exact: true }).waitFor({ state: "visible" });
+
+  await app.page.getByLabel("阅读笔记内容").fill("离线期间新增笔记");
+  await app.page.getByRole("button", { name: "保存记录", exact: true }).click();
+  await app.page.locator(".manual-tour-builder summary").click();
+  await app.page.locator(".manual-tour-builder input[type=checkbox]").check();
+  await app.page.getByRole("button", { name: "创建并开始路线", exact: true }).click();
+  assert.equal(app.workspaceWrites.some((write) => write.action === "reading-notes" || write.action === "saved-tours"), false, "unknown disk records must not be replaced while restoration is failing");
+  assert.deepEqual((await app.store.getRepository("recovery-local")).readingNotes, [originalNote]);
+  assert.deepEqual((await app.store.getRepository("recovery-local")).savedTours, [originalRoute]);
+
+  app.setWorkspaceReadsAvailable();
+  await app.page.getByRole("button", { name: "重试恢复", exact: true }).click();
+  await app.page.getByRole("tab", { name: "讲解", exact: true }).click();
+  await app.page.getByText("原有笔记", { exact: true }).waitFor({ state: "visible" });
+  await app.page.getByText("离线期间新增笔记", { exact: true }).waitFor({ state: "visible" });
+  await app.page.waitForFunction(async ({ apiOrigin, signature }) => {
+    const response = await fetch(`${apiOrigin}/api/workspace?repositoryId=recovery-local`);
+    const saved = await response.json();
+    return saved.readingNotes?.some((item) => item.id === "saved-note") && saved.readingNotes?.some((item) => item.text === "离线期间新增笔记") && saved.savedTours?.some((item) => item.signature === signature) && saved.savedTours?.some((item) => item.title === "手动阅读路线");
+  }, { apiOrigin: await app.page.evaluate(() => window.__REPOLENS_RUNTIME__?.apiOrigin), signature: originalRoute.signature }, { timeout: 8000 });
+  const recovered = await app.store.getRepository("recovery-local");
+  assert.equal(recovered.readingNotes.length, 2);
+  assert.ok(recovered.savedTours.some((item) => item.signature === originalRoute.signature), "the route from disk survives the offline edit");
+  assert.ok(recovered.savedTours.some((item) => item.title === "手动阅读路线"), "the route created during the outage is saved after merge");
 });
 
 test("pending conversations survive tab unmount and merge after a later successful restore", async () => {
@@ -352,6 +421,7 @@ test("clear-all removes the active question view and later edits do not resurrec
   await app.page.waitForFunction(() => Array.from(document.querySelector('[aria-label="问答会话"]').options).some((option) => option.text === "Saved"));
 
   await app.page.getByRole("button", { name: "清除全部本地保存数据", exact: true }).click();
+  await dismissWelcomeAfterClear(app.page);
   await app.page.waitForFunction(() => Array.from(document.querySelector('[aria-label="问答会话"]').options).every((option) => option.text !== "Saved"));
   assert.deepEqual((await app.store.getRepository("recovery-local")).conversations, []);
   assert.deepEqual((await app.store.getRepository("other-workspace")).conversations, []);
@@ -363,6 +433,41 @@ test("clear-all removes the active question view and later edits do not resurrec
   }, { apiOrigin: await app.page.evaluate(() => window.__REPOLENS_RUNTIME__?.apiOrigin) }, { timeout: 5000 });
   const saved = await app.store.getRepository("recovery-local");
   assert.equal(saved.conversations.some((item) => item.id === "saved-conversation"), false);
+});
+
+test("clear-all invalidates an import paused while validating source references", async () => {
+  const app = await openDesktopPage();
+  app.setWorkspaceReadsAvailable();
+  await app.page.goto(app.origin);
+  await app.page.locator("#repository-path").fill("recovery-fixture");
+  await app.page.getByRole("button", { name: "打开仓库", exact: true }).click();
+  await app.page.getByText("本地仓库", { exact: true }).waitFor({ state: "visible" });
+  await app.page.getByRole("tab", { name: "讲解", exact: true }).click();
+
+  const importedNote = {
+    id: "late-import-note", fileId: "main.ts", path: "main.ts", startLine: 1,
+    text: "这条记录必须被清除", contentHash: "h1", createdAt: 1, kind: "note",
+  };
+  await app.page.locator(".reading-import-button input[type=file]").setInputFiles({
+    name: "reading.json", mimeType: "application/json",
+    buffer: Buffer.from(JSON.stringify({ format: "repolens-reading", version: 1, workspaceId: "recovery-local", notes: [importedNote], tours: [] })),
+  });
+  await app.page.getByRole("dialog", { name: "导入预览" }).waitFor({ state: "visible" });
+
+  const sourceRead = app.holdNextSourceRead();
+  await app.page.getByRole("button", { name: "确认导入", exact: true }).click();
+  await sourceRead.started.promise;
+  const clearResponse = app.page.waitForResponse((response) => response.url().includes("/api/workspace") && response.request().method() === "POST" && response.request().postData()?.includes("clear-all"));
+  await app.page.getByRole("button", { name: "清除全部本地保存数据", exact: true }).click();
+  assert.equal((await clearResponse).status(), 200);
+  await dismissWelcomeAfterClear(app.page);
+  assert.deepEqual((await app.store.getRepository("recovery-local")).readingNotes, []);
+
+  sourceRead.release.resolve();
+  await sourceRead.settled.promise;
+  await app.page.getByRole("dialog", { name: "导入预览" }).waitFor({ state: "detached" });
+  assert.deepEqual((await app.store.getRepository("recovery-local")).readingNotes, [], "a source validation started before clear must not recreate the imported note");
+  assert.equal(app.workspaceWrites.some((write) => write.action === "reading-notes" && write.notes?.some((note) => note.id === importedNote.id)), false, "the invalidated import must not enter the persistence queue after clearing");
 });
 
 test("clearing a workspace during question generation aborts it before any stale answer can be saved", async () => {
@@ -454,6 +559,7 @@ test("clear-all waits for an in-flight desktop progress write before deleting sa
     await delayedProgress.settled.promise;
     const clearResponse = await app.page.waitForResponse((response) => response.url().includes("/api/workspace") && response.request().method() === "POST" && response.request().postData()?.includes("clear-all"));
     assert.equal(clearResponse.status(), 200);
+    await dismissWelcomeAfterClear(app.page);
     const stored = await app.store.getRepository("taskflow-sample");
     assert.equal(Object.values(stored.progress).some((value) => JSON.parse(value).stepIndex === 2), false, "a completed clear must remove the old in-flight route progress");
     await app.page.getByRole("button", { name: "第 1 步：从入口开始" }).waitFor();

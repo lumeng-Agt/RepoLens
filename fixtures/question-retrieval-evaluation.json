@@ -1,0 +1,26 @@
+{
+  "entryFileId": "src/main.ts",
+  "files": [
+    { "id": "src/main.ts", "path": "src/main.ts", "role": "Application entry", "symbols": ["startApp"], "symbolDetails": [{ "name": "startApp", "kind": "function", "startLine": 3, "endLine": 3 }], "source": "import { completeTask } from './store';\nimport { TaskList } from './view';\nexport function startApp() { return TaskList(completeTask); }" },
+    { "id": "src/store.ts", "path": "src/store.ts", "role": "Task state and status filtering", "symbols": ["completeTask", "filterByStatus"], "symbolDetails": [{ "name": "completeTask", "kind": "function", "startLine": 1, "endLine": 1 }, { "name": "filterByStatus", "kind": "function", "startLine": 2, "endLine": 2 }], "source": "export function completeTask(task) { return { ...task, completed: true }; }\nexport function filterByStatus(tasks, status) { return tasks.filter((task) => task.status === status); }" },
+    { "id": "src/view.tsx", "path": "src/view.tsx", "role": "Task list view", "symbols": ["TaskList", "emptyState"], "symbolDetails": [{ "name": "TaskList", "kind": "function", "startLine": 1, "endLine": 4 }], "source": "export function TaskList(tasks) {\n  if (!tasks.length) return 'No tasks';\n  return tasks.map((task) => task.title);\n}" },
+    { "id": "src/storage.ts", "path": "src/storage.ts", "role": "Persistence adapter", "symbols": ["saveTasks"], "symbolDetails": [{ "name": "saveTasks", "kind": "function", "startLine": 1, "endLine": 1 }], "source": "export async function saveTasks(tasks) { localStorage.setItem('tasks', JSON.stringify(tasks)); }" },
+    { "id": "src/legacy.ts", "path": "src/legacy.ts", "role": "Legacy task compatibility", "symbols": ["completeTask"], "symbolDetails": [{ "name": "completeTask", "kind": "function", "startLine": 2, "endLine": 4 }], "source": "// Kept for reading historical data.\nexport function completeTask(task) {\n  return task;\n}" }
+  ],
+  "dependencies": [
+    { "fromId": "src/main.ts", "toId": "src/store.ts" },
+    { "fromId": "src/main.ts", "toId": "src/view.tsx" },
+    { "fromId": "src/store.ts", "toId": "src/storage.ts" }
+  ],
+  "cases": [
+    { "id": "task-completion", "question": "How does completeTask change task status?", "expectedFileId": "src/store.ts", "expectedReason": "符号", "mustContain": "completed: true" },
+    { "id": "empty-list", "question": "When does TaskList show the empty state?", "expectedFileId": "src/view.tsx", "expectedReason": "符号", "mustContain": "No tasks" },
+    { "id": "persistence", "question": "Where are tasks saved to local storage?", "history": [{ "role": "assistant", "content": "Earlier we traced the task flow through the view and store." }], "expectedFileId": "src/storage.ts", "expectedReason": "源码", "mustContain": "localStorage.setItem" },
+    { "id": "entry-workflow", "question": "Where does the entry connect TaskList with completeTask?", "expectedFileId": "src/main.ts", "expectedReason": "源码", "mustContain": "TaskList(completeTask)" },
+    { "id": "symbol-range", "question": "Where is the TaskList definition for the empty state?", "expectedFileId": "src/view.tsx", "expectedReason": "符号", "mustContain": "No tasks", "suggestedRange": { "startLine": 1, "endLine": 4 } },
+    { "id": "symbol-range-excludes-neighbor", "question": "Where is filterByStatus defined?", "expectedFileId": "src/store.ts", "expectedReason": "符号", "mustContain": "tasks.filter", "mustExclude": "completed: true", "suggestedRange": { "startLine": 2, "endLine": 2 } }
+  ],
+  "insufficientEvidenceCases": [
+    { "id": "unrelated-question", "question": "Explain quantum entanglement" }
+  ]
+}

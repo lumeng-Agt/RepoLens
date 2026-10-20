@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFile as execFileCallback, spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { request as httpRequest } from "node:http";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
@@ -10,8 +10,10 @@ import path from "node:path";
 import { once } from "node:events";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const execFile = promisify(execFileCallback);
 async function freePort() {
   const probe = net.createServer(); probe.listen(0, "127.0.0.1"); await once(probe, "listening");
   const value = probe.address().port; await new Promise((resolve) => probe.close(resolve)); return value;
@@ -40,8 +42,15 @@ test("local API protects source paths, streams file updates, and gates AI genera
   const command = () => ({ clientId: commandClientId, intentSequence: ++intentSequence });
   const repoPath = await mkdtemp(path.join(os.tmpdir(), "repolens-api-"));
   await mkdir(path.join(repoPath, "src"));
-  await writeFile(path.join(repoPath, "src/main.ts"), 'import { value } from "./dep";\nexport const main = value;');
+  await writeFile(path.join(repoPath, "README.md"), "# Local Sample\n\nA safe text overview.");
+  await writeFile(path.join(repoPath, "package.json"), JSON.stringify({ name: "local-sample" }));
+  await writeFile(path.join(repoPath, "src/main.ts"), 'import { value } from "./dep";\nexport const main = value;\nexport function calculateMainValue() {\n  return value;\n}');
   await writeFile(path.join(repoPath, "src/dep.ts"), "export const value = 1;");
+  await execFile("git", ["init", "-q"], { cwd: repoPath });
+  await execFile("git", ["config", "user.name", "RepoLens Test"], { cwd: repoPath });
+  await execFile("git", ["config", "user.email", "test@example.invalid"], { cwd: repoPath });
+  await execFile("git", ["add", "."], { cwd: repoPath });
+  await execFile("git", ["commit", "-qm", "initial"], { cwd: repoPath });
   const modelCalls = [];
   let explanationAttempts = 0;
   let routeAttempts = 0;
@@ -53,13 +62,16 @@ test("local API protects source paths, streams file updates, and gates AI genera
     modelCalls.push({ authorization: request.headers.authorization, content: user, messages: input.messages, url: request.url });
     const routeMode = user.includes("3 到 7 个") || user.includes("阅读路线步骤");
     const questionMode = user.includes("回答用户当前问题");
+    const mainRange = user.match(/FILE src\/main\.ts LINES (\d+)-(\d+)/);
+    const mainStartLine = Number(mainRange?.[1] ?? 1);
+    const mainEndLine = Number(mainRange?.[2] ?? mainStartLine);
     let result;
     if (responseOverrides.length) result = responseOverrides.shift();
-    else if (questionMode) result = { answer: "main 读取了 value。", insufficientEvidence: false, references: [{ fileId: "src/main.ts", startLine: 1, endLine: 2 }] };
+    else if (questionMode) result = { answer: "main 读取了 value。", insufficientEvidence: false, references: [{ fileId: "src/main.ts", startLine: mainStartLine, endLine: mainEndLine }] };
     else if (routeMode) result = { title: "示例路线", steps: [
-      { fileId: "src/main.ts", purpose: "从入口开始", references: [{ fileId: "src/main.ts", startLine: 1 }] },
-      { fileId: "src/dep.ts", purpose: "查看依赖", references: [{ fileId: "src/dep.ts", startLine: 1 }] },
-      { fileId: "src/main.ts", purpose: "返回入口", references: [{ fileId: "src/main.ts", startLine: 2 }] },
+      { fileId: "src/main.ts", purpose: "从入口开始", relationship: "选定入口", question: "入口如何使用依赖？", references: [{ fileId: "src/main.ts", startLine: 1 }] },
+      { fileId: "src/dep.ts", purpose: "查看依赖", relationship: "沿导入关系查看依赖", question: "依赖提供了什么？", references: [{ fileId: "src/dep.ts", startLine: 1 }] },
+      { fileId: "src/main.ts", purpose: "返回入口", relationship: "回到入口核对结果", question: "入口最终导出了什么？", references: [{ fileId: "src/main.ts", startLine: 2 }] },
     ] };
     else if (++explanationAttempts === 1) result = { role: "入口", keyPoints: ["无效引用"], references: [{ fileId: "src/main.ts", startLine: 999 }] };
     else result = { role: "入口", keyPoints: ["读取本地依赖"], references: [{ fileId: "src/main.ts", startLine: 1, endLine: 2 }] };
@@ -83,6 +95,27 @@ test("local API protects source paths, streams file updates, and gates AI genera
   assert.equal("source" in snapshot.files[0], false);
   assert.equal(snapshot.dependencies.length, 1);
   assert.equal(snapshot.sequence, 1);
+  const overviewResponse = await apiFetch(`${origin}/api/overview?${new URLSearchParams({ repositoryId: snapshot.id, revision: snapshot.revision })}`);
+  assert.equal(overviewResponse.status, 200);
+  const overview = await overviewResponse.json();
+  assert.equal(overview.readme.path, "README.md");
+  assert.match(overview.readme.summary, /A safe text overview/);
+  assert.deepEqual(overview.manifests, ["package.json"]);
+  const searchResponse = await apiFetch(`${origin}/api/search`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repositoryId: snapshot.id, revision: snapshot.revision, query: "calculateMainValue" }) });
+  assert.equal(searchResponse.status, 200);
+  const search = await searchResponse.json();
+  assert.equal(search.results[0].path, "src/main.ts");
+  assert.equal(search.results[0].line, 3);
+  assert.equal(search.revision, snapshot.revision);
+  await writeFile(path.join(repoPath, "src/new-file.ts"), "export const incoming = true;\n");
+  snapshot = await (await apiFetch(`${origin}/api/rescan`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repositoryId: snapshot.id }) })).json();
+  const comparisonResponse = await apiFetch(`${origin}/api/compare`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repositoryId: snapshot.id, revision: snapshot.revision, mode: "working-tree" }) });
+  assert.equal(comparisonResponse.status, 200);
+  const comparison = await comparisonResponse.json();
+  assert.ok(comparison.files.some((file) => file.path === "src/new-file.ts" && file.status === "added"));
+  assert.match(comparison.diff, /incoming = true/);
+  const staleSearch = await apiFetch(`${origin}/api/search`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repositoryId: snapshot.id, revision: "stale-revision", query: "value" }) });
+  assert.equal(staleSearch.status, 409, "search results must be bound to the current snapshot revision");
   const sourceQuery = new URLSearchParams({ repositoryId: snapshot.id, revision: snapshot.revision, file: "src/main.ts" });
   assert.equal((await apiFetch(`${origin}/api/source?${sourceQuery}`)).status, 200);
   assert.equal((await apiFetch(`${origin}/api/source?${new URLSearchParams({ repositoryId: snapshot.id, revision: snapshot.revision, file: "../outside.ts" })}`)).status, 404);
@@ -145,14 +178,16 @@ test("local API protects source paths, streams file updates, and gates AI genera
   assert.equal(routeBody.result.steps.length, 3);
   assert.equal(modelCalls.length, 4, "malformed JSON gets exactly one format repair retry");
 
-  const questionPreviewResponse = await apiFetch(`${origin}/api/ai/question/preview`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repositoryId: snapshot.id, fileId: "src/main.ts", question: "What does main do?", history: [] }) });
+  const questionPreviewResponse = await apiFetch(`${origin}/api/ai/question/preview`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repositoryId: snapshot.id, fileId: "src/main.ts", question: "How does calculateMainValue work?", history: [] }) });
   const questionPreviewBody = await questionPreviewResponse.json();
   assert.equal(questionPreviewResponse.status, 200, questionPreviewBody.error);
   assert.equal(questionPreviewBody.preview.mode, "question");
-  assert.equal(questionPreviewBody.preview.question, "What does main do?");
+  assert.equal(questionPreviewBody.preview.question, "How does calculateMainValue work?");
   assert.ok(Number.isInteger(questionPreviewBody.preview.tokenEstimate) && questionPreviewBody.preview.tokenEstimate > 0);
   const entryFilePreview = questionPreviewBody.preview.files.find((file) => file.fileId === questionPreviewBody.preview.entryFileId);
   assert.ok(entryFilePreview.reasons.includes("当前文件"));
+  assert.equal(entryFilePreview.startLine, 3, "question context is narrowed to the matched symbol definition by default");
+  assert.equal(entryFilePreview.endLine, 5);
   const callsBeforeQuestionConfirmation = modelCalls.length;
   assert.equal(callsBeforeQuestionConfirmation, 4, "creating a question preview does not call the model");
   const questionResponse = await generate(questionPreviewBody.preview.id);
@@ -162,12 +197,12 @@ test("local API protects source paths, streams file updates, and gates AI genera
   assert.equal(questionBody.result.references[0].fileId, "src/main.ts");
   assert.equal(modelCalls.length, callsBeforeQuestionConfirmation + 1);
   const followUpText = "Why does the imported value appear here?";
-  const followUpPreview = (await (await apiFetch(`${origin}/api/ai/question/preview`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repositoryId: snapshot.id, fileId: "src/main.ts", question: followUpText, history: [{ role: "user", content: "What does main do?" }, { role: "assistant", content: "main 读取了 value。" }] }) })).json()).preview;
+  const followUpPreview = (await (await apiFetch(`${origin}/api/ai/question/preview`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repositoryId: snapshot.id, fileId: "src/main.ts", question: followUpText, history: [{ role: "user", content: "How does calculateMainValue work?" }, { role: "assistant", content: "main 读取了 value。" }] }) })).json()).preview;
   const followUpResponse = await generate(followUpPreview.id);
   assert.equal(followUpResponse.status, 200);
   assert.ok(modelCalls.at(-1).messages.some((item) => item.role === "assistant" && item.content.includes("main 读取了 value")), "the previewed recent conversation reaches the model only after confirmation");
   const callsBeforeCachedQuestion = modelCalls.length;
-  const sameQuestionPreview = (await (await apiFetch(`${origin}/api/ai/question/preview`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repositoryId: snapshot.id, fileId: "src/main.ts", question: followUpText, history: [{ role: "user", content: "What does main do?" }, { role: "assistant", content: "main 读取了 value。" }] }) })).json()).preview;
+  const sameQuestionPreview = (await (await apiFetch(`${origin}/api/ai/question/preview`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repositoryId: snapshot.id, fileId: "src/main.ts", question: followUpText, history: [{ role: "user", content: "How does calculateMainValue work?" }, { role: "assistant", content: "main 读取了 value。" }] }) })).json()).preview;
   const sameQuestionCached = await (await generate(sameQuestionPreview.id)).json();
   assert.equal(sameQuestionCached.cached, true);
   assert.equal(modelCalls.length, callsBeforeCachedQuestion, "same question and history reuse a validated cache entry");

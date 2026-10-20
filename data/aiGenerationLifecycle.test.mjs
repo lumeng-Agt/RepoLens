@@ -67,7 +67,7 @@ async function createFixture(context) {
     const entryFileId = task?.entryFileId ?? sourceRanges[0]?.[1] ?? "index.ts";
     const sourceRange = sourceRanges.find((match) => match[1] === entryFileId);
     const defaultResult = task?.mode === "route" || (!task && prompt.includes("3 到 7 个"))
-      ? { title: "模拟路线", steps: [entryFileId, entryFileId, entryFileId].map((fileId, index) => ({ fileId, purpose: `步骤 ${index + 1}`, references: [{ fileId, startLine: Number(sourceRanges.find((match) => match[1] === fileId)?.[2] ?? 1) }] })) }
+      ? { title: "模拟路线", steps: [entryFileId, entryFileId, entryFileId].map((fileId, index) => ({ fileId, purpose: `步骤 ${index + 1}`, relationship: index === 0 ? "选定入口" : "继续核对入口相关代码", question: `第 ${index + 1} 步应理解什么？`, references: [{ fileId, startLine: Number(sourceRanges.find((match) => match[1] === fileId)?.[2] ?? 1) }] })) }
       : { role: `模拟讲解 ${entryFileId}`, keyPoints: ["可定位结果"], references: [{ fileId: entryFileId, startLine: Number(sourceRange?.[2] ?? 1), endLine: Number(sourceRange?.[3] ?? 3) }] };
     const result = queuedModelResults.length ? queuedModelResults.shift() : defaultResult;
     response.writeHead(200, { "Content-Type": "application/json", Connection: "close" });
@@ -270,15 +270,15 @@ test("AI route prompts and results follow the selected entry", async (context) =
 test("wrong explanation and route entries get one repair attempt and invalid results are not cached", async (context) => {
   const fixture = await createFixture(context);
   const wrongExplanation = { role: "错把 a 当作入口", keyPoints: ["错误目标"], references: [{ fileId: "a.ts", startLine: 1, endLine: 2 }] };
-  const wrongRoute = { title: "错误起点", steps: ["a.ts", "b.ts", "a.ts"].map((fileId, index) => ({ fileId, purpose: `错误步骤 ${index + 1}`, references: [{ fileId, startLine: 1 }] })) };
+  const wrongRoute = { title: "错误起点", steps: ["a.ts", "b.ts", "a.ts"].map((fileId, index) => ({ fileId, purpose: `错误步骤 ${index + 1}`, relationship: index === 0 ? "错误入口" : "继续追踪", question: `错误步骤 ${index + 1} 的问题？`, references: [{ fileId, startLine: 1 }] })) };
   const wrongExplanationForA = { role: "错把 b 当作入口", keyPoints: ["错误目标"], references: [{ fileId: "b.ts", startLine: 1, endLine: 2 }] };
-  const wrongRouteForA = { title: "错误起点", steps: ["b.ts", "a.ts", "b.ts"].map((fileId, index) => ({ fileId, purpose: `错误步骤 ${index + 1}`, references: [{ fileId, startLine: 1 }] })) };
+  const wrongRouteForA = { title: "错误起点", steps: ["b.ts", "a.ts", "b.ts"].map((fileId, index) => ({ fileId, purpose: `错误步骤 ${index + 1}`, relationship: index === 0 ? "错误入口" : "继续追踪", question: `错误步骤 ${index + 1} 的问题？`, references: [{ fileId, startLine: 1 }] })) };
 
   for (const mode of ["explanation", "route"]) {
     const wrongResult = mode === "route" ? wrongRoute : wrongExplanation;
     const wrongResultForA = mode === "route" ? wrongRouteForA : wrongExplanationForA;
     const correctTarget = mode === "route"
-      ? { title: "从 b 开始", steps: ["b.ts", "a.ts", "b.ts"].map((fileId, index) => ({ fileId, purpose: `步骤 ${index + 1}`, references: [{ fileId, startLine: 1 }] })) }
+      ? { title: "从 b 开始", steps: ["b.ts", "a.ts", "b.ts"].map((fileId, index) => ({ fileId, purpose: `步骤 ${index + 1}`, relationship: index === 0 ? "选定入口" : "沿静态依赖返回入口", question: `第 ${index + 1} 步应检查什么？`, references: [{ fileId, startLine: 1 }] })) }
       : { role: "b.ts 的职责", keyPoints: ["正确入口"], references: [{ fileId: "b.ts", startLine: 1, endLine: 2 }] };
     let before = fixture.modelCalls.length;
     fixture.queueModelResult(wrongResult);

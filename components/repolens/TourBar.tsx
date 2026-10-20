@@ -13,7 +13,7 @@ export function TourBar({ repository, stepIndex, completedSteps, stepsRef, disab
   onOpenReference: (reference: SourceReference) => void;
 }) {
   const current = repository.tour[stepIndex];
-  if (!current) return <footer className="tourbar" aria-label="静态分析">
+  if (!current) return <footer className="tourbar is-analysis-only" aria-label="静态分析">
     <div className="tourbar-intro"><span className="tourbar-icon"><BookOpenText size={16} /></span><div><span className="tourbar-label">静态分析</span><span className="tourbar-count">{repository.files.length} 个文件 · {repository.dependencies.length} 条仓库内引用</span></div></div>
     <p className="analysis-hint">选择目录或图节点查看依赖、源码与解析诊断；可在详情面板按需生成 AI 阅读路线。</p>
     <span className="diagnostic-count">{repository.diagnostics?.length ? `${repository.diagnostics.length} 条诊断` : "解析正常"}</span>
@@ -34,6 +34,6 @@ export function TourBar({ repository, stepIndex, completedSteps, stepsRef, disab
         ? <button className="tour-next" onClick={onComplete} disabled={disabled}>{completedSteps.includes(current.id) ? <><span>导览已完成</span><Check size={15} /></> : <><span>完成导览</span><Check size={15} /></>}</button>
         : <button className="tour-next" onClick={() => onGoToStep(stepIndex + 1, true)} disabled={disabled}><span>下一步</span><ChevronRight size={15} /></button>}
     </div>
-    <div className="tour-description" aria-live="polite"><span className="description-step">{String(currentNumber).padStart(2, "0")}</span><span>{current.description}</span><button disabled={disabled} onClick={() => onOpenReference(current.reference)} aria-label={`打开 ${current.title} 第 ${current.reference.line} 行`}><Code2 size={14} />L{current.reference.line}</button></div>
+    <div className="tour-description" aria-live="polite"><span className="description-step">{String(currentNumber).padStart(2, "0")}</span><span>{current.description}{current.relationship && <small className="tour-step-context">与前一步的关系：{current.relationship}</small>}{current.question && <small className="tour-step-context">自测：{current.question}</small>}</span><button disabled={disabled} onClick={() => onOpenReference(current.reference)} aria-label={`打开 ${current.title} 第 ${current.reference.line} 行`}><Code2 size={14} />L{current.reference.line}</button></div>
   </footer>;
 }

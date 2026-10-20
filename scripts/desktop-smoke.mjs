@@ -7,6 +7,9 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "@playwright/test";
+import { LocalWorkspaceStateSchema } from "../data/local-contracts.mjs";
+import { waitForStableGraphGeometry } from "./graph-geometry.mjs";
+import { waitForChildExit } from "../desktop/process-exit.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const executable = path.resolve(process.env.REPOLENS_DESKTOP_EXECUTABLE || path.join(root, "release", "win-unpacked", "RepoLens.exe"));
@@ -32,6 +35,8 @@ const modelServer = createHttpServer(async (request, response) => {
       result = { title: "从 Python 入口理解依赖", steps: ids.map((fileId, index) => ({
         fileId,
         purpose: ["从入口读取 answer", "找到 answer 的定义", "回到入口确认输出"][index],
+        relationship: index === 0 ? "选定入口" : "沿静态依赖继续阅读",
+        question: ["入口从哪里取得 answer？", "answer 在哪里定义？", "入口如何使用 answer？"][index],
         references: [{ fileId, startLine: Number(rangeFor(fileId)?.[2] ?? 1), endLine: Number(rangeFor(fileId)?.[3] ?? 1) }],
       })) };
     } else if (task.mode === "question") {
@@ -82,16 +87,21 @@ async function waitForDebugPort(port, child) {
   throw new Error("RepoLens 桌面窗口未在 30 秒内启动。\n" + children.map((item) => item.output.join("")).join("\n"));
 }
 
-async function launch({ gitExecutable } = {}) {
+async function waitForStableGraph(page) {
+  await waitForStableGraphGeometry(page, { timeoutMs: 20_000, minimumNodeCount: 1 });
+}
+
+async function launch({ gitExecutable, expectFirstUseGuide = false } = {}) {
   const port = await reservePort();
-  const childEnvironment = { ...process.env, REPOLENS_USER_DATA_PATH: userDataPath, REPOLENS_SMOKE_HIDDEN: "1", ELECTRON_DISABLE_GPU: "1" };
+  const developmentExecutable = process.env.REPOLENS_DESKTOP_DEV === "1";
+  const childEnvironment = { ...process.env, REPOLENS_USER_DATA_PATH: userDataPath, REPOLENS_SMOKE_HIDDEN: process.env.REPOLENS_SMOKE_HIDDEN ?? "1", ELECTRON_DISABLE_GPU: "1" };
   delete childEnvironment.REPOLENS_AI_BASE_URL;
   delete childEnvironment.REPOLENS_AI_MODEL;
   delete childEnvironment.REPOLENS_AI_API_KEY;
   if (gitExecutable) childEnvironment.REPOLENS_GIT_EXECUTABLE = gitExecutable;
   else delete childEnvironment.REPOLENS_GIT_EXECUTABLE;
-  const child = spawn(executable, [`--remote-debugging-port=${port}`], {
-    cwd: temporaryRoot,
+  const child = spawn(executable, developmentExecutable ? [root, `--remote-debugging-port=${port}`] : [`--remote-debugging-port=${port}`], {
+    cwd: developmentExecutable ? root : temporaryRoot,
     env: childEnvironment,
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
@@ -116,6 +126,10 @@ async function launch({ gitExecutable } = {}) {
   record.page = page;
   record.workspaceResponses = [];
   record.nodePositionWrites = [];
+  record.guideRequests = [];
+  record.pageErrors = [];
+  page.on("pageerror", (error) => record.pageErrors.push(error.message));
+  page.on("console", (message) => { if (message.type() === "error") record.pageErrors.push(message.text()); });
   page.on("response", async (response) => {
     if (!response.url().includes("/api/workspace") || response.request().method() !== "POST") return;
     const requestBody = response.request().postData() ?? "";
@@ -126,8 +140,40 @@ async function launch({ gitExecutable } = {}) {
     if (!requestBody.includes('"action":"conversations"')) return;
     record.workspaceResponses.push({ status: response.status(), body: requestBody.slice(0, 1200), response: await response.text().catch(() => "<response body unavailable>") });
   });
-  await page.getByRole("button", { name: "第 1 步：从入口开始" }).waitFor({ state: "visible", timeout: 20_000 });
-  return { child, browser, page, workspaceResponses: record.workspaceResponses, nodePositionWrites: record.nodePositionWrites };
+  page.on("request", (request) => {
+    if (/github\.com|\/api\/ai\//i.test(request.url())) record.guideRequests.push(request.url());
+  });
+  if (expectFirstUseGuide) {
+    await page.getByRole("heading", { name: "从这里开始读懂一个仓库" }).waitFor({ state: "visible", timeout: 20_000 });
+    assert.equal(modelRequests.length, 0, "first-use welcome does not send a model request");
+    assert.deepEqual(record.guideRequests, [], "first-use welcome does not access GitHub or AI endpoints");
+    await page.getByRole("button", { name: "体验示例" }).click();
+    await page.getByRole("dialog", { name: "使用指南" }).waitFor({ state: "visible" });
+    assert.equal(modelRequests.length, 0, "opening the sample guide is local-only");
+    await page.getByRole("dialog", { name: "使用指南" }).getByRole("button", { name: "关闭使用指南" }).click();
+    await page.waitForFunction(async () => {
+      const response = await fetch(`${window.__REPOLENS_RUNTIME__?.apiOrigin}/api/workspace?repositoryId=taskflow-sample`);
+      if (!response.ok) return false;
+      const state = await response.json();
+      return state.guidePreferences?.welcomeHandled === true && state.guidePreferences?.checklistOpen === false;
+    });
+    const sampleWorkspace = await page.evaluate(async () => fetch(`${window.__REPOLENS_RUNTIME__?.apiOrigin}/api/workspace?repositoryId=taskflow-sample`).then((response) => response.json()));
+    assert.equal(sampleWorkspace.guidePreferences?.welcomeHandled, true);
+    assert.equal(sampleWorkspace.guidePreferences?.checklistOpen, false);
+    assert.deepEqual(sampleWorkspace.guidePreferences?.completedTaskIds, []);
+  } else {
+    await page.waitForFunction(() => {
+      const welcome = [...document.querySelectorAll("h1")].some((heading) => heading.textContent?.trim() === "从这里开始读懂一个仓库" && heading.getClientRects().length > 0);
+      const guideButton = document.querySelector('button[aria-label="使用指南"]');
+      return welcome || Boolean(guideButton && !guideButton.disabled);
+    }, null, { timeout: 20_000 });
+    if (await page.getByRole("heading", { name: "从这里开始读懂一个仓库" }).isVisible().catch(() => false)) {
+      await page.getByRole("button", { name: "跳过指引，直接进入工作区" }).click();
+    }
+  }
+  try { await page.locator(".tour-step[aria-current='step']").waitFor({ state: "visible", timeout: 20_000 }); }
+  catch (error) { throw new Error(`桌面工作区未显示当前路线步骤：\n${(await page.locator("body").innerText()).slice(-3000)}\n${error.message}`); }
+  return { child, browser, page, workspaceResponses: record.workspaceResponses, nodePositionWrites: record.nodePositionWrites, pageErrors: record.pageErrors, guideRequests: record.guideRequests, serviceOutput: record.output };
 }
 
 async function workspaceFor(app, repositoryId) {
@@ -145,7 +191,7 @@ async function waitForWorkspace(app, repositoryId, predicate, description) {
     if (predicate(last)) return last;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  throw new Error(`等待桌面保存状态超时：${description}。最后状态：${JSON.stringify(last)}。节点位置写入：${JSON.stringify(app.nodePositionWrites ?? [])}。问答保存请求：${JSON.stringify(app.workspaceResponses ?? [])}。页面反馈：${(await app.page.locator("body").innerText().catch(() => "<unavailable>")).slice(-1800)}`);
+  throw new Error(`等待桌面保存状态超时：${description}。最后状态：${JSON.stringify(last)}。节点位置写入：${JSON.stringify(app.nodePositionWrites ?? [])}。问答保存请求：${JSON.stringify(app.workspaceResponses ?? [])}。页面错误：${JSON.stringify(app.pageErrors ?? [])}。服务输出：${app.serviceOutput.join("").slice(-5000)}。问答反馈：${JSON.stringify(await app.page.locator(".question-feedback").allInnerTexts().catch(() => []))}。页面反馈：${(await app.page.locator("body").innerText().catch(() => "<unavailable>")).slice(-1800)}`);
 }
 
 async function assertDisabled(locator, message) {
@@ -154,23 +200,26 @@ async function assertDisabled(locator, message) {
 }
 
 async function quit(app) {
-  await app.page.evaluate(() => window.repoLens?.quit()).catch(() => {});
+  const exitPromise = waitForChildExit(app.child);
+  let quitError = null;
+  await app.page.evaluate(() => window.repoLens?.quit()).catch((error) => { quitError = error.message; });
   let timer;
   const exit = await Promise.race([
-    new Promise((resolve) => app.child.once("exit", (code, signal) => resolve({ code, signal }))),
+    exitPromise,
     new Promise((resolve) => { timer = setTimeout(() => resolve({ timeout: true }), 25_000); timer.unref?.(); }),
   ]);
   clearTimeout(timer);
-  assert.ok(!("timeout" in exit), "desktop completed its bounded service shutdown");
-  assert.deepEqual(exit, { code: 0, signal: null }, "desktop and local service exited cleanly");
+  assert.ok(!("timeout" in exit), `desktop completed its bounded service shutdown; quit error: ${quitError ?? "none"}; process output: ${app.serviceOutput.join("").slice(-5000)}`);
+  assert.deepEqual(exit, { code: 0, signal: null }, `desktop and local service exited cleanly; process output: ${app.serviceOutput.join("").slice(-5000)}`);
   await app.browser.close();
 }
 
 async function assertSingleInstance(first) {
   const port = await reservePort();
+  const developmentExecutable = process.env.REPOLENS_DESKTOP_DEV === "1";
   const environment = { ...process.env, REPOLENS_USER_DATA_PATH: userDataPath, REPOLENS_SMOKE_HIDDEN: "1", ELECTRON_DISABLE_GPU: "1" };
   delete environment.ELECTRON_RUN_AS_NODE;
-  const child = spawn(executable, [`--remote-debugging-port=${port}`], { cwd: temporaryRoot, env: environment, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+  const child = spawn(executable, developmentExecutable ? [root, `--remote-debugging-port=${port}`] : [`--remote-debugging-port=${port}`], { cwd: developmentExecutable ? root : temporaryRoot, env: environment, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
   const record = { child, output: [] }; children.push(record);
   child.stdout.on("data", (chunk) => record.output.push(chunk.toString("utf8")));
   child.stderr.on("data", (chunk) => record.output.push(chunk.toString("utf8")));
@@ -223,9 +272,8 @@ try {
   await writeFile(path.join(repositoryPath, "cmd", "demo", "main.go"), 'package main\nimport "example.com/repolens-smoke/internal/value"\nfunc main() { _ = value.Answer }\n', "utf8");
   await writeFile(path.join(repositoryPath, "internal", "value", "value.go"), 'package value\nconst Answer = "ok"\n', "utf8");
 
-  const first = await launch();
+  const first = await launch({ expectFirstUseGuide: true });
   await assertSingleInstance(first);
-  await first.page.locator(".graph-file-card").first().waitFor({ state: "visible" });
   await first.page.locator("#repository-path").fill(repositoryPath);
   await first.page.getByRole("button", { name: "打开仓库", exact: true }).click();
   await first.page.getByRole("treeitem", { name: "main.py" }).waitFor({ state: "visible", timeout: 20_000 });
@@ -292,7 +340,14 @@ try {
   await first.page.getByRole("button", { name: "完成导览" }).click();
   await first.page.getByRole("button", { name: "导览已完成" }).waitFor({ state: "visible" });
 
+  const stateBeforeQuestions = await workspaceFor(first, recentEntry.id);
+  const stateContract = LocalWorkspaceStateSchema.safeParse(stateBeforeQuestions);
+  assert.ok(stateContract.success, `saved workspace must remain readable before opening Q&A: ${stateContract.success ? "" : JSON.stringify(stateContract.error.issues)}`);
+
   await first.page.getByRole("tab", { name: "问答", exact: true }).click();
+  await first.page.locator(".question-panel").waitFor({ state: "visible" });
+  const initialQuestionAlert = first.page.locator(".question-panel [role='alert']");
+  await initialQuestionAlert.waitFor({ state: "hidden", timeout: 20_000 });
   const firstQuestion = "main.py 如何得到并打印 answer？";
   await first.page.locator("#repository-question").fill(firstQuestion);
   await first.page.getByRole("button", { name: "预览发送范围" }).click();
@@ -302,6 +357,8 @@ try {
   await firstQuestionConsent.getByRole("button", { name: "确认发送并获取引用回答" }).click();
   await first.page.getByText("src/main.py 从 pkg.core 导入 answer", { exact: false }).waitFor({ state: "visible", timeout: 20_000 });
   assert.equal(modelRequests.length, 3);
+  const firstQuestionSaved = await waitForWorkspace(first, recentEntry.id, (state) => state.conversations?.[0]?.messages?.length === 2, "首轮问答写入本地记录");
+  assert.equal(firstQuestionSaved.conversations[0].messages.length, 2);
 
   const followUp = "answer 的值在哪里定义？";
   await first.page.locator("#repository-question").fill(followUp);
@@ -312,23 +369,64 @@ try {
   await followUpConsent.getByRole("button", { name: "确认发送并获取引用回答" }).click();
   await first.page.waitForFunction(() => document.querySelectorAll(".question-message").length >= 4, null, { timeout: 20_000 });
   assert.equal(modelRequests.length, 4);
+  const followUpSaved = await waitForWorkspace(first, recentEntry.id, (state) => state.conversations?.[0]?.messages?.length === 4, "追问写入本地记录");
+  assert.equal(followUpSaved.conversations[0].messages.length, 4);
   assert.deepEqual(modelRequests.map((request) => request.mode), ["explanation", "route", "question", "question"]);
   await first.page.locator(".question-message.is-assistant .question-references button").first().click();
   await first.page.getByRole("tab", { name: "源码", exact: true }).click();
   await first.page.locator("#source-line-1.is-focused").waitFor({ state: "visible" });
 
+  await first.page.getByRole("button", { name: "结构", exact: true }).click();
+  const mobileGraphTab = first.page.getByRole("button", { name: "依赖图", exact: true });
+  if (await mobileGraphTab.isVisible()) await mobileGraphTab.click();
   const mainNode = first.page.locator('.react-flow__node[data-id="src/main.py"]');
-  await mainNode.waitFor({ state: "visible" });
+  try { await mainNode.waitFor({ state: "visible", timeout: 12_000 }); }
+  catch (error) {
+    const graphState = await first.page.evaluate(() => ({
+      viewport: { width: window.innerWidth, height: window.innerHeight },
+      mobileTabs: [...document.querySelectorAll(".mobile-tabs button")].map((button) => ({ text: button.innerText, visible: Boolean(button.getClientRects().length), pressed: button.getAttribute("aria-pressed") })),
+      graphPane: (() => { const pane = document.querySelector(".graph-pane"); const canvas = pane?.querySelector(".graph-canvas"); return pane ? { classes: pane.className, rect: pane.getBoundingClientRect().toJSON(), canvas: canvas?.getBoundingClientRect().toJSON(), graphReady: pane.dataset.graphReady, graphActive: pane.dataset.graphActive, flowHost: pane.querySelector(".graph-flow-host")?.getAttribute("data-nodes-initialized"), nodes: pane.querySelectorAll(".react-flow__node").length } : null; })(),
+      body: document.body.innerText.slice(-1200),
+    }));
+    throw new Error(`依赖图节点未就绪：${JSON.stringify(graphState)}\n${error.message}`);
+  }
   const nodeBox = await mainNode.boundingBox();
-  assert.ok(nodeBox && nodeBox.width > 0 && nodeBox.height > 0, "the selected repository entry is represented in the dependency graph");
+  const dependencyNode = first.page.locator('.react-flow__node[data-id="src/pkg/core.py"]');
+  await dependencyNode.waitFor({ state: "visible", timeout: 12_000 });
+  const dependencyBox = await dependencyNode.boundingBox();
+  assert.ok(nodeBox && dependencyBox && nodeBox.width > 0 && nodeBox.height > 0 && dependencyBox.width > 0 && dependencyBox.height > 0,
+    "the selected repository entry and its dependency are represented in the dependency graph");
+  await waitForStableGraph(first.page);
+  const initialMainTransform = await mainNode.evaluate((node) => (node.getAttribute("style") ?? "").match(/translate\(([-\d.]+)px,\s*([-\d.]+)px\)/)?.[0]);
   await first.page.mouse.move(nodeBox.x + nodeBox.width / 2, nodeBox.y + nodeBox.height / 2);
   await first.page.mouse.down();
-  await first.page.mouse.move(nodeBox.x + nodeBox.width / 2 + 96, nodeBox.y + nodeBox.height / 2 + 52, { steps: 5 });
+  await first.page.mouse.move(dependencyBox.x + dependencyBox.width / 2, dependencyBox.y + dependencyBox.height / 2, { steps: 8 });
   await first.page.mouse.up();
+  await waitForStableGraph(first.page);
+  const draggedGraph = await first.page.locator(".react-flow__node").evaluateAll((elements) => elements.map((element) => {
+    const rect = element.getBoundingClientRect();
+    return { id: element.getAttribute("data-id"), transform: element.style.transform, left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom };
+  }));
+  assert.equal(draggedGraph.length, 2, "the overlap scenario includes both related nodes");
+  const mainGraphNode = draggedGraph.find((node) => node.id === "src/main.py");
+  const dependencyGraphNode = draggedGraph.find((node) => node.id === "src/pkg/core.py");
+  assert.ok(mainGraphNode && dependencyGraphNode && mainGraphNode.transform !== initialMainTransform, "the entry node moved to the dragged position");
+  assert.ok(mainGraphNode.right <= dependencyGraphNode.left || dependencyGraphNode.right <= mainGraphNode.left
+    || mainGraphNode.bottom <= dependencyGraphNode.top || dependencyGraphNode.bottom <= mainGraphNode.top, "overlapping nodes are separated after the drag settles");
+  const draggedTransforms = Object.fromEntries(draggedGraph.map((node) => [node.id, node.transform]));
+  await dependencyNode.click();
+  await waitForStableGraph(first.page);
+  await mainNode.click();
+  await waitForStableGraph(first.page);
+  const stableTransforms = await first.page.locator(".react-flow__node").evaluateAll((elements) => Object.fromEntries(
+    elements.map((element) => [element.getAttribute("data-id"), element.style.transform]),
+  ));
+  assert.deepEqual(stableTransforms, draggedTransforms, "selecting files cannot reflow a separated drag layout");
   const persistedRecords = await waitForWorkspace(first, recentEntry.id, (state) => state.aiResults?.["src/main.py"]?.role === "桌面模拟讲解"
     && state.aiRoute?.steps?.length === 3
     && state.conversations?.[0]?.messages?.length === 4
-    && Object.keys(state.nodePositions ?? {}).includes("src/main.py"), "讲解、路线、两轮问答、完成进度和拖动位置");
+    && Object.keys(state.nodePositions ?? {}).includes("src/main.py")
+    && Object.keys(state.nodePositions ?? {}).includes("src/pkg/core.py"), "讲解、路线、两轮问答、完成进度和全部避让坐标");
   assert.equal(persistedRecords.aiResults["src/main.py"].keyPoints[0].includes("answer"), true);
   assert.equal(persistedRecords.aiRoute.entryFileId, "src/main.py");
   assert.equal(persistedRecords.conversations[0].messages.length, 4);
@@ -336,6 +434,8 @@ try {
   assert.ok(Object.keys(persistedRecords.progress).length > 0, "tour progress persists through the real interface");
   const expectedNodePosition = persistedRecords.nodePositions["src/main.py"];
   assert.ok(Number.isFinite(expectedNodePosition?.x) && Number.isFinite(expectedNodePosition?.y), "the dragged node has a persisted coordinate pair");
+  const expectedDependencyPosition = persistedRecords.nodePositions["src/pkg/core.py"];
+  assert.ok(Number.isFinite(expectedDependencyPosition?.x) && Number.isFinite(expectedDependencyPosition?.y), "the nudged neighbor has a persisted coordinate pair");
 
   await first.page.getByRole("button", { name: "返回示例", exact: true }).click();
   const sampleNode = first.page.locator('.react-flow__node[data-id="src/main.tsx"]');
@@ -361,15 +461,13 @@ try {
   const diskState = JSON.parse(stateText);
   const diskWorkspaceId = recentEntry.workspaceId ?? recentEntry.id;
   assert.deepEqual(diskState.nodePositions?.[diskWorkspaceId]?.["src/main.py"], expectedNodePosition, "the first desktop session flushes the dragged coordinate before shutdown");
+  assert.deepEqual(diskState.nodePositions?.[diskWorkspaceId]?.["src/pkg/core.py"], expectedDependencyPosition, "the first desktop session flushes the adjusted neighbor coordinate before shutdown");
   assert.match(stateText, /polyglot-demo/);
   assert.match(stateText, /桌面模拟讲解/);
   assert.match(stateText, /main\.py 如何得到并打印 answer/);
   assert.doesNotMatch(stateText, new RegExp(testApiKey));
   assert.doesNotMatch(stateText, /apiKey|sourceText|rawSource/);
   assert.doesNotMatch(stateText, /from pkg\.core import answer/);
-
-  await writeFile(path.join(repositoryPath, "src", "main.py"), "from pkg.core import answer\nprint('changed:', answer)\n", "utf8");
-  await rm(path.join(repositoryPath, "src", "pkg", "core.py"));
 
   const second = await launch();
   const restored = await second.page.evaluate(async () => {
@@ -378,6 +476,7 @@ try {
   });
   const savedBeforeReopen = await workspaceFor(second, recentEntry.id);
   assert.deepEqual(savedBeforeReopen.nodePositions?.["src/main.py"], expectedNodePosition, "the second service reads the saved coordinate before reopening the repository");
+  assert.deepEqual(savedBeforeReopen.nodePositions?.["src/pkg/core.py"], expectedDependencyPosition, "the second service reads the adjusted neighbor coordinate before reopening the repository");
   assert.ok(restored.recentRepositories.some((item) => item.id === recentEntry.id), "recent repositories survive a full desktop restart");
   const restoredSampleWorkspace = await workspaceFor(second, "taskflow-sample");
   assert.deepEqual(restoredSampleWorkspace.nodePositions?.["src/main.tsx"], expectedSamplePosition,
@@ -397,6 +496,7 @@ try {
   }, recentEntry.id);
   assert.equal(reopenedIdentity.workspaceId, diskWorkspaceId, `reopening a local repository preserves its workspace identity: ${JSON.stringify(reopenedIdentity)}`);
   assert.deepEqual(reopenedIdentity.positions?.["src/main.py"], expectedNodePosition, "opening a local repository does not switch the workspace position record");
+  assert.deepEqual(reopenedIdentity.positions?.["src/pkg/core.py"], expectedDependencyPosition, "opening a local repository preserves the adjusted neighbor coordinate");
   await second.page.getByRole("treeitem", { name: "main.py" }).click();
   const restoredNode = second.page.locator('.react-flow__node[data-id="src/main.py"]');
   await restoredNode.waitFor({ state: "visible" });
@@ -411,6 +511,26 @@ try {
   });
   assert.ok(renderedPosition && Math.abs(renderedPosition.x - expectedNodePosition.x) < 0.5 && Math.abs(renderedPosition.y - expectedNodePosition.y) < 0.5,
     `the node itself renders at the persisted coordinate after reopening: ${JSON.stringify({ renderedPosition, expectedNodePosition })}`);
+  const restoredDependency = second.page.locator('.react-flow__node[data-id="src/pkg/core.py"]');
+  await restoredDependency.waitFor({ state: "visible" });
+  await restoredDependency.click();
+  await second.page.waitForFunction((expected) => {
+    const node = document.querySelector('.react-flow__node[data-id="src/pkg/core.py"]');
+    const match = (node?.getAttribute("style") ?? "").match(/translate\(([-\d.]+)px,\s*([-\d.]+)px\)/);
+    return match && Math.abs(Number(match[1]) - expected.x) < 0.5 && Math.abs(Number(match[2]) - expected.y) < 0.5;
+  }, expectedDependencyPosition, { timeout: 10_000 });
+  await writeFile(path.join(repositoryPath, "src", "main.py"), "from pkg.core import answer\nprint('changed:', answer)\n", "utf8");
+  await rm(path.join(repositoryPath, "src", "pkg", "core.py"));
+  const rescanResponse = second.page.waitForResponse((response) => response.url().endsWith("/api/rescan"));
+  rescanResponse.catch(() => undefined);
+  await second.page.getByRole("complementary", { name: "文件目录" }).getByRole("button", { name: "重新扫描", exact: true }).click();
+  assert.equal((await rescanResponse).status(), 200, "changed sources are rescanned after restored node coordinates have been verified");
+  await second.page.waitForFunction(async (repositoryId) => {
+    const origin = window.__REPOLENS_RUNTIME__?.apiOrigin;
+    if (!origin) return false;
+    const snapshot = await fetch(`${origin}/api/snapshot?repositoryId=${encodeURIComponent(repositoryId)}`).then((response) => response.json());
+    return !snapshot.files.some((file) => file.id === "src/pkg/core.py");
+  }, recentEntry.id, { timeout: 15_000 });
   // The product intentionally debounces coordinate writes for 450ms; cross that real save window before reading state.
   await second.page.waitForTimeout(600);
   const restoredPositions = await waitForWorkspace(second, recentEntry.id, (state) => Object.hasOwn(state.nodePositions ?? {}, "src/main.py"), "the restored graph coordinate remains saved");
@@ -441,10 +561,13 @@ try {
   await second.page.getByText("已清除此仓库的本地保存结果、路线、进度和节点位置。", { exact: true }).waitFor({ state: "visible" });
   const clearedRepository = await waitForWorkspace(second, recentEntry.id, (state) => !state.recentRepositories.some((item) => item.id === recentEntry.id)
     && !state.aiResults?.["src/main.py"] && !state.aiRoute && !state.conversations?.length
-    && !Object.keys(state.nodePositions ?? {}).length && !Object.keys(state.progress ?? {}).length, "删除此仓库的保存记录");
+    && !Object.keys(state.nodePositions ?? {}).length
+    // Clearing an active route resets its state; the page may then persist a fresh first-step checkpoint.
+    // Treat that empty checkpoint as cleared, while rejecting any restored step or completion data.
+    && Object.entries(state.progress ?? {}).every(([key, value]) => !key.startsWith(`repolens:${reopenedIdentity.workspaceId}:`) || value === JSON.stringify({ stepIndex: 0, completedSteps: [] })), "删除此仓库的保存记录");
   assert.ok(clearedRepository);
   await second.page.getByRole("button", { name: "清除全部本地保存数据" }).click();
-  await second.page.getByText("已清除全部 RepoLens 本地保存数据。", { exact: true }).waitFor({ state: "visible" });
+  await second.page.getByRole("heading", { name: "从这里开始读懂一个仓库" }).waitFor({ state: "visible" });
   const clearedAll = await second.page.evaluate(async () => fetch(`${window.__REPOLENS_RUNTIME__?.apiOrigin}/api/workspace?repositoryId=taskflow-sample`).then((response) => response.json()));
   assert.equal(clearedAll.recentRepositories.length, 0);
   assert.equal(Object.keys(clearedAll.aiResults).length, 0);
@@ -452,6 +575,7 @@ try {
   assert.equal(clearedAll.conversations.length, 0);
   assert.equal(Object.keys(clearedAll.nodePositions).length, 0);
   assert.equal(Object.keys(clearedAll.progress).length, 0, "clear-all does not immediately recreate progress for the active repository");
+  assert.equal(clearedAll.guidePreferences, null, "clear-all also removes the saved guide preference");
   await quit(second);
 
   await mkdir(userDataPath, { recursive: true });

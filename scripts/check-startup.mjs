@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { stopLocalService } from './stop-local-service.mjs';
 import { createConnection, createServer } from 'node:net';
-import { access, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,7 +9,7 @@ import { chromium } from '@playwright/test';
 import { preserveFailureEvidence } from './startup-evidence.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const evidenceRoot = path.join(os.tmpdir(), 'repolens-startup-evidence');
+const evidenceRoot = path.join(root, '.artifacts', 'startup-failures');
 const repetitions = 3;
 
 async function removeTemporary(target) {
@@ -73,16 +73,18 @@ function startService(mode, uiPort, apiPort, logPath, persistPath) {
   return { child, pids, getOutput: () => output };
 }
 
-async function browserProbe(browser, baseURL) {
+async function browserProbe(browser, baseURL, { apiOrigin, repositoryPath, repositoryName }) {
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
   const page = await context.newPage();
-  const evidence = { baseURL, failedRequests: [], badResponses: [], entryResponses: [], consoleErrors: [], pageErrors: [], runtimeErrors: [], navigations: [] };
+  await page.addInitScript(() => localStorage.setItem("repolens:usage-guide:v1", JSON.stringify({ version: 1, welcomeHandled: true, completedTaskIds: [], checklistOpen: false, noticeDismissed: true })));
+  const evidence = { baseURL, apiOrigin, repositoryPath, failedRequests: [], badResponses: [], entryResponses: [], apiRequests: [], consoleErrors: [], pageErrors: [], runtimeErrors: [], navigations: [] };
   await page.addInitScript(() => {
     const errors = window.__startupErrors ??= [];
     window.addEventListener('error', (event) => errors.push(`window: ${event.message}`));
     window.addEventListener('unhandledrejection', (event) => errors.push(`promise: ${String(event.reason)}`));
   });
   page.on('requestfailed', (request) => evidence.failedRequests.push({ url: request.url(), error: request.failure()?.errorText ?? null }));
+  page.on('request', (request) => { if (request.url().includes('/api/')) evidence.apiRequests.push(request.url()); });
   page.on('response', (response) => {
     const item = { url: response.url(), status: response.status() };
     if (response.status() >= 400) evidence.badResponses.push(item);
@@ -101,6 +103,24 @@ async function browserProbe(browser, baseURL) {
       await page.locator('.graph-file-card.is-selected').waitFor({ timeout: 15_000 });
       evidence.runtimeErrors = await page.evaluate(() => window.__startupErrors ?? []);
     }
+    await page.locator('#repository-path').fill(repositoryPath);
+    const openResponsePromise = page.waitForResponse((response) => response.url() === `${apiOrigin}/api/open`);
+    await page.getByRole('button', { name: '打开仓库', exact: true }).click();
+    const openResponse = await openResponsePromise;
+    if (!openResponse.ok()) throw new Error(`Local repository open returned HTTP ${openResponse.status()}.`);
+    const opened = await openResponse.json();
+    if (opened.name !== repositoryName || !opened.files?.some((file) => file.path === 'index.ts')) throw new Error('The local startup fixture was not indexed.');
+    await page.getByRole('tab', { name: '源码', exact: true }).click();
+    const source = page.locator('.source-code');
+    await source.waitFor({ timeout: 10_000 });
+    if (!(await source.innerText()).includes('STARTUP_FIXTURE_CONTENT')) throw new Error('The local source request did not return the fixture content.');
+    const rescanResponsePromise = page.waitForResponse((response) => response.url() === `${apiOrigin}/api/rescan`);
+    await page.getByRole('button', { name: '重新扫描', exact: true }).first().click();
+    if (!(await rescanResponsePromise).ok()) throw new Error('Local repository rescan failed.');
+    const closeResponsePromise = page.waitForResponse((response) => response.url() === `${apiOrigin}/api/close`);
+    await page.getByRole('button', { name: '返回示例', exact: true }).click();
+    if (!(await closeResponsePromise).ok()) throw new Error('Local repository close failed.');
+    if (evidence.apiRequests.some((url) => !url.startsWith(apiOrigin))) throw new Error(`An API request escaped the active service origin: ${JSON.stringify(evidence.apiRequests)}`);
     if (evidence.failedRequests.length || evidence.badResponses.length || evidence.consoleErrors.length || evidence.pageErrors.length || evidence.runtimeErrors.length) {
       thrown = new Error(`Browser startup produced errors: ${JSON.stringify(evidence)}`);
     }
@@ -120,16 +140,21 @@ async function browserProbe(browser, baseURL) {
 
 async function checkStart(mode, iteration, browser, scratchRoot) {
   const uiPort = await reservePort();
-  const apiPort = mode === 'production' ? 4318 : await reservePort();
+  const productionApiOrigin = process.env.NEXT_PUBLIC_REPOLENS_API_ORIGIN ?? 'http://127.0.0.1:4318';
+  const apiPort = mode === 'production' ? Number(new URL(productionApiOrigin).port || 4318) : await reservePort();
   const persistPath = path.join(scratchRoot, `wrangler-${mode}-${iteration}`);
   const logPath = path.join(scratchRoot, `service-${mode}-${iteration}.log`);
   const baseURL = `http://127.0.0.1:${uiPort}/`;
+  const repositoryPath = path.join(scratchRoot, `repository-${mode}-${iteration}`);
+  const repositoryName = path.basename(repositoryPath);
+  await mkdir(repositoryPath, { recursive: true });
+  await writeFile(path.join(repositoryPath, 'index.ts'), 'export const startupFixture = "STARTUP_FIXTURE_CONTENT";\n', 'utf8');
   const service = startService(mode, uiPort, apiPort, logPath, persistPath);
   let failure;
   let browserFailure;
   try {
     await waitForTcp(uiPort, service.child);
-    browserFailure = await browserProbe(browser, baseURL);
+    browserFailure = await browserProbe(browser, baseURL, { apiOrigin: `http://127.0.0.1:${apiPort}`, repositoryPath, repositoryName });
   } catch (error) {
     failure = error;
     browserFailure = error.runRoot;

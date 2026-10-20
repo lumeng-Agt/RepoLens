@@ -92,6 +92,7 @@ try {
   const page = await browserContext.newPage();
   activePage = page;
   page.setDefaultTimeout(120_000);
+  await page.addInitScript(() => localStorage.setItem("repolens:usage-guide:v1", JSON.stringify({ version: 1, welcomeHandled: true, completedTaskIds: [], checklistOpen: false, noticeDismissed: true })));
   let modelRequests = 0;
   page.on("pageerror", (error) => runtimeErrors.push(error.message));
   page.on("console", (message) => { if (message.type() === "error") runtimeErrors.push(message.text()); });

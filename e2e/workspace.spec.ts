@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, createReturningPage } from "./fixtures";
 import { createServer, type Server } from "node:http";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -54,7 +54,7 @@ test.beforeAll(async () => {
     const files = [...userMessage.matchAll(/^FILE ([^\r\n]+) LINES (\d+)-(\d+)/gm)];
     const file = files[0];
     const content = userMessage.includes("steps 需 3 到 7 个")
-      ? JSON.stringify({ title: "模拟路线", steps: [0, 1, 2].map((index) => { const stepFile = files[index % files.length]; return { fileId: stepFile[1], purpose: `阅读步骤 ${index + 1}`, references: [{ fileId: stepFile[1], startLine: Number(stepFile[2]) }] }; }) })
+      ? JSON.stringify({ title: "模拟路线", steps: [0, 1, 2].map((index) => { const stepFile = files[index % files.length]; return { fileId: stepFile[1], purpose: `阅读步骤 ${index + 1}`, relationship: index === 0 ? "选定入口" : "沿静态依赖继续阅读", question: `第 ${index + 1} 步需要理解什么？`, references: [{ fileId: stepFile[1], startLine: Number(stepFile[2]) }] }; }) })
       : JSON.stringify({ role: "当前文件说明", keyPoints: ["mock response"], references: [{ fileId: file?.[1] ?? "main.ts", startLine: Number(file?.[2] ?? 1) }] });
     await new Promise((resolve) => setTimeout(resolve, currentCall === 1 ? 1600 : 80));
     if (response.destroyed) return;
@@ -74,7 +74,7 @@ test.afterAll(async () => {
 
 test("refresh restores the selected third step in all target viewports", async ({ browser }) => {
   for (const viewport of [{ width: 1440, height: 900 }, { width: 1024, height: 768 }, { width: 375, height: 812 }]) {
-    const page = await browser.newPage({ viewport });
+    const page = await createReturningPage(browser, { viewport });
     const consoleErrors = await watchRuntimeErrors(page);
     await enableProgressTrace(page);
     await page.goto("/?repolensDebugProgress=1");
@@ -98,7 +98,7 @@ test("refresh restores the selected third step in all target viewports", async (
 
 test('fresh browser sessions and reloads finish app startup without client-entry failures', async ({ browser }) => {
   for (let session = 1; session <= 2; session += 1) {
-    const page = await browser.newPage();
+    const page = await createReturningPage(browser);
     const evidence = { session, failedRequests: [] as { url: string; error: string | null }[], badResponses: [] as { url: string; status: number }[], clientEntryResponses: [] as { url: string; status: number }[], consoleErrors: [] as string[], pageErrors: [] as string[] };
     page.on('requestfailed', (request) => evidence.failedRequests.push({ url: request.url(), error: request.failure()?.errorText ?? null }));
     page.on('response', (response) => {
@@ -133,7 +133,7 @@ test('fresh browser sessions and reloads finish app startup without client-entry
 
 test("completed tour remains completed after refresh in all target viewports", async ({ browser }) => {
   for (const viewport of [{ width: 1440, height: 900 }, { width: 1024, height: 768 }, { width: 375, height: 812 }]) {
-    const page = await browser.newPage({ viewport });
+    const page = await createReturningPage(browser, { viewport });
     const consoleErrors = await watchRuntimeErrors(page);
     await enableProgressTrace(page);
     await page.goto("/?repolensDebugProgress=1");
@@ -158,7 +158,7 @@ test("selected graph node stays fully visible at desktop and phone sizes", async
   const graphSnapshots: Record<string, unknown>[] = [];
   let graphTestStage = "setup";
   for (const viewport of [{ width: 1440, height: 900 }, { width: 1024, height: 768 }, { width: 375, height: 812 }]) {
-    const page = await browser.newPage({ viewport });
+    const page = await createReturningPage(browser, { viewport });
     await page.addInitScript(() => {
     const traceWindow = window as Window & { __repolensGraphDiagnostics?: Record<string, unknown>[] };
     traceWindow.__repolensGraphDiagnostics = [];
@@ -212,7 +212,7 @@ test("selected graph node stays fully visible at desktop and phone sizes", async
 });
 
 test("damaged progress falls back safely and unavailable localStorage uses the cookie fallback", async ({ browser }) => {
-  const damaged = await browser.newPage();
+  const damaged = await createReturningPage(browser);
   await damaged.addInitScript(() => localStorage.setItem("repolens:taskflow-sample:1.2", "{bad"));
   await damaged.goto("/");
   await expect(damaged.getByRole("button", { name: "第 1 步：从入口开始" })).toHaveAttribute("aria-current", "step");

@@ -118,7 +118,7 @@ const modelServer = createServer(async (request, response) => {
         : [task.entryFileId, ...sourceRanges.map((match) => match[1]).filter((fileId) => fileId !== task.entryFileId)].slice(0, 3);
       while (files.length < 3) files.push(files[files.length - 1] ?? task.entryFileId);
       const purposes = { "src/index.ts": "找到演示入口", "src/summary.ts": "阅读摘要组织", "src/status.ts": "查看状态统计" };
-      return { title: "从入口理解数据流", steps: files.map((fileId, index) => ({ fileId, purpose: purposes[fileId] ?? `阅读依赖 ${index + 1}`, references: [{ fileId, startLine: Number(sourceRange(fileId)?.[2] ?? 1), endLine: Number(sourceRange(fileId)?.[3] ?? sourceRange(fileId)?.[2] ?? 1) }] })) };
+      return { title: "从入口理解数据流", steps: files.map((fileId, index) => ({ fileId, purpose: purposes[fileId] ?? `阅读依赖 ${index + 1}`, relationship: index === 0 ? "选定入口" : "沿静态依赖继续阅读", question: `第 ${index + 1} 步需要确认什么？`, references: [{ fileId, startLine: Number(sourceRange(fileId)?.[2] ?? 1), endLine: Number(sourceRange(fileId)?.[3] ?? sourceRange(fileId)?.[2] ?? 1) }] })) };
     })()
     : (() => {
       const source = sourceRange(task.entryFileId);
@@ -183,6 +183,7 @@ try {
     ...(demoEvidenceDirectory ? { recordVideo: { dir: demoEvidenceDirectory, size: { width: 1440, height: 900 } } } : {}),
   });
   page = await browserContext.newPage();
+  await page.addInitScript(() => localStorage.setItem("repolens:usage-guide:v1", JSON.stringify({ version: 1, welcomeHandled: true, completedTaskIds: [], checklistOpen: false, noticeDismissed: true })));
   const pageErrors = [];
   page.on("pageerror", (error) => { pageErrors.push(error.message); process.stderr.write(`Browser page error: ${error.message}\n`); });
   page.on("console", (message) => { if (message.type() === "error") { pageErrors.push(`console: ${message.text()}`); process.stderr.write(`Browser console error: ${message.text()}\n`); } });
@@ -216,7 +217,7 @@ try {
   assert.ok(modelRequestBodies[0].messages.some((message) => message.content.includes("FILE src/summary.ts LINES 1-")));
   const explanationTask = modelRequestBodies[0].messages.find((message) => message.role === "user").content.match(/^任务信息：(.+)$/m);
   assert.ok(explanationTask, "the confirmed model request includes task metadata");
-  assert.deepEqual(JSON.parse(explanationTask[1]), { promptVersion: "prompt-v3", mode: "explanation", entryFileId: "src/summary.ts" });
+  assert.deepEqual(JSON.parse(explanationTask[1]), { promptVersion: "prompt-v4", mode: "explanation", entryFileId: "src/summary.ts" });
   await page.getByRole("tab", { name: "讲解", exact: true }).click();
   await page.locator(".ai-result [aria-label='AI 源码引用'] .reference-row").first().click();
   await page.getByRole("tab", { name: "源码", exact: true }).click();
@@ -250,7 +251,7 @@ try {
   assert.equal(routeValue.result.steps[0].fileId, "src/index.ts", "the first route step matches the selected entry");
   const routeTask = modelRequestBodies[1].messages.find((message) => message.role === "user").content.match(/^任务信息：(.+)$/m);
   assert.ok(routeTask, "the confirmed route request includes task metadata");
-  assert.deepEqual(JSON.parse(routeTask[1]), { promptVersion: "prompt-v3", mode: "route", entryFileId: "src/index.ts" });
+  assert.deepEqual(JSON.parse(routeTask[1]), { promptVersion: "prompt-v4", mode: "route", entryFileId: "src/index.ts" });
   const routeStep = page.getByRole("button", { name: "第 1 步：index.ts" });
   await routeStep.waitFor({ state: "visible" });
   await page.getByRole("button", { name: "第 2 步：summary.ts" }).click();
