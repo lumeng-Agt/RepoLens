@@ -2,10 +2,6 @@
 
 RepoLens 是一款本地代码库导览工具。它把文件目录、静态依赖、源码、阅读路线和带引用的只读问答放在一个工作区中。目标是帮助使用者快速读懂陌生的 JavaScript/TypeScript、Python 和 Go 项目。
 
-## 求职作品集材料
-
-- [项目介绍与架构图](./docs/portfolio-project.md)
-- [五分钟演示脚本](./docs/portfolio-demo.md)
 
 ## Windows 桌面版
 
