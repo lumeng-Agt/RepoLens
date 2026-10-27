@@ -769,3 +769,11 @@ test("indexes a 5,000-file alias repository and reuses inherited config for sour
   assert.equal(configChanged.stats.configParseCount, 1);
   assert.ok(configChanged.snapshot.dependencies.some((edge) => edge.fromId === "src/main.ts" && edge.toId === "src/alternate/value.ts"));
 });
+
+test("legacy Go build constraints remain visible as platform-selection diagnostics", async (context) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "repolens-go-legacy-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(path.join(root, "main.go"), "// +build windows\n\npackage main\nfunc main() {}\n");
+  const indexed = await scanRepository(root);
+  assert.ok(indexed.snapshot.diagnostics.some((item) => item.path === "main.go" && /未按运行平台筛选/.test(item.message)));
+});

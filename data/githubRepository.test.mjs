@@ -6,7 +6,7 @@ import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:f
 import { PassThrough } from "node:stream";
 import os from "node:os";
 import path from "node:path";
-import { cleanupGitHubRepository, cleanupPendingGitHubContent, parseGitHubRepositoryUrl, prepareGitHubRepository, readGitBlobs } from "./githubRepository.mjs";
+import { cleanupGitHubRepository, cleanupPendingGitHubContent, fetchGitHubRevision, parseGitHubRepositoryUrl, partitionGitBlobs, prepareGitHubRepository, readGitBlobs } from "./githubRepository.mjs";
 
 function git(cwd, ...args) {
   const result = spawnSync("git", args, { cwd, encoding: "utf8", windowsHide: true });
@@ -38,6 +38,57 @@ test("temporary GitHub cleanup retries transient sharing errors a bounded number
   assert.equal(cleaned, true);
   assert.equal(attempts, 3);
   await assert.rejects(access(root));
+});
+
+test("GitHub history fetch accepts only complete namespaced refs or full commit ids and leaves the active ref untouched", async (context) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "repolens-history-fetch-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const working = path.join(root, "working");
+  const remote = path.join(root, "remote.git");
+  const mirror = path.join(root, "mirror.git");
+  await mkdir(working);
+  git(working, "init");
+  git(working, "config", "user.name", "RepoLens Test");
+  git(working, "config", "user.email", "test@example.invalid");
+  await writeFile(path.join(working, "main.ts"), "export const value = 'main';\n");
+  git(working, "add", ".");
+  git(working, "commit", "-m", "main");
+  git(working, "branch", "-M", "main");
+  const mainCommit = git(working, "rev-parse", "HEAD");
+  git(working, "checkout", "-b", "feature/test");
+  await writeFile(path.join(working, "main.ts"), "export const value = 'feature';\n");
+  git(working, "commit", "-am", "feature");
+  const featureCommit = git(working, "rev-parse", "HEAD");
+  git(working, "tag", "release");
+  git(working, "checkout", "main");
+  git(root, "init", "--bare", remote);
+  git(working, "remote", "add", "origin", remote);
+  git(working, "push", "origin", "--all");
+  git(working, "push", "origin", "--tags");
+  git(root, "init", "--bare", mirror);
+  git(mirror, "remote", "add", "origin", remote);
+  git(mirror, "fetch", "--depth=1", "origin", "refs/heads/main:refs/heads/main");
+  const activeHead = git(mirror, "symbolic-ref", "HEAD");
+  const fetchHeadBefore = await readFile(path.join(mirror, "FETCH_HEAD"), "utf8");
+  const workspace = { mirrorPath: mirror, origin: { kind: "github" } };
+
+  for (const invalid of ["feature/test", featureCommit.slice(0, 12), "https://github.com/owner/repo", "--upload-pack=evil"]) {
+    await assert.rejects(fetchGitHubRevision(workspace, invalid), /完整提交 SHA|完整的 refs/);
+  }
+
+  const branch = await fetchGitHubRevision(workspace, "refs/heads/feature/test");
+  assert.equal(branch.commit, featureCommit);
+  assert.equal(branch.objectsAvailable, true);
+  const tag = await fetchGitHubRevision(workspace, "refs/tags/release");
+  assert.equal(tag.commit, featureCommit, "an explicitly named tag can be fetched even when --no-tags is set");
+  const sha = await fetchGitHubRevision(workspace, mainCommit);
+  assert.equal(sha.commit, mainCommit);
+  assert.equal(git(mirror, "symbolic-ref", "HEAD"), activeHead, "history fetch does not change the mirror's active HEAD");
+  assert.equal(await readFile(path.join(mirror, "FETCH_HEAD"), "utf8"), fetchHeadBefore, "history fetch does not overwrite FETCH_HEAD");
+  assert.equal(git(mirror, "rev-parse", "refs/heads/main"), mainCommit, "history fetch does not move the active branch");
+  const fetchedCommits = git(mirror, "for-each-ref", "--format=%(objectname)", "refs/repolens/fetched").split("\n");
+  assert.ok(fetchedCommits.includes(mainCommit));
+  assert.ok(fetchedCommits.includes(featureCommit));
 });
 
 test("failed temporary cleanup is logged and retried from the pending cleanup set", async (context) => {
@@ -140,6 +191,7 @@ async function fixture() {
   await writeFile(path.join(work, "src", ".repolensignore"), "secret.ts\n");
   await writeFile(path.join(work, "src", "secret.ts"), "export const secret = true;\n");
   await writeFile(path.join(work, "package.json"), JSON.stringify({ scripts: { postinstall: "throw new Error('must not run')" } }));
+  await writeFile(path.join(work, "README.md"), "# Demo\n\nThis README is safe overview text.\n");
   await mkdir(path.join(work, "ignored")); await writeFile(path.join(work, "ignored", "hidden.ts"), "export const hidden = true;\n");
   await writeFile(path.join(work, ".env.production"), "must not be copied");
   git(work, "add", "."); git(work, "commit", "-m", "initial"); git(work, "branch", "-M", "main");
@@ -240,6 +292,27 @@ test("GitHub source fetch resolves slash branches, tags, commits, ignores unsafe
   await assert.rejects(access(temporaryRoot));
   for (const workspace of [homepage, tag, fixedCommit, refreshed]) await cleanupGitHubRepository(workspace);
   assert.deepEqual(await readdir(appTempRoot), [], "all successful fetches remove their isolated application workspace");
+});
+
+test("GitHub materialization keeps root README text for the repository overview", async (context) => {
+  const appTempRoot = await isolatedAppTempRoot(context);
+  const repo = await fixture();
+  context.after(() => rm(repo.root, { recursive: true, force: true }));
+  const fetched = await prepareGitHubRepository("https://github.com/acme/demo/tree/feature/ui", null, { gitRemoteOverride: repo.bare });
+  context.after(() => cleanupGitHubRepository(fetched));
+  assert.equal(await readFile(path.join(fetched.root, "README.md"), "utf8"), "# Demo\n\nThis README is safe overview text.\n");
+  assert.ok((await readdir(fetched.root)).includes("README.md"));
+  assert.equal(await cleanupGitHubRepository(fetched), true);
+  assert.deepEqual(await readdir(appTempRoot), [], "README materialization cleanup removes its isolated application workspace");
+});
+
+test("GitHub blob batching keeps each batch under the byte and count limits", () => {
+  const items = Array.from({ length: 205 }, (_, index) => ({ relative: `src/${index}.ts`, size: 1024 }));
+  const batches = partitionGitBlobs(items);
+  assert.ok(batches.length >= 3);
+  assert.ok(batches.every((batch) => batch.length <= 100));
+  assert.equal(batches.reduce((sum, batch) => sum + batch.length, 0), items.length);
+  assert.ok(batches.every((batch) => batch.reduce((bytes, item) => bytes + item.size, 0) <= 8 * 1024 * 1024));
 });
 
 test("GitHub materialization skips symlinks and submodule entries without checking out or running them", async (context) => {

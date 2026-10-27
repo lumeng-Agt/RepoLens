@@ -34,7 +34,7 @@ async function requestWithHost(port, hostHeader) {
 }
 
 test("local API protects source paths, streams file updates, and gates AI generation behind its request", async (context) => {
-  const apiPort = await freePort(); const modelPort = await freePort();
+  const apiPort = await freePort(); const modelPort = await freePort(); const redirectPort = await freePort();
   const origin = `http://127.0.0.1:${apiPort}`;
   const appOrigin = "http://127.0.0.1:5173";
   const apiFetch = (url, init = {}) => fetch(url, { ...init, headers: { Origin: appOrigin, ...init.headers } });
@@ -83,8 +83,25 @@ test("local API protects source paths, streams file updates, and gates AI genera
     response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify({ choices: [{ message: { content } }] }));
   });
   modelServer.listen(modelPort, "127.0.0.1"); await once(modelServer, "listening");
+  let redirectRequests = 0; let redirectBehavior = "always";
+  const redirectServer = createServer(async (request, response) => {
+    let body = ""; for await (const part of request) body += part;
+    redirectRequests += 1;
+    if (redirectBehavior === "repair" && !body.includes("上一次输出没有满足")) {
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ choices: [{ message: { content: "{ invalid" } }] }));
+      return;
+    }
+    response.writeHead(307, { Location: `http://127.0.0.1:${modelPort}/v1/chat/completions` });
+    response.end();
+  });
+  redirectServer.listen(redirectPort, "127.0.0.1"); await once(redirectServer, "listening");
   const child = spawn(process.execPath, [path.join(projectRoot, "scripts/local-server.mjs")], { cwd: projectRoot, env: { ...process.env, REPOLENS_PORT: String(apiPort), REPOLENS_AI_TIMEOUT_MS: "300" }, stdio: "ignore" });
-  context.after(async () => { child.kill("SIGTERM"); modelServer.close(); await rm(repoPath, { recursive: true, force: true }); });
+  context.after(async () => {
+    child.kill("SIGTERM");
+    await Promise.all([modelServer, redirectServer].map((server) => new Promise((resolve) => { server.closeAllConnections(); server.close(resolve); })));
+    await rm(repoPath, { recursive: true, force: true });
+  });
   await waitForService(origin, child);
 
   const openResponse = await apiFetch(`${origin}/api/open`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: repoPath, command: command() }) });
@@ -101,6 +118,12 @@ test("local API protects source paths, streams file updates, and gates AI genera
   assert.equal(overview.readme.path, "README.md");
   assert.match(overview.readme.summary, /A safe text overview/);
   assert.deepEqual(overview.manifests, ["package.json"]);
+  const recentTouch = await apiFetch(`${origin}/api/workspace`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "recent-touch", repositoryId: snapshot.id, workspaceId: snapshot.workspaceId ?? snapshot.id, persistenceSessionId: snapshot.persistenceSessionId }) });
+  assert.equal(recentTouch.status, 200);
+  const recentRemove = await apiFetch(`${origin}/api/workspace`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "recent-remove", targetId: snapshot.workspaceId ?? snapshot.id }) });
+  assert.equal(recentRemove.status, 200, "removing a recent repository does not require an active repository session");
+  const workspaceAfterRemove = await (await apiFetch(`${origin}/api/workspace?repositoryId=${encodeURIComponent(snapshot.workspaceId ?? snapshot.id)}`)).json();
+  assert.equal(workspaceAfterRemove.recentRepositories.some((item) => item.id === (snapshot.workspaceId ?? snapshot.id)), false);
   const searchResponse = await apiFetch(`${origin}/api/search`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repositoryId: snapshot.id, revision: snapshot.revision, query: "calculateMainValue" }) });
   assert.equal(searchResponse.status, 200);
   const search = await searchResponse.json();
@@ -206,6 +229,21 @@ test("local API protects source paths, streams file updates, and gates AI genera
   const sameQuestionCached = await (await generate(sameQuestionPreview.id)).json();
   assert.equal(sameQuestionCached.cached, true);
   assert.equal(modelCalls.length, callsBeforeCachedQuestion, "same question and history reuse a validated cache entry");
+
+  const chatQuestion = "persist this confirmed answer in the chat";
+  const chatPreview = (await (await apiFetch(`${origin}/api/ai/question/preview`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repositoryId: snapshot.id, fileId: "src/main.ts", question: chatQuestion, history: [] }) })).json()).preview;
+  const chatIds = { conversationId: "chat-conversation-1", userMessageId: "chat-user-1", answerMessageId: "chat-answer-1" };
+  const chatResponse = await apiFetch(`${origin}/api/ai/generate`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ previewId: chatPreview.id, chat: chatIds }) });
+  const chatBody = await chatResponse.json();
+  assert.equal(chatResponse.status, 200, chatBody.error);
+  assert.equal(chatBody.chatPersisted, true, "a confirmed unified chat is committed with the generated answer");
+  const chatWorkspace = await (await apiFetch(`${origin}/api/workspace?repositoryId=${encodeURIComponent(snapshot.workspaceId ?? snapshot.id)}`)).json();
+  const savedConversation = chatWorkspace.conversations.find((conversation) => conversation.id === chatIds.conversationId);
+  assert.ok(savedConversation, "the unified chat conversation is saved");
+  assert.deepEqual(savedConversation.messages.map((message) => [message.id, message.role]), [[chatIds.userMessageId, "user"], [chatIds.answerMessageId, "assistant"]]);
+  assert.equal(savedConversation.messages[1].content, "main 读取了 value。");
+  assert.ok(savedConversation.messages[1].references.length > 0, "the saved chat keeps its validated references");
+
   responseOverrides = [{ answer: "错误行号", insufficientEvidence: false, references: [{ fileId: "src/main.ts", startLine: 999 }] }, { answer: "仍错误", insufficientEvidence: false, references: [{ fileId: "src/main.ts", startLine: 999 }] }];
   const uncertainQuestionScope = await (await apiFetch(`${origin}/api/ai/question/preview`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repositoryId: snapshot.id, fileId: "src/main.ts", question: "invalid citation probe", history: [] }) })).json();
   assert.equal(uncertainQuestionScope.scopeRequired, true);
@@ -221,6 +259,36 @@ test("local API protects source paths, streams file updates, and gates AI genera
   const invalidRouteResponse = await generate(invalidRoutePreview.id);
   assert.equal(invalidRouteResponse.status, 400, "valid top-level references cannot mask invalid per-step citations");
   assert.equal(modelCalls.length, beforeInvalidRoute + 2, "invalid output gets only one repair attempt");
+
+  await apiFetch(`${origin}/api/ai/settings`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ baseUrl: `http://127.0.0.1:${redirectPort}/v1`, model: "redirect-probe", apiKey: "redirect-test-only" }) });
+  const redirectPreview = (await (await apiFetch(`${origin}/api/ai/preview`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repositoryId: snapshot.id, fileId: "src/main.ts", mode: "explanation" }) })).json()).preview;
+  const beforeRedirect = modelCalls.length;
+  const redirectedGeneration = await generate(redirectPreview.id);
+  assert.equal(redirectedGeneration.status, 502);
+  assert.equal((await redirectedGeneration.json()).error, "模型服务返回了重定向。请填写最终接口地址，再重新预览发送范围。");
+  assert.equal(redirectRequests, 1);
+  assert.equal(modelCalls.length, beforeRedirect, "the unconfirmed redirect target receives no model request");
+  assert.equal((await generate(redirectPreview.id)).status, 409, "a redirect failure consumes its preview and cannot be replayed");
+  const retryRedirectPreview = (await (await apiFetch(`${origin}/api/ai/preview`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repositoryId: snapshot.id, fileId: "src/main.ts", mode: "explanation" }) })).json()).preview;
+  assert.equal((await generate(retryRedirectPreview.id)).status, 502, "a fresh preview does not bypass redirect rejection through cache");
+  assert.equal(redirectRequests, 2);
+  assert.equal(modelCalls.length, beforeRedirect);
+
+  const redirectRoutePreview = (await (await apiFetch(`${origin}/api/ai/preview`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repositoryId: snapshot.id, fileId: "src/main.ts", mode: "route" }) })).json()).preview;
+  assert.equal((await generate(redirectRoutePreview.id)).status, 502);
+  const redirectQuestionPreview = (await (await apiFetch(`${origin}/api/ai/question/preview`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repositoryId: snapshot.id, fileId: "src/main.ts", question: "calculateMainValue", history: [] }) })).json()).preview;
+  assert.equal((await generate(redirectQuestionPreview.id)).status, 502);
+  assert.equal(redirectRequests, 4, "route and question requests reject redirects through the same client");
+  assert.equal(modelCalls.length, beforeRedirect);
+
+  redirectBehavior = "repair";
+  const repairRedirectPreview = (await (await apiFetch(`${origin}/api/ai/preview`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repositoryId: snapshot.id, fileId: "src/main.ts", mode: "explanation" }) })).json()).preview;
+  const beforeRepairRedirect = redirectRequests;
+  assert.equal((await generate(repairRedirectPreview.id)).status, 502, "a redirect during the one allowed format repair is rejected");
+  assert.equal(redirectRequests, beforeRepairRedirect + 2, "the initial invalid response and one repair request are the only calls");
+  assert.equal(modelCalls.length, beforeRedirect, "the repair redirect target never receives the confirmed source");
+  redirectBehavior = "always";
+  await apiFetch(`${origin}/api/ai/settings`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ baseUrl: `http://127.0.0.1:${modelPort}/v1`, model: "mock-model", apiKey: "secret-test-only" }) });
 
   await writeFile(path.join(repoPath, "src/retry.ts"), "export const retry = true;\n");
   await apiFetch(`${origin}/api/rescan`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repositoryId: snapshot.id }) });

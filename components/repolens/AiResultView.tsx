@@ -24,7 +24,7 @@ export function AiResultView({ result, files, stale, onOpenReference }: {
 
   return <div className="ai-result">
     <strong>{title}</strong>
-    {stale && <p role="status">引用关联源码已变化，当前结果已过期，不能跳转。</p>}
+    {stale && <p role="status">引用关联的源码已变化，结果已过期，无法跳转。</p>}
     {keyPoints.length > 0 && <ul>{keyPoints.map((point, index) => <li key={`${index}-${point}`}>{point}</li>)}</ul>}
     {steps.length > 0 && <div className="relation-list" aria-label="AI 阅读路线步骤">
       {steps.map((step, index) => {

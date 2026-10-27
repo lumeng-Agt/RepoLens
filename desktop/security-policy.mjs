@@ -12,3 +12,10 @@ export function isTrustedDesktopSender(event, mainWebContents, uiOrigin) {
     && event.senderFrame === event.sender.mainFrame
     && isTrustedDesktopUrl(event.senderFrame.url, uiOrigin);
 }
+
+export function isAllowedExternalLink(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && url.hostname === "github.com" && !url.port && !url.username && !url.password;
+  } catch { return false; }
+}

@@ -1,4 +1,5 @@
-import { app, BrowserWindow, dialog, ipcMain } from "electron";
+import { createModelSettingsStore } from "./model-settings.mjs";
+import { app, BrowserWindow, dialog, ipcMain, shell, safeStorage } from "electron";
 import { fork } from "node:child_process";
 import { createServer } from "node:http";
 import { access, readFile } from "node:fs/promises";
@@ -6,7 +7,7 @@ import { randomBytes } from "node:crypto";
 import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { isTrustedDesktopSender, isTrustedDesktopUrl } from "./security-policy.mjs";
+import { isTrustedDesktopSender, isTrustedDesktopUrl, isAllowedExternalLink } from "./security-policy.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(here, "..");
@@ -125,7 +126,7 @@ async function waitForBackend(origin, child) {
 function stopBackend() {
   if (shutdownPromise) return shutdownPromise;
   shutdownPromise = (async () => {
-    if (backendFailure) throw new Error(`本地索引服务曾意外退出：${backendFailure}`);
+
     if (backend && backend.exitCode === null) {
       const exited = new Promise((resolve) => backend.once("exit", (code, signal) => resolve({ code, signal })));
       const timer = new Promise((resolve) => setTimeout(() => resolve({ timeout: true }), 20_000));
@@ -139,6 +140,7 @@ function stopBackend() {
       if (result.code !== 0 || result.signal) throw new Error(`本地索引服务退出异常：${JSON.stringify(result)}\n${logs.join("\n")}`);
     }
     if (uiServer) await new Promise((resolve, reject) => uiServer.close((error) => error ? reject(error) : resolve()));
+    if (backendFailure) throw new Error(`本地索引服务曾意外退出：${backendFailure}`);
   })();
   return shutdownPromise;
 }
@@ -159,7 +161,10 @@ async function createMainWindow(uiOrigin) {
       webSecurity: true,
     },
   });
-  mainWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (isAllowedExternalLink(url)) void shell.openExternal(url).catch(() => {});
+    return { action: "deny" };
+  });
   mainWindow.webContents.on("will-navigate", (event, url) => {
     if (!isTrustedDesktopUrl(url, uiOrigin)) event.preventDefault();
   });
@@ -182,12 +187,18 @@ async function start() {
     const result = await dialog.showOpenDialog(mainWindow, { title: "打开本地仓库", properties: ["openDirectory"] });
     return result.canceled ? null : result.filePaths[0] ?? null;
   });
+  const modelSettingsStore = createModelSettingsStore(app.getPath("userData"), safeStorage);
+  let restoredModelSettings = null;
+  let settingsWarning = false;
+  try { restoredModelSettings = await modelSettingsStore.read(); } catch { settingsWarning = true; }
   backend = fork(backendPath, [], {
     cwd: app.getPath("userData"),
     execArgv: [],
     env: {
       ...process.env,
       ELECTRON_RUN_AS_NODE: "1",
+      REPOLENS_DESKTOP_SETTINGS: "1",
+      ...(restoredModelSettings ? { REPOLENS_AI_BASE_URL: restoredModelSettings.baseUrl, REPOLENS_AI_MODEL: restoredModelSettings.model, REPOLENS_AI_API_KEY: restoredModelSettings.apiKey } : {}),
       REPOLENS_PORT: String(apiPort),
       REPOLENS_UI_PORT: new URL(uiOrigin).port,
       REPOLENS_ALLOWED_ORIGINS: uiOrigin,
@@ -197,15 +208,29 @@ async function start() {
     stdio: ["ignore", "pipe", "pipe", "ipc"],
     windowsHide: true,
   });
+  backend.on("message", (message) => {
+    if (message?.type !== "model-settings:save" || typeof message.id !== "number") return;
+    void modelSettingsStore.save(message.settings).then(() => {
+      if (backend?.connected) backend.send({ type: "model-settings:saved", id: message.id, ok: true });
+    }, () => {
+      if (backend?.connected) backend.send({ type: "model-settings:saved", id: message.id, ok: false });
+    });
+  });
   backend.stdout?.on("data", (chunk) => log(chunk.toString("utf8").trimEnd()));
   backend.stderr?.on("data", (chunk) => log(chunk.toString("utf8").trimEnd()));
-  backend.on("error", (error) => reportBackendFailure(`本地索引服务无法运行：${error.message}`));
+  backend.on("error", (error) => {
+    log(`本地服务无法运行：${error.message}`);
+    reportBackendFailure("本地服务无法启动。请重新启动 RepoLens 后再试。");
+  });
   backend.on("exit", (code, signal) => {
-    if (!quitting && (code !== 0 || signal)) reportBackendFailure(`本地索引服务意外退出（${JSON.stringify({ code, signal })}）。请重启 RepoLens 后继续操作。`);
-    else if (!quitting) reportBackendFailure("本地索引服务已意外停止。请重启 RepoLens 后继续操作。");
+    if (!quitting) {
+      log(`本地服务意外退出：${JSON.stringify({ code, signal })}`);
+      reportBackendFailure("本地服务意外停止。请重新启动 RepoLens 后继续操作。");
+    }
   });
   await waitForBackend(apiOrigin, backend);
   await createMainWindow(uiOrigin);
+  if (settingsWarning) await dialog.showMessageBox(mainWindow, { type: "warning", message: "无法恢复上次的模型配置，请重新配置。原文件已保留。" });
   if (secondInstancePendingFocus) { secondInstancePendingFocus = false; focusMainWindow(); }
 }
 
@@ -229,7 +254,7 @@ app.on("before-quit", (event) => {
   quitting = true;
   void stopBackend().then(() => app.exit(0), async (error) => {
     if (process.env.REPOLENS_SMOKE_HIDDEN === "1") { log(error.message); app.exit(1); return; }
-    await dialog.showMessageBox({ type: "error", title: "RepoLens 清理失败", message: error.message });
+    await dialog.showMessageBox({ type: "error", title: backendFailure ? "RepoLens 服务异常" : "RepoLens 清理失败", message: backendFailure ? "本地索引服务曾意外停止。请重新启动 RepoLens。" : "RepoLens 未能完成退出清理。请检查应用日志后重试。", detail: error.message });
     app.exit(1);
   });
 });
@@ -244,7 +269,7 @@ app.on("ready", () => {
   app.setAppUserModelId("org.repolens.desktop");
   void start().catch(async (error) => {
     log(error instanceof Error ? error.stack ?? error.message : String(error));
-    await dialog.showMessageBox({ type: "error", title: "RepoLens 启动失败", message: String(error) });
+    await dialog.showMessageBox({ type: "error", title: "RepoLens 启动失败", message: "RepoLens 未能启动。请检查应用日志后重试。", detail: error instanceof Error ? error.message : String(error) });
     app.quit();
   });
 });

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isTrustedDesktopSender, isTrustedDesktopUrl } from "./security-policy.mjs";
+import { isAllowedExternalLink, isTrustedDesktopSender, isTrustedDesktopUrl } from "./security-policy.mjs";
 
 const origin = "http://127.0.0.1:50001";
 
@@ -20,4 +20,15 @@ test("desktop IPC accepts only the primary trusted renderer frame", () => {
   assert.equal(isTrustedDesktopSender({ sender: main, senderFrame: { url: `${origin}/` } }, main, origin), false);
   assert.equal(isTrustedDesktopSender({ sender: main, senderFrame: { url: "https://evil.test/" } }, main, origin), false);
   assert.equal(isTrustedDesktopSender({ sender: main, senderFrame: null }, main, origin), false);
+});
+
+test("desktop external links are limited to canonical GitHub HTTPS URLs", () => {
+  assert.equal(isAllowedExternalLink("https://github.com/acme/demo"), true);
+  assert.equal(isAllowedExternalLink("https://github.com/acme/demo/tree/main/src"), true);
+  assert.equal(isAllowedExternalLink("http://github.com/acme/demo"), false);
+  assert.equal(isAllowedExternalLink("https://evil.test/acme/demo"), false);
+  assert.equal(isAllowedExternalLink("https://github.com.evil.test/acme/demo"), false);
+  assert.equal(isAllowedExternalLink("https://user:pass@github.com/acme/demo"), false);
+  assert.equal(isAllowedExternalLink("https://github.com:444/acme/demo"), false);
+  assert.equal(isAllowedExternalLink("file:///C:/secret"), false);
 });

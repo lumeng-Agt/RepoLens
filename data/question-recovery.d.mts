@@ -1,3 +1,6 @@
+import type { AiRouteRecord } from "./model";
+import type { AiResultRecord } from "../components/repolens/AiResultView";
+
 export type QuestionRecoveryMessage = {
   id: string;
   role: "user" | "assistant";
@@ -7,6 +10,9 @@ export type QuestionRecoveryMessage = {
   claims?: { text: string; referenceIndices: number[] }[];
   insufficientEvidence?: boolean;
   stale?: boolean;
+  /** Unified AI chat keeps the generated artifact beside the transcript entry. */
+  route?: AiRouteRecord;
+  explanation?: AiResultRecord;
 };
 export type QuestionRecoveryConversation = {
   id: string;

@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -54,13 +55,13 @@ export function parseGitHubRepositoryUrl(value) {
   return { owner, repository, cloneUrl: `https://github.com/${owner}/${repository}.git`, requestedRefParts: tail, subdirectoryParts: [] };
 }
 
-function runGit(args, { cwd, signal, input, maxOutputBytes = 256 * 1024 * 1024 } = {}) {
+function runGit(args, { cwd, signal, input, maxOutputBytes = 256 * 1024 * 1024, env = {} } = {}) {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) return reject(new DOMException("操作已取消。", "AbortError"));
     const child = spawn(process.env.REPOLENS_GIT_EXECUTABLE || "git", args, {
       cwd,
       windowsHide: true,
-      env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "Never", GIT_OPTIONAL_LOCKS: "0" },
+      env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "Never", GIT_OPTIONAL_LOCKS: "0", ...env },
       stdio: ["pipe", "pipe", "pipe"],
     });
     const output = [];
@@ -205,6 +206,12 @@ async function materializeCommit(mirrorPath, commit, checkoutRoot, signal) {
     ...languageConfigFiles.filter(({ relative }) => !applyIgnoreRules(relative, ruleMap)),
     ...packageFiles.filter(({ relative }) => !applyIgnoreRules(relative, ruleMap)),
   ].map((item) => [item.relative, item]));
+  const overviewNames = new Set(["readme.md", "readme.rst", "readme.txt", "readme", "requirements.txt", "cargo.toml"]);
+  for (const entry of entries.values()) {
+    if (entry.relative.includes("/") || !overviewNames.has(entry.relative.toLowerCase()) || applyIgnoreRules(entry.relative, ruleMap)) continue;
+    if (entry.size > 256 * 1024) continue;
+    textSidecars.set(entry.relative, entry);
+  }
   const eligibleSources = sourceFiles.filter(({ relative }) => !applyIgnoreRules(relative, ruleMap));
   if (eligibleSources.length > MAX_SOURCE_FILES) throw new Error(`GitHub 仓库超过 ${MAX_SOURCE_FILES} 个源码文件，请增加忽略规则后重新扫描。`);
   const oversizedSource = eligibleSources.find((item) => item.size > MAX_FILE_BYTES);
@@ -238,14 +245,27 @@ async function materializeCommit(mirrorPath, commit, checkoutRoot, signal) {
   }
 
   const selected = new Map([...eligibleSources, ...textSidecars.values()].filter((item) => item.size <= MAX_FILE_BYTES).map((item) => [item.relative, item]));
-  for (const entry of selected.values()) {
+  for (const batch of partitionGitBlobs([...selected.values()])) {
+    const blobs = await readGitBlobs(mirrorPath, batch, signal, 8 * 1024 * 1024);
+    for (const entry of batch) {
     if (signal?.aborted) throw new DOMException("GitHub 仓库操作已取消。", "AbortError");
     const target = path.join(checkoutRoot, ...entry.relative.split("/"));
     await mkdir(path.dirname(target), { recursive: true });
-    const blob = (await readGitBlobs(mirrorPath, [entry], signal, MAX_FILE_BYTES)).get(entry.relative);
+    const blob = blobs.get(entry.relative);
     if (blob) await writeFile(target, blob, { mode: entry.mode === "100755" ? 0o644 : 0o644 });
+    }
   }
   return checkoutRoot;
+}
+
+export function partitionGitBlobs(items) {
+  const batches = []; let batch = []; let bytes = 0;
+  for (const item of items) {
+    if (batch.length && (batch.length >= 100 || bytes + item.size > 8 * 1024 * 1024)) { batches.push(batch); batch = []; bytes = 0; }
+    batch.push(item); bytes += item.size;
+  }
+  if (batch.length) batches.push(batch);
+  return batches;
 }
 
 export async function readGitBlobs(mirrorPath, items, signal, maxBytes, spawnProcess = spawn, timeoutMs = 120_000) {
@@ -402,6 +422,42 @@ export async function prepareGitHubRepository(value, previous = null, { signal, 
     if (!previous) await cleanupQuietly(storageRoot);
     throw error;
   }
+}
+
+/** Fetch one user-confirmed GitHub revision into the app-owned mirror without changing the active snapshot. */
+export async function fetchGitHubRevision(workspace, target, { signal } = {}) {
+  if (!workspace?.mirrorPath || workspace?.origin?.kind !== "github") throw new Error("当前会话不是 RepoLens 管理的 GitHub 仓库。");
+  const requested = String(target ?? "").trim();
+  const isCommit = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(requested);
+  const isNamedRef = /^refs\/(?:heads|tags)\//.test(requested);
+  if (!isCommit && !isNamedRef) throw new Error("请输入完整提交 SHA，或完整的 refs/heads/...、refs/tags/... 名称。");
+  const sourceRef = isCommit ? requested.toLowerCase() : requested;
+  if (isNamedRef) {
+    try { await runGit(["check-ref-format", sourceRef], { signal }); }
+    catch (error) {
+      if (error?.name === "AbortError") throw error;
+      throw new Error("GitHub 版本名称无效，请使用完整分支或标签名称。");
+    }
+  }
+
+  const destinationRef = `refs/repolens/fetched/${randomUUID()}`;
+  try {
+    await runGit([
+      "-C", workspace.mirrorPath, "fetch", "--depth=1", "--no-tags", "--no-write-fetch-head",
+      "--no-recurse-submodules", "--no-auto-gc", "--upload-pack=git-upload-pack", "origin", `${sourceRef}:${destinationRef}`,
+    ], { signal, env: { GIT_ALLOW_PROTOCOL: "https:file" } });
+  } catch (cause) {
+    if (cause?.name === "AbortError") throw cause;
+    const error = new Error(cause instanceof Error ? cause.message : "GitHub 版本获取失败。");
+    if (/无法访问此 GitHub 仓库/.test(error.message)) { error.status = 403; error.code = "GITHUB_ACCESS_DENIED"; }
+    else if (/无法连接 GitHub/.test(error.message)) { error.status = 502; error.code = "GITHUB_UNAVAILABLE"; }
+    else { error.status = 404; error.code = "REVISION_TARGET_MISSING"; }
+    throw error;
+  }
+  if (signal?.aborted) throw new DOMException("GitHub 历史获取已取消。", "AbortError");
+  const commit = (await runGit(["-C", workspace.mirrorPath, "rev-parse", "--verify", "--end-of-options", `${destinationRef}^{commit}`], { signal })).toString("utf8").trim().toLowerCase();
+  if (!/^[0-9a-f]{40,64}$/.test(commit)) throw new Error("GitHub 没有返回有效的提交记录。");
+  return { target: sourceRef, commit, objectsAvailable: true };
 }
 
 export async function cleanupGitHubRepository(value, removeDirectory = rm) {

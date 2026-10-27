@@ -1,4 +1,4 @@
-import { test, expect, type Page } from './fixtures';
+import { enterRepositoryLocation, returnToSample, openModelSettings, closeModelSettings, openRepositoryMenu, openTourSteps, test, expect, type Page } from './fixtures';
 import { installResizeObserverProbe } from './helpers/resize-observer-probe';
 import { createServer, type Server } from 'node:http';
 import { mkdtemp, mkdir, writeFile, unlink, rm } from 'node:fs/promises';
@@ -50,17 +50,18 @@ async function fixture(files: Record<string, string>) {
 
 async function open(page: Page, root: string) {
   await page.goto('/');
-  await page.getByRole('button', { name: '第 1 步：从入口开始' }).waitFor();
-  await page.getByLabel('本地仓库路径').fill(root);
+  await enterRepositoryLocation(page, root);
   const opened = page.waitForResponse(`${api}/api/open`);
   await page.getByRole('button', { name: '打开仓库', exact: true }).click();
   const snapshot = await (await opened).json();
-  await expect(page.getByText('本地仓库', { exact: true })).toBeVisible();
-  await page.getByLabel('兼容服务地址').fill(modelUrl);
-  await page.getByLabel('模型名称').fill('audit-only');
-  await page.getByLabel('API 密钥').fill('audit-local-dummy');
-  await page.getByRole('button', { name: '保存本地配置' }).click();
-  await expect(page.getByText('模型配置已保存在本地服务内存中。')).toBeVisible();
+  await expect(page.locator('.sample-badge')).toContainText('本地仓库');
+  const settings = await openModelSettings(page);
+  await settings.getByLabel('模型服务地址').fill(modelUrl);
+  await settings.getByLabel('模型名称').fill('audit-only');
+  await settings.getByLabel('API 密钥').fill('audit-local-dummy');
+  await settings.getByRole('button', { name: '应用设置' }).click();
+  await expect(settings.getByText('模型设置已应用；桌面版会加密保存模型配置，浏览器版密钥仅在本次服务中保留。')).toBeVisible();
+  await closeModelSettings(page);
   return snapshot;
 }
 
@@ -87,14 +88,14 @@ test('B2 a valid line range excluding an oversized line must be previewable', as
   await page.getByRole('button', { name: '生成当前文件讲解', exact: true }).click();
   await expect(page.getByText('选择发送范围', { exact: true })).toBeVisible();
   await expect(page.getByText('所选范围包含超长单行，需调整起止行将其排除。')).toBeVisible();
-  await expect(page.getByRole('button', { name: '预览所选范围' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: '预览发送范围' })).toBeDisabled();
   await page.getByLabel('main.ts 结束行').fill('1');
-  await expect(page.getByRole('button', { name: '预览所选范围' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: '预览发送范围' })).toBeEnabled();
   await page.getByLabel('main.ts 结束行').fill('2');
-  await expect(page.getByRole('button', { name: '预览所选范围' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: '预览发送范围' })).toBeDisabled();
   await page.getByLabel('main.ts 结束行').fill('1');
   const validPreview = page.waitForResponse(`${api}/api/ai/preview`);
-  await page.getByRole('button', { name: '预览所选范围' }).click();
+  await page.getByRole('button', { name: '预览发送范围' }).click();
   expect((await validPreview).status()).toBe(200);
   await expect(page.getByText('发送前确认', { exact: true })).toBeVisible();
   expect(modelCalls).toBe(calls);
@@ -115,11 +116,11 @@ test('B3 returning to sample after an open committed but before its response arr
     await route.fulfill({ response }).catch(() => {});
   });
   try {
-    await page.getByLabel('本地仓库路径').fill(newRoot);
+    await enterRepositoryLocation(page, newRoot);
     await page.getByRole('button', { name: '打开仓库', exact: true }).click();
     const newSnapshot = await serverCommitted;
     const closed = page.waitForResponse(`${api}/api/close`);
-    await page.getByRole('button', { name: '返回示例' }).click();
+    await returnToSample(page);
     const closeResponse = await closed;
     const activeNew = await page.request.get(`${api}/api/snapshot?repositoryId=${newSnapshot.id}`, { headers });
     expect(closeResponse.status()).toBe(200);
@@ -145,22 +146,24 @@ test('B3 a delayed close response cannot undo a newer repository open', async ({
     await route.fulfill({ response }).catch(() => {});
   });
   try {
-    await page.getByRole('button', { name: '返回示例' }).click();
+    await returnToSample(page);
     expect(await closeCommitted).toBe(200);
     await expect(page.getByText('示例仓库', { exact: true })).toBeVisible();
-    await page.getByLabel('本地仓库路径').fill(newRoot);
+    await enterRepositoryLocation(page, newRoot);
     const opened = page.waitForResponse(`${api}/api/open`);
     await page.getByRole('button', { name: '打开仓库', exact: true }).click();
     const snapshot = await (await opened).json() as { id: string };
-    await expect(page.getByText('本地仓库', { exact: true })).toBeVisible();
+    await expect(page.locator('.sample-badge')).toContainText('本地仓库');
     release();
-    await expect(page.locator('header').getByRole('button', { name: '重新扫描' })).toBeEnabled();
+    const menu = await openRepositoryMenu(page);
+    await expect(menu.getByRole('button', { name: '重新扫描' })).toBeEnabled();
     expect((await page.request.get(`${api}/api/snapshot?repositoryId=${snapshot.id}`, { headers })).status()).toBe(200);
     expect(await resizeProbe.errors(), resizeProbe.logs.join('\n')).toEqual([]);
   } finally { release(); }
 });
 
 test('B4 route navigation should show an already saved explanation for its target file', async ({ page }) => {
+  const resizeProbe = await installResizeObserverProbe(page);
   await open(page, await fixture({ 'a.ts': 'export const a = 1;\n', 'main.ts': "import { a } from './a';\nexport const main = a;\n" }));
   await page.getByRole('treeitem', { name: 'a.ts', exact: true }).click();
   await generate(page, '生成当前文件讲解');
@@ -169,10 +172,12 @@ test('B4 route navigation should show an already saved explanation for its targe
   await generate(page, '生成当前文件讲解');
   await expect(page.getByText('已保存讲解:main.ts', { exact: true })).toBeVisible();
   await generate(page, '生成阅读路线');
+  await openTourSteps(page);
   await page.getByRole('button', { name: '第 2 步：a.ts' }).click();
   await page.getByRole('tab', { name: '讲解', exact: true }).click();
   await expect(page.locator('.detail-file-title strong')).toHaveText('a.ts');
   await expect(page.getByText('已保存讲解:a.ts', { exact: true })).toBeVisible();
+  expect(await resizeProbe.errors(), resizeProbe.logs.join('\n')).toEqual([]);
 });
 
 test('B5 deleting the last file in the directory must clear obsolete scope before AI preview', async ({ page }) => {
@@ -190,14 +195,14 @@ test('B5 deleting the last file in the directory must clear obsolete scope befor
 test('a delayed older SSE snapshot cannot roll back a newer manual rescan', async ({ page }) => {
   const root = await fixture({ 'main.ts': 'export const main = 1;\n' });
   await page.goto('/');
-  await page.getByRole('button', { name: '第 1 步：从入口开始' }).waitFor();
+  await openTourSteps(page);
   const connected = page.waitForResponse((response) => response.url().startsWith(`${api}/api/events?`) && response.status() === 200);
-  await page.getByLabel('本地仓库路径').fill(root);
+  await enterRepositoryLocation(page, root);
   const openResponse = page.waitForResponse(`${api}/api/open`);
   await page.getByRole('button', { name: '打开仓库', exact: true }).click();
   const initial = await (await openResponse).json() as { id: string };
   await connected;
-  await expect(page.getByText('本地仓库', { exact: true })).toBeVisible();
+  await expect(page.locator('.sample-badge')).toContainText('本地仓库');
   await page.waitForTimeout(350);
   let release!: () => void;
   const held = new Promise<void>((resolve) => { release = resolve; });
@@ -222,7 +227,7 @@ test('a delayed older SSE snapshot cannot roll back a newer manual rescan', asyn
     expect(staleSnapshot?.files.some((file) => file.id === 'first.ts')).toBe(true);
     await writeFile(path.join(root, 'second.ts'), 'export const second = true;\n');
     const rescanned = page.waitForResponse(`${api}/api/rescan`);
-    await page.locator('header').getByRole('button', { name: '重新扫描' }).click();
+    await (await openRepositoryMenu(page)).getByRole('button', { name: '重新扫描' }).click();
     const latest = await (await rescanned).json() as { sequence: number; files: { id: string }[] };
     expect(latest.sequence).toBeGreaterThan(staleSnapshot!.sequence);
     expect(latest.files.some((file) => file.id === 'second.ts')).toBe(true);

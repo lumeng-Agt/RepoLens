@@ -271,7 +271,7 @@ export async function scanRepository(inputPath, previous = null, { mode = "verif
     const ext = path.extname(relative).slice(1).toLowerCase();
     const kind = ["css", "scss", "sass", "less"].includes(ext) ? "style" : ["py", "pyi"].includes(ext) ? "python" : ext === "go" ? "go" : "typescript";
     const language = ["py", "pyi"].includes(ext) ? "python" : ext;
-    const conditionalGo = kind === "go" && /(?:^|\n)\s*\/\/(?:go:build|\+build)\b/.test(source);
+    const conditionalGo = kind === "go" && /(?:^|\n)\s*\/\/(?:go:build|[ \t]+\+build)\b/.test(source);
     files.set(relative, { id: relative, path: relative, name: path.basename(relative), kind, role: kind === "python" ? "Python 模块" : kind === "go" ? conditionalGo ? "Go 条件编译文件" : "Go 源文件" : path.basename(relative), summary: "本地仓库文件；当前内容来自静态分析。", imports: parsedImports, symbols: parsedStructure.symbols, symbolDetails: parsedStructure.symbolDetails ?? [], contentHash, language });
     if (parsedStructure.diagnostic) diagnostics.push({ path: relative, message: parsedStructure.diagnostic });
     if (conditionalGo) diagnostics.push({ path: relative, message: "此 Go 文件带有条件编译标记；当前可阅读源码，但图谱未按运行平台筛选构建文件。" });
@@ -365,7 +365,23 @@ export async function scanRepository(inputPath, previous = null, { mode = "verif
   const stableLanguageConfigHashes = [...languageConfigHashes].sort(([left], [right]) => left.localeCompare(right));
   const fingerprint = digest(JSON.stringify({ files: [...files.values()].map(({ id, contentHash, symbolDetails }) => [id, contentHash, symbolDetails]), dependencies: dependencies.map(({ fromId, toId, specifier, kind, typeOnly, resolution, resolutionBasis, reference }) => [fromId, toId, specifier, kind, typeOnly, resolution, resolutionBasis, reference.line]), unresolved, ignoreContents, configHashes: stableConfigHashes, configState, languageConfigHashes: stableLanguageConfigHashes, goModules }));
   const sequence = previous?.snapshot.sequence ? previous.snapshot.sequence + (previous.snapshot.revision === fingerprint ? 0 : 1) : 1;
-  const snapshot = { id, version: fingerprint.slice(0, 16), revision: fingerprint, sequence, name: path.basename(root), description: root, source: "local", diagnostics: [...diagnostics, ...unresolved.map((item) => ({ path: item.fileId, message: `${item.external ? "外部依赖" : "未解析引用"}: ${item.specifier}（第 ${item.line} 行）` }))], files: [...files.values()], dependencies, unresolved, tour: [], configPath: [...configHashes].filter(([, hash]) => hash !== "missing").map(([config]) => path.relative(root, config).split(path.sep).join("/")) };
+  // Keep routine third-party and standard-library imports as a small aggregate;
+  // per-line diagnostics are reserved for imports that need the user's attention.
+  const importDiagnostics = [];
+  const externalImports = new Map();
+  for (const item of unresolved) {
+    const label = item.kind === "standard-library" ? "标准库" : item.kind !== "dynamic" && item.external ? "外部依赖" : null;
+    if (label) {
+      const key = `${label}:${item.specifier}`;
+      const group = externalImports.get(key) ?? { label, specifier: item.specifier, count: 0 };
+      group.count += 1;
+      externalImports.set(key, group);
+      continue;
+    }
+    importDiagnostics.push({ path: item.fileId, message: `${item.kind === "dynamic" ? "动态导入" : "未解析引用"}: ${item.specifier}（第 ${item.line} 行）` });
+  }
+  const externalDiagnostics = [...externalImports.values()].sort((left, right) => left.label.localeCompare(right.label) || left.specifier.localeCompare(right.specifier)).map((group) => ({ message: `${group.label}: ${group.specifier}（${group.count} 处引用）` }));
+  const snapshot = { id, version: fingerprint.slice(0, 16), revision: fingerprint, sequence, name: path.basename(root), description: root, source: "local", diagnostics: [...diagnostics, ...importDiagnostics, ...externalDiagnostics], files: [...files.values()], dependencies, unresolved, tour: [], configPath: [...configHashes].filter(([, hash]) => hash !== "missing").map(([config]) => path.relative(root, config).split(path.sep).join("/")) };
   return { root, snapshot, files, sourceCache, metadata, ignoreContents, configHashes, configCache, languageConfigHashes, goModules, stats: { mode: scanMode, candidateCount: paths.length, indexedCount: files.size, parsedFileCount, sourceReadCount, sourceParseCount: parsedFileCount, configReadCount: scanStats.configReadCount, configParseCount, languageConfigReadCount: languageConfigContents.size, languageConfigParseCount, durationMs: performance.now() - startedAt } };
 }
 

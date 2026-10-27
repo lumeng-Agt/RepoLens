@@ -14,7 +14,7 @@ const drafts: DraftFile[] = [
     name: "main.tsx",
     kind: "typescript",
     role: "应用入口",
-    summary: "创建 React 根节点，并把主应用挂载到页面容器。",
+    summary: "创建 React 根节点，并将 App 挂载到页面容器。",
     imports: [
       { targetPath: "src/App.tsx", specifier: "./App" },
       { targetPath: "src/styles.css", specifier: "./styles.css" },
@@ -41,7 +41,7 @@ createRoot(rootElement).render(
     name: "App.tsx",
     kind: "typescript",
     role: "应用装配",
-    summary: "应用外层组件，把页面入口交给任务列表页面。",
+    summary: "App 将任务页接入应用。",
     imports: [{ targetPath: "src/pages/TaskPage.tsx", specifier: "./pages/TaskPage" }],
     source: `import { TaskPage } from "./pages/TaskPage";
 
@@ -54,7 +54,7 @@ export default function App() {
     name: "TaskPage.tsx",
     kind: "typescript",
     role: "任务页面",
-    summary: "组合筛选栏和任务列表，并把状态逻辑接入页面。",
+    summary: "组合筛选栏和任务列表，并调用 useTasks 读取任务、更新筛选和切换完成状态。",
     imports: [
       { targetPath: "src/components/TaskFilter.tsx", specifier: "../components/TaskFilter" },
       { targetPath: "src/components/TaskList.tsx", specifier: "../components/TaskList" },
@@ -84,7 +84,7 @@ export function TaskPage() {
     name: "TaskList.tsx",
     kind: "typescript",
     role: "列表组件",
-    summary: "遍历任务数据，将每一项交给独立的任务行组件。",
+    summary: "按任务数据渲染列表；没有任务时显示空状态。",
     imports: [
       { targetPath: "src/components/TaskItem.tsx", specifier: "./TaskItem" },
       { targetPath: "src/types.ts", specifier: "../types" },
@@ -116,7 +116,7 @@ export function TaskList({ tasks, onToggle }: TaskListProps) {
     name: "TaskItem.tsx",
     kind: "typescript",
     role: "任务行组件",
-    summary: "显示单条任务，并把完成状态的切换交回父组件。",
+    summary: "显示一条任务，并将完成状态变化交给父组件处理。",
     imports: [{ targetPath: "src/types.ts", specifier: "../types" }],
     source: `import type { Task } from "../types";
 
@@ -146,7 +146,7 @@ export function TaskItem({ task, onToggle }: TaskItemProps) {
     name: "TaskFilter.tsx",
     kind: "typescript",
     role: "筛选组件",
-    summary: "提供全部、进行中和已完成三种任务视图。",
+    summary: "提供全部、进行中和已完成三种筛选。",
     imports: [{ targetPath: "src/types.ts", specifier: "../types" }],
     source: `import type { TaskStatus } from "../types";
 
@@ -178,7 +178,7 @@ export function TaskFilter({ value, onChange }: TaskFilterProps) {
     name: "useTasks.ts",
     kind: "typescript",
     role: "状态逻辑",
-    summary: "管理筛选状态和完成切换，供页面直接使用。",
+    summary: "保存任务与筛选状态，生成当前可见列表，并提供状态更新操作。",
     imports: [
       { targetPath: "src/services/taskService.ts", specifier: "../services/taskService" },
       { targetPath: "src/utils/filterByStatus.ts", specifier: "../utils/filterByStatus" },
@@ -214,7 +214,7 @@ export function useTasks() {
     name: "taskService.ts",
     kind: "typescript",
     role: "数据服务",
-    summary: "提供演示任务初始数据；真实产品可在这里替换为 API 调用。",
+    summary: "从 seed.ts 导入演示任务，供任务状态层初始化。",
     imports: [
       { targetPath: "src/data/seed.ts", specifier: "../data/seed" },
       { targetPath: "src/types.ts", specifier: "../types" },
@@ -238,7 +238,7 @@ export function createTask(title: string): Task {
     name: "seed.ts",
     kind: "typescript",
     role: "示例数据",
-    summary: "集中保存首次打开任务清单时使用的静态示例数据。",
+    summary: "保存任务清单初次加载时使用的示例数据。",
     imports: [{ targetPath: "src/types.ts", specifier: "../types" }],
     source: `import type { Task } from "../types";
 
@@ -253,7 +253,7 @@ export const seedTasks: Task[] = [
     name: "filterByStatus.ts",
     kind: "typescript",
     role: "纯函数工具",
-    summary: "根据当前筛选值派生可见任务，不修改传入的原始数组。",
+    summary: "按筛选条件返回可见任务，不修改原数组。",
     imports: [{ targetPath: "src/types.ts", specifier: "../types" }],
     source: `import type { Task, TaskStatus } from "../types";
 
@@ -268,7 +268,7 @@ export function filterByStatus(tasks: Task[], status: TaskStatus) {
     name: "types.ts",
     kind: "typescript",
     role: "共享类型",
-    summary: "定义任务数据结构与筛选状态，供多个模块复用。",
+    summary: "定义任务数据和筛选状态，供多个模块使用。",
     imports: [],
     source: `export type TaskStatus = "all" | "active" | "done";
 
@@ -284,7 +284,7 @@ export type Task = {
     name: "styles.css",
     kind: "style",
     role: "全局样式",
-    summary: "入口文件载入的基础样式，设置应用字体和页面底色。",
+    summary: "设置应用字体和页面底色。",
     imports: [],
     source: `:root {
   color-scheme: light;
@@ -356,35 +356,35 @@ const tour: TourStep[] = [
     id: "entry",
     title: "从入口开始",
     focusFileId: "src/main.tsx",
-    description: "入口创建页面根节点并挂载 App。沿着本文件的导入关系，可以看到应用和全局样式从哪里接入。",
+    description: "入口创建 React 根节点并渲染 App。接下来查看 App 如何装配任务页，以及入口如何导入全局样式。",
     reference: sourceReference("src/main.tsx", "createRoot(rootElement)"),
   },
   {
     id: "page",
-    title: "页面组织内容",
+    title: "查看页面结构",
     focusFileId: "src/pages/TaskPage.tsx",
-    description: "任务页面把筛选栏和列表组合到一起，并从 useTasks 获取数据和交互处理函数。",
+    description: "任务页组合筛选栏和列表，并调用 useTasks 读取任务、更新筛选和切换完成状态。",
     reference: sourceReference("src/pages/TaskPage.tsx", "const { tasks, filter"),
   },
   {
     id: "component",
-    title: "列表拆分为组件",
+    title: "查看列表渲染",
     focusFileId: "src/components/TaskList.tsx",
-    description: "列表组件只负责空状态和逐项渲染；单条任务交由 TaskItem 呈现。",
+    description: "TaskList 遍历任务并渲染 TaskItem；列表为空时显示空状态。",
     reference: sourceReference("src/components/TaskList.tsx", "tasks.map((task)"),
   },
   {
     id: "state",
-    title: "状态集中在 Hook",
+    title: "了解任务状态管理",
     focusFileId: "src/hooks/useTasks.ts",
-    description: "Hook 持有任务与筛选状态，并通过纯函数计算可见列表，再把事件回调交给页面。",
+    description: "useTasks 保存任务和筛选状态，再调用纯函数计算当前列表；组件通过返回值读取状态、执行操作。",
     reference: sourceReference("src/hooks/useTasks.ts", "const [tasks, setTasks]"),
   },
   {
     id: "service",
-    title: "服务提供初始数据",
+    title: "查看数据来源",
     focusFileId: "src/services/taskService.ts",
-    description: "当前服务从 seed 文件提供演示数据。替换数据来源时，可从这一层接入持久化或 API。",
+    description: "taskService 当前从 seed.ts 导入演示任务，并导出为 initialTasks。以后接入持久化存储或 API 时，可以在这一层更换数据来源。",
     reference: sourceReference("src/services/taskService.ts", "export const initialTasks"),
   },
 ];
@@ -395,7 +395,7 @@ export const sampleRepositoryProvider = {
       id: "taskflow-sample",
       version: "1.2",
       name: "taskflow",
-      description: "一个用于演示的 React 任务清单",
+      description: "用于演示 RepoLens 的 React 任务清单",
       files,
       dependencies,
       tour,

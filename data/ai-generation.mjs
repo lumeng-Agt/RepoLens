@@ -1,6 +1,16 @@
 import { AiExplanationSchema, AiQuestionAnswerSchema, AiRouteSchema } from "./ai-contract.mjs";
+import { readSseData, partialAnswer } from "./ai-stream.mjs";
 
 export const AI_PROMPT_VERSION = "prompt-v4";
+
+export class ModelRedirectError extends Error {
+  constructor() {
+    super("模型服务返回了重定向。请填写最终接口地址，再重新预览发送范围。");
+    this.name = "ModelRedirectError";
+    this.code = "MODEL_REDIRECT";
+    this.status = 502;
+  }
+}
 
 function schemaFor(mode) {
   if (mode === "route") return AiRouteSchema;
@@ -52,11 +62,44 @@ export function buildChatCompletionRequest(context, mode, repair = false) {
   };
 }
 
-export async function requestChatCompletion(context, mode, signal, repair = false, fetchImpl = fetch) {
-  if (!context.baseUrl || !context.model || !context.apiKey) throw new Error("请先在本地服务配置模型地址、模型名称和 API 密钥。");
+export async function requestChatCompletion(context, mode, signal, repair = false, fetchImpl = fetch, options = {}) {
+  if (!context.baseUrl || !context.model || !context.apiKey) throw new Error("请先填写模型服务地址、模型名称和 API 密钥。");
   const { url, body } = buildChatCompletionRequest(context, mode, repair);
-  const response = await fetchImpl(url, { method: "POST", signal, headers: { Authorization: `Bearer ${context.apiKey}`, "Content-Type": "application/json" }, body: JSON.stringify(body) });
-  if (!response.ok) throw new Error(`模型服务返回 ${response.status}。`);
+  if (options.stream && mode === "question") body.stream = true;
+  const response = await fetchImpl(url, { method: "POST", redirect: "manual", signal, headers: { Authorization: `Bearer ${context.apiKey}`, "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  if (response.type === "opaqueredirect" || response.redirected || response.status >= 300 && response.status < 400) throw new ModelRedirectError();
+  if (!response.ok) {
+    let streamRejected = body.stream && [406, 501].includes(response.status);
+    if (body.stream && [400, 415, 422].includes(response.status) && response.body) {
+      const reader = response.body.getReader(); const decoder = new TextDecoder(); let text = "";
+      try { while (text.length < 8192) { const chunk = await reader.read(); if (chunk.done) break; text += decoder.decode(chunk.value, { stream: true }); } }
+      finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
+      streamRejected = /stream|流式/i.test(text.slice(0, 8192));
+    }
+    if (streamRejected) {
+      const error = new Error("模型服务未接受流式请求。可选择普通响应后重新发送。");
+      error.code = "STREAM_UNSUPPORTED";
+      throw error;
+    }
+    throw new Error(`模型服务返回 ${response.status}。`);
+  }
+  if (body.stream && response.headers.get("content-type")?.includes("text/event-stream")) {
+    let content = ""; let shown = ""; let finished = false;
+    for await (const data of readSseData(response.body, signal)) {
+      if (data === "[DONE]") { finished = true; break; }
+      let event;
+      try { event = JSON.parse(data); } catch { const error = new Error("模型流式响应格式无效。"); error.code = "STREAM_PROTOCOL"; throw error; }
+      if (event.error) throw new Error("模型流式请求失败。");
+      const choice = event.choices?.[0];
+      if (typeof choice?.delta?.content === "string") content += choice.delta.content;
+      if (content.length > 1_000_000) throw new Error("模型回答超出长度限制。");
+      const answer = partialAnswer(content);
+      if (answer && answer !== shown) { shown = answer; options.onAnswer?.(answer); }
+      if (choice?.finish_reason === "stop") finished = true;
+    }
+    if (!finished) throw new Error("回答连接已中断，内容尚未完成。");
+    return JSON.parse(content.replace(/^```(?:json)?\s*|\s*```$/g, ""));
+  }
   const payload = await response.json();
   const content = payload.choices?.[0]?.message?.content;
   if (typeof content !== "string") throw new Error("模型服务未返回文本结果。");

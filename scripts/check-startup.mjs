@@ -74,6 +74,23 @@ function startService(mode, uiPort, apiPort, logPath, persistPath) {
 }
 
 async function browserProbe(browser, baseURL, { apiOrigin, repositoryPath, repositoryName }) {
+  const firstRunContext = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  const firstRunPage = await firstRunContext.newPage();
+  const firstRunRequests = [];
+  const firstRunErrors = [];
+  firstRunPage.on('request', (request) => firstRunRequests.push(request.url()));
+  firstRunPage.on('pageerror', (error) => firstRunErrors.push(error.message));
+  firstRunPage.on('console', (message) => { if (message.type() === 'error') firstRunErrors.push(message.text()); });
+  await firstRunPage.goto(baseURL, { waitUntil: 'domcontentloaded' });
+  await firstRunPage.getByRole('heading', { name: '打开仓库，开始阅读' }).waitFor({ timeout: 15_000 });
+  await firstRunPage.getByRole('button', { name: '打开示例', exact: true }).click();
+  await firstRunPage.locator('.graph-file-card.is-selected').waitFor({ timeout: 15_000 });
+  if (firstRunRequests.some((url) => /github\.com|\/api\/ai\/(?:preview|generate|question)/i.test(url))) {
+    throw new Error(`First-run onboarding triggered a GitHub or model request: ${JSON.stringify(firstRunRequests)}`);
+  }
+  if (firstRunErrors.length) throw new Error(`First-run onboarding produced browser errors: ${JSON.stringify(firstRunErrors)}`);
+  await firstRunContext.close();
+
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
   const page = await context.newPage();
   await page.addInitScript(() => localStorage.setItem("repolens:usage-guide:v1", JSON.stringify({ version: 1, welcomeHandled: true, completedTaskIds: [], checklistOpen: false, noticeDismissed: true })));
@@ -99,10 +116,14 @@ async function browserProbe(browser, baseURL, { apiOrigin, repositoryPath, repos
       evidence.navigations.push(phase);
       if (phase === 'first navigation') await page.goto(baseURL, { waitUntil: 'domcontentloaded' });
       else await page.reload({ waitUntil: 'domcontentloaded' });
-      await page.getByRole('button', { name: '第 1 步：从入口开始' }).waitFor({ timeout: 15_000 });
+      await page.locator('.tour-current-copy > strong').filter({ hasText: '从入口开始' }).waitFor({ timeout: 15_000 });
       await page.locator('.graph-file-card.is-selected').waitFor({ timeout: 15_000 });
       evidence.runtimeErrors = await page.evaluate(() => window.__startupErrors ?? []);
     }
+    const homeMenu = page.locator('.repo-menu');
+    await homeMenu.locator('summary').click();
+    await homeMenu.getByRole('button', { name: '返回首页', exact: true }).click();
+    await page.getByRole('heading', { name: '打开仓库，开始阅读' }).waitFor({ state: 'visible' });
     await page.locator('#repository-path').fill(repositoryPath);
     const openResponsePromise = page.waitForResponse((response) => response.url() === `${apiOrigin}/api/open`);
     await page.getByRole('button', { name: '打开仓库', exact: true }).click();
@@ -115,10 +136,14 @@ async function browserProbe(browser, baseURL, { apiOrigin, repositoryPath, repos
     await source.waitFor({ timeout: 10_000 });
     if (!(await source.innerText()).includes('STARTUP_FIXTURE_CONTENT')) throw new Error('The local source request did not return the fixture content.');
     const rescanResponsePromise = page.waitForResponse((response) => response.url() === `${apiOrigin}/api/rescan`);
-    await page.getByRole('button', { name: '重新扫描', exact: true }).first().click();
+    const repositoryMenuForRescan = page.locator('.repo-menu');
+    await repositoryMenuForRescan.locator('summary').click();
+    await repositoryMenuForRescan.getByRole('button', { name: '重新扫描', exact: true }).click();
     if (!(await rescanResponsePromise).ok()) throw new Error('Local repository rescan failed.');
     const closeResponsePromise = page.waitForResponse((response) => response.url() === `${apiOrigin}/api/close`);
-    await page.getByRole('button', { name: '返回示例', exact: true }).click();
+    const repositoryMenu = page.locator('.repo-menu');
+    await repositoryMenu.locator('summary').click();
+    await repositoryMenu.getByRole('button', { name: '打开示例', exact: true }).click();
     if (!(await closeResponsePromise).ok()) throw new Error('Local repository close failed.');
     if (evidence.apiRequests.some((url) => !url.startsWith(apiOrigin))) throw new Error(`An API request escaped the active service origin: ${JSON.stringify(evidence.apiRequests)}`);
     if (evidence.failedRequests.length || evidence.badResponses.length || evidence.consoleErrors.length || evidence.pageErrors.length || evidence.runtimeErrors.length) {

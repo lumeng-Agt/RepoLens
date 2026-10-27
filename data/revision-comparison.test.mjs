@@ -11,6 +11,22 @@ import { readingBaselineHeadRef } from "./revision-baseline.mjs";
 const execFile = promisify(execFileCallback);
 async function run(root, ...args) { await execFile("git", args, { cwd: root, windowsHide: true, env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_OPTIONAL_LOCKS: "0" } }); }
 
+test("opening a Git subdirectory compares only that directory with relative paths", async (context) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "repolens-subdirectory-diff-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await run(root, "init", "-q"); await run(root, "config", "user.name", "Test"); await run(root, "config", "user.email", "test@example.invalid");
+  await mkdir(path.join(root, "sub"));
+  await writeFile(path.join(root, "root.ts"), "export const root = 1;\n");
+  await writeFile(path.join(root, "sub/a.ts"), "export const a = 1;\n");
+  await run(root, "add", "."); await run(root, "commit", "-qm", "base");
+  const unchanged = await compareRepositoryRevisions({ root: path.join(root, "sub"), mode: "working-tree", revision: "r" });
+  assert.deepEqual(unchanged.files, []);
+  await writeFile(path.join(root, "sub/a.ts"), "export const a = 2;\n");
+  await writeFile(path.join(root, "root.ts"), "export const root = 2;\n");
+  const changed = await compareRepositoryRevisions({ root: path.join(root, "sub"), mode: "working-tree", revision: "r" });
+  assert.deepEqual(changed.files, [{ status: "modified", path: "a.ts" }]);
+});
+
 test("revision comparison reads working changes and two verified commits without shell execution", async (context) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "repolens-revision-compare-"));
   context.after(() => rm(root, { recursive: true, force: true }));

@@ -1,4 +1,4 @@
-import { expect, test } from "./fixtures";
+import { enterRepositoryLocation, expect, openTourSteps, returnToSample, test } from "./fixtures";
 import { mkdtemp, rm, writeFile, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -6,9 +6,9 @@ import path from "node:path";
 test("quick open, source navigation history, and reading layout keep the selected file synchronized", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/");
-  await expect(page.getByRole("button", { name: "第 1 步：从入口开始" })).toBeVisible();
-  await expect(page.locator(".graph-legend")).toContainText("当前文件导入");
-  await expect(page.locator(".graph-legend")).toContainText("文件导入当前");
+  await openTourSteps(page);
+  await expect(page.locator(".graph-legend")).toContainText("当前文件引用");
+  await expect(page.locator(".graph-legend")).toContainText("引用当前文件");
 
   await page.getByRole("button", { name: /快速打开/ }).click();
   const dialog = page.getByRole("dialog", { name: "快速打开文件" });
@@ -44,8 +44,8 @@ test("symbol outline jumps to the exact TypeScript definition range", async ({ p
       "}",
     ].join("\n"));
     await page.goto("/");
-    await expect(page.getByRole("button", { name: "第 1 步：从入口开始" })).toBeVisible();
-    await page.getByLabel("本地仓库路径").fill(repositoryPath);
+    await openTourSteps(page);
+    await enterRepositoryLocation(page, repositoryPath);
     await page.getByRole("button", { name: "打开仓库" }).click();
     await expect(page.locator(".detail-file-title strong")).toHaveText("main.ts");
     const symbol = page.getByRole("button", { name: /calculateAnswer function · 第 3 行/ });
@@ -62,7 +62,7 @@ test("symbol outline jumps to the exact TypeScript definition range", async ({ p
 test("mobile quick open stays available and large source jumps render the requested line", async ({ page }) => {
   await page.setViewportSize({ width: 375, height: 812 });
   await page.goto("/");
-  await expect(page.getByRole("button", { name: "第 1 步：从入口开始" })).toBeVisible();
+  await openTourSteps(page);
   const quickOpenButton = page.getByRole("button", { name: "快速打开文件" });
   await quickOpenButton.click();
   const dialog = page.getByRole("dialog", { name: "快速打开文件" });
@@ -80,7 +80,7 @@ test("mobile quick open stays available and large source jumps render the reques
     await page.getByRole("button", { name: "文件", exact: true }).click();
     await writeFile(path.join(repositoryPath, "main.ts"), lines.join("\n"));
     await writeFile(path.join(repositoryPath, "worker.ts"), "export function run() { return 1; }\n");
-    await page.getByLabel("本地仓库路径").fill(repositoryPath);
+    await enterRepositoryLocation(page, repositoryPath);
     await page.getByRole("button", { name: "打开仓库" }).click();
     await expect(page.locator(".detail-file-title strong")).toHaveText("main.ts");
     await page.getByRole("button", { name: "详情", exact: true }).click();
@@ -106,8 +106,8 @@ test("local content search locates source and reading notes survive export/impor
   await writeFile(path.join(repositoryPath, "worker.ts"), "export const workerValue = 1;\n");
   try {
     await page.goto("/");
-    await expect(page.getByRole("button", { name: "第 1 步：从入口开始" })).toBeVisible();
-    await page.getByLabel("本地仓库路径").fill(repositoryPath);
+    await openTourSteps(page);
+    await enterRepositoryLocation(page, repositoryPath);
     await page.getByRole("button", { name: "打开仓库" }).click();
     await expect(page.locator(".detail-file-title strong")).toHaveText("main.ts");
 
@@ -126,6 +126,7 @@ test("local content search locates source and reading notes survive export/impor
     await page.locator(".manual-tour-builder summary").click();
     await page.locator(".manual-tour-builder input[type=checkbox]").check();
     await page.getByRole("button", { name: "创建并开始路线" }).click();
+    await openTourSteps(page);
     await expect(page.getByRole("button", { name: /第 1 步：/ })).toBeVisible();
 
     await page.getByRole("tab", { name: "讲解", exact: true }).click();
@@ -150,7 +151,7 @@ test("local content search locates source and reading notes survive export/impor
     await writeFile(exportPath, JSON.stringify(imported));
     await page.locator(".reading-import-button input[type=file]").setInputFiles(exportPath);
     await expect(page.getByRole("dialog", { name: "导入预览" })).toBeVisible();
-    await expect(page.getByRole("dialog", { name: "导入预览" })).toContainText("1 个 ID 冲突");
+    await expect(page.getByRole("dialog", { name: "导入预览" })).toContainText("1 条记录冲突");
     await page.getByRole("button", { name: "确认导入" }).click();
     await expect(page.locator(".reading-note-list")).toContainText("路线入口的阅读说明");
     await expect(page.locator(".reading-note-list")).toContainText("导入冲突副本内容");
@@ -170,8 +171,8 @@ test("browser restore failure keeps existing notes and tours while local edits w
   });
   try {
     await page.goto("/");
-    await expect(page.getByRole("button", { name: "第 1 步：从入口开始" })).toBeVisible();
-    await page.getByLabel("本地仓库路径").fill(repositoryPath);
+    await openTourSteps(page);
+    await enterRepositoryLocation(page, repositoryPath);
     await page.getByRole("button", { name: "打开仓库" }).click();
     await expect(page.locator(".detail-file-title strong")).toHaveText("main.ts");
     await page.getByRole("tab", { name: "讲解", exact: true }).click();
@@ -188,10 +189,10 @@ test("browser restore failure keeps existing notes and tours while local edits w
     await page.getByRole("button", { name: "创建并开始路线" }).click();
     await originalTourSave;
 
-    await page.getByRole("button", { name: "返回示例" }).click();
-    await expect(page.getByRole("button", { name: "第 1 步：从入口开始" })).toBeVisible();
+    await returnToSample(page);
+    await openTourSteps(page);
     await page.reload();
-    await expect(page.getByRole("button", { name: "第 1 步：从入口开始" })).toBeVisible();
+    await openTourSteps(page);
 
     let failNextRead = true;
     const savedNotePayloads: Array<{ notes?: Array<{ text?: string }> }> = [];
@@ -211,10 +212,10 @@ test("browser restore failure keeps existing notes and tours while local edits w
       await route.continue();
     });
 
-    await page.getByLabel("本地仓库路径").fill(repositoryPath);
+    await enterRepositoryLocation(page, repositoryPath);
     await page.getByRole("button", { name: "打开仓库" }).click();
     await expect(page.getByRole("button", { name: "重试恢复" })).toBeVisible();
-    await expect(page.getByRole("status", { name: "本地保存状态：仅在内存" })).toBeVisible();
+    await expect(page.getByRole("status", { name: "本地保存状态：尚未保存" })).toBeVisible();
     await page.getByRole("tab", { name: "讲解", exact: true }).click();
     await page.getByLabel("阅读笔记内容").fill("读取失败期间的新笔记");
     await page.getByRole("button", { name: "保存记录" }).click();
@@ -250,8 +251,8 @@ test("an import confirmed during source validation preserves notes added before 
   });
   try {
     await page.goto("/");
-    await expect(page.getByRole("button", { name: "第 1 步：从入口开始" })).toBeVisible();
-    await page.getByLabel("本地仓库路径").fill(repositoryPath);
+    await openTourSteps(page);
+    await enterRepositoryLocation(page, repositoryPath);
     await page.getByRole("button", { name: "打开仓库" }).click();
     await expect(page.locator(".detail-file-title strong")).toHaveText("main.ts");
     await page.getByRole("tab", { name: "讲解", exact: true }).click();
@@ -284,9 +285,10 @@ test("an import confirmed during source validation preserves notes added before 
     await page.getByRole("button", { name: "确认导入" }).click();
     await sourceRequest;
 
-    await page.getByLabel("阅读笔记内容").fill("校验期间新增的笔记");
+    // Inject an external edit while the modal owns keyboard focus.
+    await page.locator('[aria-label="阅读笔记内容"]').evaluate((element) => { Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(element, "校验期间新增的笔记"); element.dispatchEvent(new Event("input", { bubbles: true })); });
     const concurrentSave = waitForNoteSave();
-    await page.getByRole("button", { name: "保存记录" }).click();
+    await page.locator(".reading-note-editor button").evaluate((button) => (button as HTMLButtonElement).click());
     await concurrentSave;
     releaseSource();
 
@@ -320,21 +322,21 @@ test("a successful route save does not clear a failed notes save indicator", asy
       await route.continue();
     });
     await page.goto("/");
-    await expect(page.getByRole("button", { name: "第 1 步：从入口开始" })).toBeVisible();
-    await page.getByLabel("本地仓库路径").fill(repositoryPath);
+    await openTourSteps(page);
+    await enterRepositoryLocation(page, repositoryPath);
     await page.getByRole("button", { name: "打开仓库" }).click();
     await expect(page.locator(".detail-file-title strong")).toHaveText("main.ts");
     await page.getByRole("tab", { name: "讲解", exact: true }).click();
     await expect(page.getByRole("status", { name: "本地保存状态：已保存" })).toBeVisible();
     await page.getByLabel("阅读笔记内容").fill("暂未落盘的笔记");
     await page.getByRole("button", { name: "保存记录", exact: true }).click();
-    await expect(page.getByRole("status", { name: "本地保存状态：仅在内存" })).toBeVisible();
+    await expect(page.getByRole("status", { name: "本地保存状态：尚未保存" })).toBeVisible();
 
     await page.locator(".manual-tour-builder summary").click();
     await page.locator(".manual-tour-builder input[type=checkbox]").check();
     await page.getByLabel("路线标题").fill("已落盘的路线");
     await page.getByRole("button", { name: "创建并开始路线", exact: true }).click();
-    await expect(page.getByRole("status", { name: "本地保存状态：仅在内存" })).toBeVisible();
+    await expect(page.getByRole("status", { name: "本地保存状态：尚未保存" })).toBeVisible();
     await expect(page.getByRole("button", { name: "重试保存", exact: true })).toBeVisible();
     await expect(page.locator(".workspace-save-status")).toHaveAttribute("title", /笔记写入失败/);
 
@@ -364,8 +366,8 @@ test("a successful notes save does not clear a failed route save indicator", asy
       await route.continue();
     });
     await page.goto("/");
-    await expect(page.getByRole("button", { name: "第 1 步：从入口开始" })).toBeVisible();
-    await page.getByLabel("本地仓库路径").fill(repositoryPath);
+    await openTourSteps(page);
+    await enterRepositoryLocation(page, repositoryPath);
     await page.getByRole("button", { name: "打开仓库" }).click();
     await expect(page.locator(".detail-file-title strong")).toHaveText("main.ts");
     await page.getByRole("tab", { name: "讲解", exact: true }).click();
@@ -379,14 +381,14 @@ test("a successful notes save does not clear a failed route save indicator", asy
     await page.locator(".manual-tour-builder input[type=checkbox]").check();
     await page.getByLabel("路线标题").fill("暂未落盘的路线");
     await page.getByRole("button", { name: "创建并开始路线", exact: true }).click();
-    await expect(page.getByRole("status", { name: "本地保存状态：仅在内存" })).toBeVisible();
+    await expect(page.getByRole("status", { name: "本地保存状态：尚未保存" })).toBeVisible();
     await expect(page.getByRole("button", { name: "重试保存", exact: true })).toBeVisible();
     await expect(page.locator(".workspace-save-status")).toHaveAttribute("title", /路线写入失败/);
 
     await page.getByRole("tab", { name: "讲解", exact: true }).click();
     await page.getByLabel("阅读笔记内容").fill("后续笔记也已落盘");
     await page.getByRole("button", { name: "保存记录", exact: true }).click();
-    await expect(page.getByRole("status", { name: "本地保存状态：仅在内存" })).toBeVisible();
+    await expect(page.getByRole("status", { name: "本地保存状态：尚未保存" })).toBeVisible();
     await expect(page.getByRole("button", { name: "重试保存", exact: true })).toBeVisible();
     await expect(page.locator(".workspace-save-status")).toHaveAttribute("title", /路线写入失败/);
 

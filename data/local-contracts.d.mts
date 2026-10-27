@@ -21,6 +21,8 @@ export const SearchResponseSchema: z.ZodTypeAny;
 export const RepositoryOverviewSchema: z.ZodTypeAny;
 export const RevisionComparisonRequestSchema: z.ZodTypeAny;
 export const RevisionComparisonResponseSchema: z.ZodTypeAny;
+export const RevisionFetchRequestSchema: z.ZodTypeAny;
+export const RevisionFetchResponseSchema: z.ZodTypeAny;
 
 export function parseLocalApiResponse<T>(value: unknown, status: number, schema: z.ZodType<T>, fallback?: string): T;
 export type RepositoryEventParseResult =

@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { normalizeWorkspaceLayout } from "./workspace-layout.mjs";
 
 const VERSION = 1;
 const MAX_STORE_BYTES = 64 * 1024 * 1024;
 const MAX_PROGRESS_BYTES = 16 * 1024;
-const emptyState = () => ({ version: VERSION, recentRepositories: [], aiResults: {}, aiRoutes: {}, progress: {}, nodePositions: {}, conversations: {}, readingNotes: {}, savedTours: {}, guidePreferences: null });
+const emptyState = () => ({ version: VERSION, recentRepositories: [], aiResults: {}, aiRoutes: {}, progress: {}, nodePositions: {}, conversations: {}, readingNotes: {}, savedTours: {}, guidePreferences: null, layoutPreferences: null });
 const clone = (value) => structuredClone(value);
 
 class UnsupportedStoreVersionError extends Error {}
@@ -18,6 +19,7 @@ function validateState(value) {
     if (value[key] && typeof value[key] === "object" && !Array.isArray(value[key])) state[key] = value[key];
   }
   if (Object.hasOwn(value, "guidePreferences")) state.guidePreferences = value.guidePreferences;
+  if (Object.hasOwn(value, "layoutPreferences")) state.layoutPreferences = normalizeWorkspaceLayout(value.layoutPreferences);
   return state;
 }
 
@@ -197,6 +199,7 @@ export function createWorkspaceStore(directory) {
         readingNotes: clone(state.readingNotes[repositoryId] ?? []),
         savedTours: clone(state.savedTours[repositoryId] ?? []),
         guidePreferences: clone(state.guidePreferences),
+        layoutPreferences: clone(state.layoutPreferences),
         persistenceReady: loaded,
         warning: storageMessage || undefined,
       };
@@ -231,6 +234,25 @@ export function createWorkspaceStore(directory) {
       if (!Array.isArray(conversations) || conversations.length > 100) throw new Error("问答会话数量超出限制。");
       return mutate((current) => { current.conversations[repositoryId] = conversations; });
     },
+    async commitAiChatCompletion(workspaceId, conversationId, messages, artifacts, isActive = () => true) {
+      return mutate((current) => {
+        if (!isActive()) throw Object.assign(new Error("生成已停止或相关数据正在清除。"), { name: "AbortError" });
+        const conversations = current.conversations[workspaceId] ?? [];
+        const previous = conversations.find((item) => item.id === conversationId);
+        const merged = new Map((previous?.messages ?? []).map((item) => [item.id, item]));
+        for (const message of messages) merged.set(message.id, message);
+        const next = { ...previous, id: conversationId, title: previous?.title && previous.title !== "新对话" ? previous.title : messages[0].content.slice(0, 48), messages: [...merged.values()], updatedAt: Date.now() };
+        current.conversations[workspaceId] = [next, ...conversations.filter((item) => item.id !== conversationId)].slice(0, 100);
+        if (artifacts.route) {
+          current.aiRoutes[workspaceId] = artifacts.route;
+          current.savedTours[workspaceId] = [...(current.savedTours[workspaceId] ?? []).filter((item) => item.signature !== artifacts.route.signature), artifacts.route].slice(-100);
+        }
+        if (artifacts.explanation) {
+          current.aiResults[workspaceId] ??= {};
+          current.aiResults[workspaceId][artifacts.explanation.__entryFileId] = artifacts.explanation;
+        }
+      });
+    },
     async saveReadingNotes(repositoryId, notes) {
       if (!Array.isArray(notes) || notes.length > 10_000) throw new Error("阅读笔记数量超出限制。");
       return mutate((current) => { current.readingNotes[repositoryId] = notes; });
@@ -240,6 +262,11 @@ export function createWorkspaceStore(directory) {
       return mutate((current) => { current.savedTours[repositoryId] = tours; });
     },
     async saveGuidePreferences(preferences) { return mutate((current) => { current.guidePreferences = preferences; }); },
+    async saveLayoutPreferences(preferences) {
+      const normalized = normalizeWorkspaceLayout(preferences);
+      if (!normalized) throw new Error("工作区布局偏好格式无效。");
+      return mutate((current) => { current.layoutPreferences = normalized; });
+    },
     async clearRepository(repositoryId) {
       return mutate((current) => removeRepositoryFromState(current, repositoryId), () => cleanManagedCopies(repositoryId));
     },

@@ -1,5 +1,5 @@
-import { test, expect } from "./fixtures";
-import { mkdtemp, rm } from "node:fs/promises";
+import { enterRepositoryLocation, test, expect } from "./fixtures";
+import { mkdtemp, rm, mkdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -11,7 +11,8 @@ test.afterEach(async () => {
   temporaryQuestionRepository = "";
 });
 
-test("read-only question flow previews first, confirms source scope, cites lines, and carries follow-up history", async ({ page }) => {
+test("direct chat prepares context locally, sends once, cites lines, and carries follow-up history", async ({ page }) => {
+  await mkdir(".artifacts/chat-visibility", { recursive: true });
   temporaryQuestionRepository = await mkdtemp(path.join(os.tmpdir(), "repolens-question-e2e-"));
   const source = "import { value } from './dep';\nexport function main() { return value; }\n";
   const revision = "question-fixture-revision";
@@ -41,6 +42,13 @@ test("read-only question flow previews first, confirms source scope, cites lines
       if (body.action === "conversations") { persistedConversations = body.conversations ?? []; savedConversations.push(persistedConversations); }
       return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true }) });
     }
+    if (url.pathname === "/api/ai/preview") {
+      const task = request.postDataJSON();
+      expect(["explanation", "route"]).toContain(task.mode);
+      expect(task.repositoryId).toBe(snapshot.id);
+      expect(task.fileId).toBe("src/main.ts");
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ scopeRequired: false, preview: { id: "task-preview", repositoryId: snapshot.id, revision, entryFileId: "src/main.ts", mode: task.mode, baseUrl: "https://model.example/v1", model: "mock-model", files: [{ fileId: "src/main.ts", startLine: 1, endLine: 2, contentHash: "main-hash" }], characters: source.length, expiresAt: Date.now() + 600000 } }) });
+    }
     if (url.pathname === "/api/ai/question/preview") {
       questionPreviewCalls += 1;
       const body = request.postDataJSON() as Record<string, unknown>;
@@ -64,41 +72,56 @@ test("read-only question flow previews first, confirms source scope, cites lines
     return route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ error: `unexpected ${url.pathname}` }) });
   });
 
+  await page.setViewportSize({ width: 1440, height: 650 });
   await page.goto("/");
   await expect(page.locator(".graph-file-card").first()).toBeVisible();
-  await page.locator("#repository-path").fill(temporaryQuestionRepository);
+  await enterRepositoryLocation(page, temporaryQuestionRepository);
   const openRepository = page.getByRole("button", { name: "打开仓库", exact: true });
   await expect(openRepository).toBeEnabled();
   await openRepository.click();
   await expect(page.getByText("Question fixture", { exact: true }).first()).toBeVisible();
   await page.getByRole("treeitem", { name: "main.ts" }).click();
-  await page.getByRole("tab", { name: "问答", exact: true }).click();
+  await page.getByRole("tab", { name: "讲解", exact: true }).click();
+  await page.getByRole("button", { name: "打开 AI 侧栏", exact: true }).click();
+  await expect(page.getByRole("button", { name: "AI 任务", exact: true })).toHaveText(/提问/);
+  for (const mode of ["explanation", "route"]) {
+    await page.getByRole("button", { name: "AI 任务", exact: true }).click();
+    await page.getByRole("menuitem", { name: mode === "explanation" ? "讲解当前文件" : "规划阅读路线", exact: true }).click();
+    if (mode === "route") await page.getByLabel("提问或追问").fill("理解 main 的依赖");
+    await expect(page.getByRole("button", { name: "发送", exact: true })).toBeEnabled();
+    await expect(page.getByRole("button", { name: "发送", exact: true })).toBeInViewport();
+    expect(generateCalls).toBe(0);
+
+  }
+  await page.getByRole("button", { name: "AI 任务", exact: true }).click();
+  await page.getByRole("menuitem", { name: "提问", exact: true }).click();
   await page.getByLabel("提问或追问").fill("What does main return?");
-  await page.getByRole("button", { name: "预览发送范围" }).click();
-  await expect(page.getByRole("region", { name: "问答发送确认" })).toBeVisible();
-  expect(questionPreviewCalls).toBe(1);
+  await expect(page.getByRole("button", { name: "发送", exact: true })).toBeEnabled();
+  expect(questionPreviewCalls).toBeGreaterThanOrEqual(1);
   expect(generateCalls).toBe(0);
-  await page.getByRole("button", { name: "确认发送并获取引用回答" }).click();
-  await expect(page.getByText("当前范围无法确认该实现细节。")).toBeVisible();
-  await page.getByRole("button", { name: "引用不足，补充文件" }).click();
-  await expect(page.getByRole("region", { name: "补充问答源码范围" })).toBeVisible();
-  await page.getByRole("checkbox", { name: "src/dep.ts" }).check();
-  await page.getByRole("button", { name: "重新预览补充范围" }).click();
-  await expect(page.getByRole("region", { name: "问答发送确认" })).toBeVisible();
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  await expect(page.getByText("当前范围无法确认该实现细节。")).toBeInViewport();
+  await page.getByRole("button", { name: "回答菜单", exact: true }).click();
+  await page.getByRole("menuitem", { name: "补充文件", exact: true }).click();
+  await expect(page.getByText("发送上下文", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "src/dep.ts", exact: true }).click();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("button", { name: "发送", exact: true })).toBeEnabled();
   expect(seenPreviewBodies.at(-1)?.fileIds).toEqual(["src/main.ts", "src/dep.ts"]);
   expect(generateCalls).toBe(1);
-  await page.getByRole("button", { name: "确认发送并获取引用回答" }).click();
-  await expect(page.getByText("main 返回依赖导出的 value。")).toBeVisible();
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  await expect(page.getByText("main 返回依赖导出的 value。")).toBeInViewport();
+  await page.screenshot({ path: ".artifacts/chat-visibility/answer.png" });
   expect(generateCalls).toBe(2);
   await expect.poll(() => savedConversations.length).toBeGreaterThan(0);
-  await page.getByRole("button", { name: /src\/main\.ts · 第 2–2 行/ }).click();
+  await page.getByRole("button", { name: "main.ts:2", exact: true }).click();
+  await page.getByRole("button", { name: "在源码中打开", exact: true }).click();
   await expect(page.getByRole("tab", { name: "源码", exact: true })).toHaveAttribute("data-state", "active");
   await expect(page.locator("#source-line-2")).toHaveClass(/is-focused/);
 
   await page.getByRole("tab", { name: "问答", exact: true }).click();
   await page.getByLabel("提问或追问").fill("Why does it return that value?");
-  await page.getByRole("button", { name: "预览发送范围" }).click();
-  await expect(page.getByRole("region", { name: "问答发送确认" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "发送", exact: true })).toBeEnabled();
   const followUp = seenPreviewBodies.at(-1);
   expect(followUp?.history).toEqual([
     { role: "user", content: "What does main return?" },
@@ -107,10 +130,12 @@ test("read-only question flow previews first, confirms source scope, cites lines
     { role: "assistant", content: "main 返回依赖导出的 value。" },
   ]);
   expect(generateCalls).toBe(2);
-  await page.getByRole("button", { name: "删除对话" }).click();
+  await page.getByRole("button", { name: "聊天历史", exact: true }).click();
+  await page.getByRole("button", { name: "会话菜单", exact: true }).click();
+  await page.getByRole("menuitem", { name: "删除对话" }).click();
 });
 
-test("leaving the question tab cancels preview and generation without saving a late answer", async ({ page }) => {
+test("closing the AI panel cancels preview but lets a confirmed answer finish", async ({ page }) => {
   temporaryQuestionRepository = await mkdtemp(path.join(os.tmpdir(), "repolens-question-cancel-e2e-"));
   const source = "export const value = 1;\n";
   const revision = "question-cancel-revision";
@@ -180,33 +205,33 @@ test("leaving the question tab cancels preview and generation without saving a l
 
   await page.goto("/");
   await expect(page.locator(".graph-file-card").first()).toBeVisible();
-  await page.locator("#repository-path").fill(temporaryQuestionRepository);
+  await enterRepositoryLocation(page, temporaryQuestionRepository);
   const openRepository = page.getByRole("button", { name: "打开仓库", exact: true });
   await expect(openRepository).toBeEnabled();
   await openRepository.click();
   await page.getByRole("tab", { name: "问答", exact: true }).click();
   await page.getByLabel("提问或追问").fill("preview cancellation");
   const previewAborted = page.waitForEvent("requestfailed", (request) => request.url().includes("/api/ai/question/preview"));
-  await page.getByRole("button", { name: "预览发送范围" }).click();
+
   await previewStart;
-  await page.getByRole("tab", { name: "源码", exact: true }).click();
+  await page.getByRole("button", { name: "关闭 AI 聊天", exact: true }).click();
   await previewAborted;
   releasePreview();
   await previewDone;
   expect(generateCalls).toBe(0);
   expect(conversationWrites).toBe(0);
 
-  await page.getByRole("tab", { name: "问答", exact: true }).click();
-  await page.getByLabel("提问或追问").fill("generation cancellation");
-  await page.getByRole("button", { name: "预览发送范围" }).click();
-  await expect(page.getByRole("region", { name: "问答发送确认" })).toBeVisible();
-  const generateAborted = page.waitForEvent("requestfailed", (request) => request.url().includes("/api/ai/generate"));
-  await page.getByRole("button", { name: "确认发送并获取引用回答" }).click();
+  await page.getByRole("button", { name: "打开 AI 聊天", exact: true }).click();
+  await page.getByLabel("提问或追问").fill("confirmed continuation");
+  await expect(page.getByRole("button", { name: "发送", exact: true })).toBeEnabled();
+  await page.getByRole("button", { name: "发送", exact: true }).click();
   await generateStart;
-  await page.getByRole("tab", { name: "源码", exact: true }).click();
-  await generateAborted;
+  // A confirmed chat keeps running after the panel is closed; its answer is
+  // stored and appears when the panel is opened again.
+  await page.getByRole("button", { name: "关闭 AI 聊天", exact: true }).click();
   releaseGenerate();
   await generateDone;
-  expect(conversationWrites).toBe(0);
-  await expect(page.getByText("迟到回答", { exact: true })).toHaveCount(0);
+  await expect.poll(() => conversationWrites).toBe(1);
+  await page.getByRole("button", { name: "打开 AI 聊天", exact: true }).click();
+  await expect(page.getByText("迟到回答", { exact: true })).toBeVisible();
 });

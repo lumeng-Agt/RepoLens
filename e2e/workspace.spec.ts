@@ -1,4 +1,4 @@
-import { test, expect, createReturningPage } from "./fixtures";
+import { test, expect, createReturningPage, enterRepositoryLocation, openModelSettings, openRepositoryHome, openTourSteps, returnToSample } from "./fixtures";
 import { createServer, type Server } from "node:http";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -26,7 +26,9 @@ async function watchRuntimeErrors(page: import("@playwright/test").Page) {
   page.on("pageerror", (error) => errors.push(error.message));
   await page.addInitScript(() => {
     const diagnostics = (window as Window & { __repolensRuntimeErrors?: string[] }).__repolensRuntimeErrors ??= [];
-    window.addEventListener("error", (event) => diagnostics.push(`window: ${event.message}`));
+    window.addEventListener("error", (event) => {
+      diagnostics.push(`window: ${event.message}`);
+    });
     window.addEventListener("unhandledrejection", (event) => diagnostics.push(`promise: ${String(event.reason)}`));
   });
   return errors;
@@ -35,7 +37,7 @@ async function watchRuntimeErrors(page: import("@playwright/test").Page) {
 async function expectRuntimeClean(page: import("@playwright/test").Page, consoleErrors: string[], label: string) {
   const runtimeErrors = await page.evaluate(() => (window as Window & { __repolensRuntimeErrors?: string[] }).__repolensRuntimeErrors ?? []);
   expect([...consoleErrors, ...runtimeErrors], label).toEqual([]);
-  await expect(page.locator("nextjs-portal, vite-error-overlay, [data-vinext-error-overlay]")).toHaveCount(0);
+  await expect(page.locator("nextjs-portal, vite-error-overlay, [data-vinext-error-overlay], [data-vinext-dev-error-overlay]")).toHaveCount(0);
 }
 
 let modelServer: Server;
@@ -78,12 +80,14 @@ test("refresh restores the selected third step in all target viewports", async (
     const consoleErrors = await watchRuntimeErrors(page);
     await enableProgressTrace(page);
     await page.goto("/?repolensDebugProgress=1");
-    const thirdStep = page.getByRole("button", { name: "第 3 步：列表拆分为组件" });
+    await openTourSteps(page);
+    const thirdStep = page.getByRole("button", { name: "第 3 步：查看列表渲染" });
     await thirdStep.click();
     await expect(thirdStep).toHaveAttribute("aria-current", "step");
     await page.reload();
-    await expect(page.getByRole("button", { name: "第 3 步：列表拆分为组件" })).toHaveAttribute("aria-current", "step");
-    await expect(page.getByText("导览定位 · 第 16 行")).toBeVisible();
+    await openTourSteps(page);
+    await expect(page.getByRole("button", { name: "第 3 步：查看列表渲染" })).toHaveAttribute("aria-current", "step");
+    await expect(page.getByText("源码定位 · 第 16 行")).toBeVisible();
     const trace = await readProgressTrace(page);
     const restore = trace.filter((item) => item.event === "restore-complete").at(-1);
     expect(restore).toMatchObject({ outcome: "restored", stepIndex: 2 });
@@ -113,7 +117,7 @@ test('fresh browser sessions and reloads finish app startup without client-entry
       for (const navigation of ['initial', 'reload'] as const) {
         if (navigation === 'initial') await page.goto('/', { waitUntil: 'domcontentloaded' });
         else await page.reload({ waitUntil: 'domcontentloaded' });
-        await expect(page.getByRole('button', { name: '第 1 步：从入口开始' })).toBeVisible({ timeout: 10_000 });
+        await expect(await openTourSteps(page)).toHaveAttribute('aria-label', '第 1 步：从入口开始', { timeout: 10_000 });
         await expect(page.locator('.graph-file-card.is-selected')).toBeVisible();
       }
       expect(evidence.failedRequests, `session ${session} had no failed browser requests`).toEqual([]);
@@ -137,12 +141,25 @@ test("completed tour remains completed after refresh in all target viewports", a
     const consoleErrors = await watchRuntimeErrors(page);
     await enableProgressTrace(page);
     await page.goto("/?repolensDebugProgress=1");
-    await page.getByRole("button", { name: "第 5 步：服务提供初始数据" }).click();
+    await openTourSteps(page);
+    await page.getByRole("button", { name: "第 5 步：查看数据来源" }).click();
+    await expect(page.locator(".tourbar")).toBeVisible();
     await page.getByRole("button", { name: "完成导览" }).click();
-    await expect(page.getByRole("button", { name: "导览已完成" })).toBeVisible();
+    await expect(page.locator(".tourbar")).toBeHidden();
+    const routeToggle = page.locator(".route-visibility-trigger");
+    await expect(routeToggle).toBeVisible();
+    await expect(routeToggle).toHaveAttribute("aria-label", "阅读路线");
+    await expect(routeToggle).toBeFocused();
     await page.reload();
-    await expect(page.getByRole("button", { name: "第 5 步：服务提供初始数据" })).toHaveAttribute("aria-current", "step");
+    await expect(page.locator(".tourbar")).toBeHidden();
+    await routeToggle.click();
+    await openTourSteps(page);
+    await expect(page.getByRole("button", { name: "第 5 步：查看数据来源" })).toHaveAttribute("aria-current", "step");
     await expect(page.getByRole("button", { name: "导览已完成" })).toBeVisible();
+    await page.getByRole("button", { name: "重新开始当前路线" }).click();
+    await expect(page.locator(".tourbar")).toBeVisible();
+    await expect(page.getByRole("button", { name: "第 1 步：从入口开始" })).toHaveAttribute("aria-current", "step");
+    await expect(page.getByRole("button", { name: "导览已完成" })).toHaveCount(0);
     const trace = await readProgressTrace(page);
     const restore = trace.filter((item) => item.event === "restore-complete").at(-1);
     expect(restore).toMatchObject({ outcome: "restored", stepIndex: 4 });
@@ -150,6 +167,45 @@ test("completed tour remains completed after refresh in all target viewports", a
     await expectRuntimeClean(page, consoleErrors, `${viewport.width}px completed-tour refresh must not emit global browser errors`);
     await page.close();
   }
+});
+
+test("tour completion can collapse while failed persistence remains visible and retryable", async ({ page }) => {
+  await page.goto("/");
+  await openTourSteps(page);
+  await page.getByRole("button", { name: "第 5 步：查看数据来源" }).click();
+  await page.evaluate(() => {
+    const storage = window.localStorage;
+    (window as Window & { __restoreProgressStorage?: () => void }).__restoreProgressStorage = () => {
+      Object.defineProperty(window, "localStorage", { configurable: true, value: storage });
+      Reflect.deleteProperty(document, "cookie");
+    };
+    Object.defineProperty(window, "localStorage", { configurable: true, get() { throw new Error("storage temporarily unavailable"); } });
+    Object.defineProperty(document, "cookie", { configurable: true, get() { return ""; }, set() {} });
+  });
+  await page.getByRole("button", { name: "完成导览", exact: true }).click();
+  await expect(page.locator(".tourbar")).toBeHidden();
+  await expect(page.getByRole("status", { name: "本地保存状态：尚未保存" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "重试保存", exact: true })).toBeEnabled();
+  await page.evaluate(() => (window as Window & { __restoreProgressStorage?: () => void }).__restoreProgressStorage?.());
+  await page.getByRole("button", { name: "重试保存", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem("repolens:taskflow-sample:1.2") ?? "{}").completedSteps ?? [])).toContain("service");
+  await expect(page.getByRole("button", { name: "重试保存", exact: true })).toHaveCount(0);
+});
+
+test("reopening a completed route defaults to collapsed even after it was manually expanded", async ({ page }) => {
+  await page.goto("/");
+  await openTourSteps(page);
+  await page.getByRole("button", { name: "第 5 步：查看数据来源" }).click();
+  await page.getByRole("button", { name: "完成导览", exact: true }).click();
+  await expect(page.locator(".tourbar")).toBeHidden();
+  await page.locator(".route-visibility-trigger").click();
+  await expect(page.locator(".tourbar")).toBeVisible();
+  await openRepositoryHome(page);
+  await returnToSample(page);
+  await expect(page.locator(".tourbar")).toBeHidden();
+  await openTourSteps(page);
+  await expect(page.getByRole("button", { name: "导览已完成", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "第 5 步：查看数据来源" })).toHaveAttribute("aria-current", "step");
 });
 
 test("selected graph node stays fully visible at desktop and phone sizes", async ({ browser }) => {
@@ -182,8 +238,9 @@ test("selected graph node stays fully visible at desktop and phone sizes", async
     page.on("pageerror", (error) => consoleErrors.push(error.message));
     graphTestStage = `${viewport.width}:goto`;
     await page.goto("/");
+    await openTourSteps(page);
     graphTestStage = `${viewport.width}:select-step`;
-    await page.getByRole("button", { name: "第 5 步：服务提供初始数据" }).click();
+    await page.getByRole("button", { name: "第 5 步：查看数据来源" }).click();
     if (viewport.width <= 860) { graphTestStage = `${viewport.width}:show-graph`; await page.getByRole("button", { name: "依赖图" }).click(); }
     const card = page.locator(".graph-file-card.is-selected");
     await expect(card).toBeVisible();
@@ -215,16 +272,20 @@ test("damaged progress falls back safely and unavailable localStorage uses the c
   const damaged = await createReturningPage(browser);
   await damaged.addInitScript(() => localStorage.setItem("repolens:taskflow-sample:1.2", "{bad"));
   await damaged.goto("/");
-  await expect(damaged.getByRole("button", { name: "第 1 步：从入口开始" })).toHaveAttribute("aria-current", "step");
-  await expect(damaged.getByText("已忽略损坏的本地阅读进度。")).toBeVisible();
+  await expect(await openTourSteps(damaged)).toHaveAttribute("aria-label", "第 1 步：从入口开始");
+  await expect(damaged.getByText("无法读取已保存的阅读进度，本次从第一步开始。")).toBeVisible();
   await damaged.close();
 
   const cookieFallback = await browser.newPage();
   await cookieFallback.addInitScript(() => Object.defineProperty(window, "localStorage", { configurable: true, get() { throw new Error("storage disabled"); } }));
   await cookieFallback.goto("/");
-  await cookieFallback.getByRole("button", { name: "第 3 步：列表拆分为组件" }).click();
+  await returnToSample(cookieFallback);
+  await openTourSteps(cookieFallback);
+  await cookieFallback.getByRole("button", { name: "第 3 步：查看列表渲染" }).click();
   await cookieFallback.reload();
-  await expect(cookieFallback.getByRole("button", { name: "第 3 步：列表拆分为组件" })).toHaveAttribute("aria-current", "step");
+  await returnToSample(cookieFallback);
+  await openTourSteps(cookieFallback);
+  await expect(cookieFallback.getByRole("button", { name: "第 3 步：查看列表渲染" })).toHaveAttribute("aria-current", "step");
   await cookieFallback.close();
 });
 
@@ -233,14 +294,16 @@ test("returning from a local repository restores the sample route progress", asy
   await writeFile(path.join(repositoryPath, "main.ts"), "export const value = 1;\n");
   try {
     await page.goto("/");
-    await page.getByRole("button", { name: "第 3 步：列表拆分为组件" }).click();
-    await page.getByLabel("本地仓库路径").fill(repositoryPath);
+    await openTourSteps(page);
+    await page.getByRole("button", { name: "第 3 步：查看列表渲染" }).click();
+    await enterRepositoryLocation(page, repositoryPath);
     const openRepository = page.getByRole("button", { name: "打开仓库" });
     await expect(openRepository).toBeEnabled();
     await openRepository.click();
-    await expect(page.getByText("本地仓库", { exact: true })).toBeVisible();
-    await page.getByRole("button", { name: "返回示例" }).click();
-    await expect(page.getByRole("button", { name: "第 3 步：列表拆分为组件" })).toHaveAttribute("aria-current", "step");
+    await expect(page.locator(".sample-badge")).toContainText("本地仓库");
+    await returnToSample(page);
+    await openTourSteps(page);
+    await expect(page.getByRole("button", { name: "第 3 步：查看列表渲染" })).toHaveAttribute("aria-current", "step");
   } finally { await rm(repositoryPath, { recursive: true, force: true }); }
 });
 
@@ -253,15 +316,19 @@ test("returning to the sample restores same-page progress when both storage back
       Object.defineProperty(document, "cookie", { configurable: true, get() { return ""; }, set() {} });
     });
     await page.goto("/");
-    const thirdStep = page.getByRole("button", { name: "第 3 步：列表拆分为组件" });
+    const sampleButton = page.getByRole("button", { name: "打开示例", exact: true });
+    if (await sampleButton.isVisible().catch(() => false)) await sampleButton.click();
+    await openTourSteps(page);
+    const thirdStep = page.getByRole("button", { name: "第 3 步：查看列表渲染" });
     await thirdStep.click();
     await expect(thirdStep).toHaveAttribute("aria-current", "step");
-    await expect(page.getByText("浏览器存储不可用，本次阅读进度只保存在当前页面。", { exact: true })).toBeVisible();
-    await page.getByLabel("本地仓库路径").fill(repositoryPath);
+    await expect(page.getByText("浏览器存储不可用，本次阅读进度尚未保存到本地。", { exact: true })).toBeVisible();
+    await enterRepositoryLocation(page, repositoryPath);
     await page.getByRole("button", { name: "打开仓库" }).click();
-    await expect(page.getByText("本地仓库", { exact: true })).toBeVisible();
-    await page.getByRole("button", { name: "返回示例" }).click();
-    await expect(page.getByRole("button", { name: "第 3 步：列表拆分为组件" })).toHaveAttribute("aria-current", "step");
+    await expect(page.locator(".sample-badge")).toContainText("本地仓库");
+    await returnToSample(page);
+    await openTourSteps(page);
+    await expect(page.getByRole("button", { name: "第 3 步：查看列表渲染" })).toHaveAttribute("aria-current", "step");
   } finally { await rm(repositoryPath, { recursive: true, force: true }); }
 });
 
@@ -273,19 +340,20 @@ test("AI preview sends nothing before confirmation and stale generation cannot l
   const resizeProbe = await installResizeObserverProbe(page);
   await page.goto("/");
   await expect(page.locator(".graph-file-card").first()).toBeVisible();
-  const pathInput = page.getByLabel("本地仓库路径");
-  await pathInput.fill(temporaryRepository);
+  await enterRepositoryLocation(page, temporaryRepository);
   const openRepository = page.getByRole("button", { name: "打开仓库" });
   await expect(openRepository).toBeEnabled();
   await openRepository.click();
-  await expect(page.getByText("本地仓库", { exact: true })).toBeVisible();
+  await expect(page.locator(".sample-badge")).toContainText("本地仓库");
   await expect(page.getByRole("treeitem", { name: "main.ts" })).toBeVisible();
 
-  await page.getByLabel("兼容服务地址").fill(modelOrigin);
-  await page.getByLabel("模型名称").fill("mock-model");
-  await page.getByLabel("API 密钥").fill("test-only-secret");
-  await page.getByRole("button", { name: "保存本地配置" }).click();
-  await expect(page.getByText("模型配置已保存在本地服务内存中。")).toBeVisible();
+  const settings = await openModelSettings(page);
+  await settings.getByLabel("模型服务地址").fill(modelOrigin);
+  await settings.getByLabel("模型名称").fill("mock-model");
+  await settings.getByLabel("API 密钥").fill("test-only-secret");
+  await settings.getByRole("button", { name: "应用设置" }).click();
+  await expect(settings.getByText("模型设置已应用；桌面版会加密保存模型配置，浏览器版密钥仅在本次服务中保留。")).toBeVisible();
+  await settings.getByRole("button", { name: "关闭", exact: true }).click();
   await page.getByRole("button", { name: "生成当前文件讲解" }).click();
   await expect(page.getByText("发送前确认")).toBeVisible();
   expect(modelCalls).toBe(0);
@@ -305,15 +373,37 @@ test("AI preview sends nothing before confirmation and stale generation cannot l
   await page.getByRole("button", { name: "生成阅读路线" }).click();
   await expect(page.getByText("发送前确认")).toBeVisible();
   await page.getByRole("button", { name: "确认发送并生成" }).click();
-  await expect(page.getByRole("button", { name: "第 1 步：lib.ts" })).toBeVisible();
+  await expect(await openTourSteps(page)).toHaveAttribute("aria-label", "第 1 步：lib.ts");
   await page.getByRole("tab", { name: "讲解" }).click();
   await writeFile(path.join(temporaryRepository, "unrelated.ts"), "export const unrelated = true;\n");
   await expect(page.getByText("本地索引已更新。")).toBeVisible({ timeout: 10_000 });
-  await expect(page.getByText("引用关联源码已变化，当前结果已过期，不能跳转。")).toHaveCount(0);
+  await expect(page.getByText("引用关联的源码已变化，结果已过期，无法跳转。")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "下一步" })).toBeEnabled();
   await writeFile(path.join(temporaryRepository, "lib.ts"), "export const value = 2;\n");
-  await expect(page.getByText("引用关联源码已变化，当前结果已过期，不能跳转。")).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByText("引用关联的源码已变化，结果已过期，无法跳转。")).toBeVisible({ timeout: 10_000 });
   await expect(page.getByRole("button", { name: "下一步" })).toBeDisabled();
   expect(modelCalls).toBe(3);
   expect(await resizeProbe.errors(), resizeProbe.logs.join("\n")).toEqual([]);
+});
+
+test("AI chat opens from the workspace toolbar at desktop and phone sizes", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/");
+  await expect(page.locator(".sample-badge")).toContainText("示例仓库");
+  await expect(page.locator(".graph-file-card").first()).toBeVisible();
+  await page.getByRole("button", { name: "打开 AI 聊天" }).click();
+  await expect(page.locator("#ai-chat-panel")).toBeVisible();
+  await expect(page.getByText("示例使用预置讲解")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#ai-chat-panel")).toBeHidden();
+
+  await page.setViewportSize({ width: 375, height: 812 });
+  await page.getByRole("button", { name: "打开 AI 聊天" }).click();
+  await expect(page.locator("#ai-chat-panel")).toBeVisible();
+  const drawer = await page.locator(".ai-chat-drawer").boundingBox();
+  expect(drawer).not.toBeNull();
+  expect(drawer!.width).toBeGreaterThan(300);
+  expect(drawer!.x).toBeGreaterThanOrEqual(0);
+  await page.getByRole("button", { name: "关闭 AI 聊天" }).click();
+  await expect(page.locator("#ai-chat-panel")).toBeHidden();
 });

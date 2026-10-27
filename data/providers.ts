@@ -1,6 +1,7 @@
 import type { AiQuestionConversation, AiRouteRecord, AiSavedResult, ReadingNote, RepositoryOverview, RepositorySnapshot, RevisionComparison, SearchRequest, SearchResponse } from "./model";
 import type { z } from "zod";
 import type { UsageGuidePreferences } from "./usage-guide.mjs";
+import type { WorkspaceLayoutPreferences } from "./workspace-layout.mjs";
 import {
   LocalWorkspaceStateSchema,
   RepositoryDiagnosticEventSchema,
@@ -10,6 +11,7 @@ import {
   SearchResponseSchema,
   RepositoryOverviewSchema,
   RevisionComparisonResponseSchema,
+  RevisionFetchResponseSchema,
   WorkspaceSaveResponseSchema,
   parseLocalApiResponse,
   parseRepositoryEvent,
@@ -40,6 +42,7 @@ export interface LocalRepositoryProvider extends RepositoryProvider {
   searchContent(input: SearchRequest, signal?: AbortSignal): Promise<SearchResponse>;
   getOverview(repositoryId: string, revision: string, signal?: AbortSignal): Promise<RepositoryOverview>;
   compare(input: { repositoryId: string; revision: string; mode: "working-tree" | "commits"; baseRef?: string; headRef?: string }, signal?: AbortSignal): Promise<RevisionComparison>;
+  fetchHistory(input: { repositoryId: string; workspaceId: string; persistenceSessionId: string; revision: string; target: string }, signal?: AbortSignal): Promise<{ repositoryId: string; workspaceId: string; revision: string; target: string; commit: string; objectsAvailable: true }>;
   subscribe(repositoryId: string, onRevision: (revision: string, sequence: number) => void, onError: (message: string) => void): () => void;
 }
 
@@ -54,6 +57,7 @@ export type LocalWorkspaceState = {
   readingNotes?: ReadingNote[];
   savedTours?: AiRouteRecord[];
   guidePreferences?: UsageGuidePreferences | null;
+  layoutPreferences?: WorkspaceLayoutPreferences | null;
   warning?: string;
   persistenceReady?: boolean;
 };
@@ -73,6 +77,7 @@ export interface WorkspacePersistenceProvider {
   saveTours(session: WorkspaceSession, tours: AiRouteRecord[]): Promise<void>;
   clearRepository(session: WorkspaceSession): Promise<void>;
   saveGuidePreferences(preferences: UsageGuidePreferences): Promise<void>;
+  saveLayoutPreferences(preferences: WorkspaceLayoutPreferences): Promise<void>;
   clearAll(): Promise<void>;
 }
 
@@ -108,6 +113,7 @@ export const localRepositoryProvider: LocalRepositoryProvider = {
   async searchContent(input, signal) { return request(`${LOCAL_API_ORIGIN}/api/search`, SearchResponseSchema, "源码搜索结果格式无效。", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input), signal }) as Promise<SearchResponse>; },
   async getOverview(repositoryId, revision, signal) { const query = new URLSearchParams({ repositoryId, revision }); return request(`${LOCAL_API_ORIGIN}/api/overview?${query}`, RepositoryOverviewSchema, "仓库概览格式无效。", { signal }) as Promise<RepositoryOverview>; },
   async compare(input, signal) { return request(`${LOCAL_API_ORIGIN}/api/compare`, RevisionComparisonResponseSchema, "版本比较结果格式无效。", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input), signal }) as Promise<RevisionComparison>; },
+  async fetchHistory(input, signal) { return request(`${LOCAL_API_ORIGIN}/api/compare/fetch`, RevisionFetchResponseSchema, "GitHub 版本获取结果格式无效。", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input), signal }); },
   subscribe(repositoryId, onRevision, onError) {
     const source = new EventSource(`${LOCAL_API_ORIGIN}/api/events?repositoryId=${encodeURIComponent(repositoryId)}`);
     source.addEventListener("revision", (event) => {
@@ -139,6 +145,7 @@ export const localWorkspaceProvider: WorkspacePersistenceProvider = {
   async saveReadingNotes(session, notes) { await persist(`${LOCAL_API_ORIGIN}/api/workspace`, { action: "reading-notes", ...session, notes }); },
   async saveTours(session, tours) { await persist(`${LOCAL_API_ORIGIN}/api/workspace`, { action: "saved-tours", ...session, tours }); },
   async saveGuidePreferences(preferences) { await persist(`${LOCAL_API_ORIGIN}/api/workspace`, { action: "guide-preferences", preferences }); },
+  async saveLayoutPreferences(preferences) { await persist(`${LOCAL_API_ORIGIN}/api/workspace`, { action: "layout-preferences", preferences }); },
   async clearRepository(session) { await persist(`${LOCAL_API_ORIGIN}/api/workspace`, { action: "clear-repository", ...session }); },
   async clearAll() { await persist(`${LOCAL_API_ORIGIN}/api/workspace`, { action: "clear-all", repositoryId: "" }); },
 };

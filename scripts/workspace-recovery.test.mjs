@@ -215,9 +215,69 @@ async function openDesktopPage({ localTour = [] } = {}) {
 }
 
 async function dismissWelcomeAfterClear(page) {
-  const welcome = page.getByRole("heading", { name: "从这里开始读懂一个仓库" });
+  const welcome = page.getByRole("heading", { name: "打开仓库，开始阅读" });
   await welcome.waitFor({ state: "visible", timeout: 5_000 }).catch(() => {});
-  if (await welcome.isVisible().catch(() => false)) await page.getByRole("button", { name: "跳过指引，直接进入工作区" }).click();
+  if (await welcome.isVisible().catch(() => false)) {
+    await page.getByRole("button", { name: "打开示例", exact: true }).click();
+    const guide = page.getByRole("dialog", { name: "使用指南" });
+    await guide.waitFor({ state: "visible", timeout: 5_000 });
+    await guide.getByRole("button", { name: "关闭使用指南" }).click();
+    await page.locator(".app-shell").waitFor({ state: "visible", timeout: 5_000 });
+  }
+}
+
+async function openAppPage(app) {
+  const initialWorkspace = app.page.waitForResponse((response) =>
+    response.url().includes("/api/workspace?") && response.request().method() === "GET",
+    { timeout: 12_000 },
+  );
+  await app.page.goto(app.origin);
+  await initialWorkspace;
+  await app.page.locator(".app-shell, .repository-home").first().waitFor({ state: "visible" });
+  await dismissWelcomeAfterClear(app.page);
+}
+
+async function returnToRepositoryHome(page) {
+  const heading = page.getByRole("heading", { name: "打开仓库，开始阅读" });
+  if (!await heading.isVisible().catch(() => false)) {
+    await page.waitForFunction(() => Boolean(document.querySelector(".repository-home") || document.querySelector(".repo-menu")));
+    if (!await heading.isVisible().catch(() => false)) {
+      const menu = page.locator(".repo-menu");
+      if (!await menu.evaluate((element) => element.open)) await menu.locator("summary").click();
+      await menu.getByRole("button", { name: "返回首页", exact: true }).click();
+    }
+  }
+  await page.locator("#repository-path").waitFor({ state: "visible", timeout: 8_000 });
+}
+
+async function clickRepositoryMenuAction(page, name) {
+  const menu = page.locator(".repo-menu");
+  if (!await menu.evaluate((element) => element.open)) await menu.locator("summary").click();
+  await menu.getByRole("button", { name, exact: true }).click();
+}
+
+async function assertChatHistory(page, title, present = true) {
+  await page.getByRole("button", { name: "聊天历史", exact: true }).click();
+  await page.getByLabel("搜索聊天历史", { exact: true }).waitFor({ state: "visible" });
+  const item = page.locator(".chat-history-list").getByRole("button").filter({ has: page.getByText(title, { exact: true }) });
+  if (present) await item.waitFor({ state: "visible" });
+  else assert.equal(await item.count(), 0, title + " must not be restored in history");
+  await page.keyboard.press("Escape");
+}
+
+async function chooseTourStep(page, index, title) {
+  const disclosure = page.locator(".tour-step-disclosure");
+  if (!await disclosure.evaluate((element) => element.open)) await disclosure.locator("summary").click();
+  await page.getByRole("button", { name: `第 ${index + 1} 步：${title}`, exact: true }).click();
+}
+
+async function openRecoveryLocal(app) {
+  await returnToRepositoryHome(app.page);
+  await app.page.locator("#repository-path").fill("recovery-fixture");
+  const opened = app.page.waitForResponse((response) => response.url().includes("/api/open"), { timeout: 5_000 });
+  await app.page.getByRole("button", { name: "打开仓库", exact: true }).click();
+  assert.equal((await opened).status(), 200);
+  await app.page.locator(".repo-context .sample-badge").filter({ hasText: "本地仓库" }).waitFor({ state: "visible", timeout: 5_000 });
 }
 
 after(async () => {
@@ -234,8 +294,8 @@ test("failed desktop restore never replaces saved sample node positions with an 
   const originalProgress = JSON.stringify({ stepIndex: 2, completedSteps: [0, 1] });
   await app.store.saveNodePositions("taskflow-sample", original);
   await app.store.saveProgress("taskflow-sample", "repolens:taskflow-sample:1.2", originalProgress);
-  await app.page.goto(app.origin);
-  await app.page.getByText("桌面保存数据读取失败", { exact: false }).waitFor({ state: "visible" });
+  await openAppPage(app);
+  await app.page.getByText("保存数据读取失败", { exact: false }).waitFor({ state: "visible" });
   await app.page.waitForTimeout(900);
   assert.ok(app.workspaceReads.includes("taskflow-sample"));
   assert.equal(app.workspaceWrites.some((write) => write.action === "node-positions"), false, `positions must not be written before restore succeeds: ${JSON.stringify(app.workspaceWrites)}`);
@@ -249,14 +309,15 @@ test("failed local workspace restore never replaces saved conversations with an 
   const app = await openDesktopPage();
   const original = [{ id: "saved-conversation", title: "Saved", messages: [], updatedAt: 10 }];
   await app.store.saveConversations("recovery-local", original);
-  await app.page.goto(app.origin);
+  await openAppPage(app);
+  await returnToRepositoryHome(app.page);
   await app.page.locator("#repository-path").fill("recovery-fixture");
   const openResponse = app.page.waitForResponse((response) => response.url().includes("/api/open"), { timeout: 5000 });
   await app.page.getByRole("button", { name: "打开仓库", exact: true }).click();
   assert.equal((await openResponse).status(), 200, `open request should succeed: ${(await app.page.locator("body").innerText()).slice(-1200)}`);
-  await app.page.getByText("本地仓库", { exact: true }).waitFor({ state: "visible", timeout: 5000 });
+  await app.page.locator(".repo-context .sample-badge").filter({ hasText: "本地仓库" }).waitFor({ state: "visible", timeout: 5000 });
   await app.page.getByRole("tab", { name: "问答", exact: true }).click();
-  await app.page.getByText("本地问答记录不可用", { exact: false }).waitFor({ state: "visible" });
+  await app.page.getByRole("alert").filter({ hasText: "无法读取已保存的问答记录" }).waitFor({ state: "visible" });
   await app.page.waitForTimeout(600);
   assert.ok(app.workspaceReads.includes("recovery-local"));
   assert.equal(app.workspaceWrites.some((write) => write.action === "conversations"), false, `conversations must not be written before restore succeeds: ${JSON.stringify(app.workspaceWrites)}`);
@@ -264,7 +325,7 @@ test("failed local workspace restore never replaces saved conversations with an 
   await app.page.getByRole("button", { name: "新对话", exact: true }).click();
   assert.equal(app.workspaceWrites.some((write) => write.action === "conversations"), false, "changes made while storage is unavailable remain in memory");
   app.setWorkspaceReadsAvailable();
-  await app.page.getByRole("button", { name: "重试读取本地问答记录" }).click();
+  await app.page.getByRole("button", { name: "重试读取问答记录" }).evaluate((button) => button.click());
   await app.page.waitForFunction(async ({ apiOrigin }) => {
     const response = await fetch(`${apiOrigin}/api/workspace?repositoryId=recovery-local`);
     return (await response.json()).conversations?.length === 2;
@@ -281,7 +342,8 @@ test("reading notes and routes edited during a failed restore merge with the sav
   const originalRoute = createAiRouteRecord({ repositoryId: "recovery-local", entryFileId: "main.ts", revision: "r1", title: "原有路线", steps: [{ fileId: "main.ts", purpose: "原有步骤", relationship: "入口", question: "原有问题", references: [{ fileId: "main.ts", startLine: 1 }] }], contextFiles: [{ fileId: "main.ts", contentHash: "h1" }] });
   await app.store.saveReadingNotes("recovery-local", [originalNote]);
   await app.store.saveTours("recovery-local", [originalRoute]);
-  await app.page.goto(app.origin);
+  await openAppPage(app);
+  await returnToRepositoryHome(app.page);
   await app.page.locator("#repository-path").fill("recovery-fixture");
   await app.page.getByRole("button", { name: "打开仓库", exact: true }).click();
   await app.page.locator(".detail-file-title strong").getByText("main.ts", { exact: true }).waitFor({ state: "visible" });
@@ -317,55 +379,58 @@ test("pending conversations survive tab unmount and merge after a later successf
   const app = await openDesktopPage();
   const original = [{ id: "saved-conversation", title: "Saved", messages: [], updatedAt: 10 }];
   await app.store.saveConversations("recovery-local", original);
-  await app.page.goto(app.origin);
+  await openAppPage(app);
+  await returnToRepositoryHome(app.page);
   await app.page.locator("#repository-path").fill("recovery-fixture");
   await app.page.getByRole("button", { name: "打开仓库", exact: true }).click();
   await app.page.getByRole("tab", { name: "问答", exact: true }).click();
-  await app.page.getByText("本地问答记录不可用", { exact: false }).waitFor({ state: "visible" });
+  await app.page.getByRole("alert").filter({ hasText: "无法读取已保存的问答记录" }).waitFor({ state: "visible" });
   await app.page.getByRole("button", { name: "新对话", exact: true }).click();
   await app.page.getByRole("tab", { name: "源码", exact: true }).click();
   await app.page.getByRole("tab", { name: "问答", exact: true }).click();
-  await app.page.getByText("本地问答记录不可用", { exact: false }).waitFor({ state: "visible" });
+  await app.page.getByRole("alert").filter({ hasText: "无法读取已保存的问答记录" }).waitFor({ state: "visible" });
 
   app.setWorkspaceReadsAvailable();
-  await app.page.getByRole("button", { name: "重试读取本地问答记录" }).click();
-  await app.page.getByRole("option", { name: "Saved", exact: true }).waitFor({ state: "attached" });
-  await app.page.getByRole("option", { name: "新对话", exact: true }).waitFor({ state: "attached" });
+  await app.page.getByRole("button", { name: "重试读取问答记录" }).evaluate((button) => button.click());
+  await assertChatHistory(app.page, "Saved");
+  await assertChatHistory(app.page, "新对话");
   await app.page.waitForFunction(async ({ apiOrigin }) => {
     const response = await fetch(`${apiOrigin}/api/workspace?repositoryId=recovery-local`);
     const records = (await response.json()).conversations ?? [];
     return records.length === 2 && records.some((record) => record.id === "saved-conversation") && records.some((record) => record.title === "新对话");
   }, { apiOrigin: await app.page.evaluate(() => window.__REPOLENS_RUNTIME__?.apiOrigin) }, { timeout: 5000 });
-  assert.equal(await app.page.getByRole("button", { name: "重试读取本地问答记录" }).count(), 0, "successful restore clears the read-failure prompt");
+  assert.equal(await app.page.getByRole("button", { name: "重试读取问答记录" }).count(), 0, "successful restore clears the read-failure prompt");
 });
 
 test("conversation deletion intent survives a failed save and a workspace reread", async () => {
   const app = await openDesktopPage();
   const original = [{ id: "saved-conversation", title: "Saved", messages: [], updatedAt: 10 }];
   await app.store.saveConversations("recovery-local", original);
-  await app.page.goto(app.origin);
+  await openAppPage(app);
+  await returnToRepositoryHome(app.page);
   await app.page.locator("#repository-path").fill("recovery-fixture");
   await app.page.getByRole("button", { name: "打开仓库", exact: true }).click();
   await app.page.getByRole("tab", { name: "问答", exact: true }).click();
-  await app.page.getByText("本地问答记录不可用", { exact: false }).waitFor({ state: "visible" });
+  await app.page.getByRole("alert").filter({ hasText: "无法读取已保存的问答记录" }).waitFor({ state: "visible" });
   app.setWorkspaceReadsAvailable();
-  await app.page.getByRole("button", { name: "重试读取本地问答记录" }).click();
-  await app.page.getByRole("option", { name: "Saved", exact: true }).waitFor({ state: "attached" });
-  await app.page.getByText("读取失败", { exact: false }).waitFor({ state: "detached" });
+  await app.page.getByRole("button", { name: "重试读取问答记录" }).click();
+  await assertChatHistory(app.page, "Saved");
+  await app.page.getByRole("alert").filter({ hasText: "无法读取已保存的问答记录" }).waitFor({ state: "detached" });
   app.setWorkspaceWritesUnavailable();
-  await app.page.getByRole("button", { name: "删除对话", exact: true }).click();
+  await app.page.getByRole("button", { name: "聊天历史", exact: true }).click();
+  await app.page.getByRole("button", { name: "会话菜单", exact: true }).click();
+  await app.page.getByRole("menuitem", { name: "删除对话", exact: true }).click();
   await app.page.getByText("simulated workspace write failure", { exact: false }).waitFor({ state: "visible" });
   assert.equal((await app.store.getRepository("recovery-local")).conversations.some((item) => item.id === "saved-conversation"), true, "failed save leaves durable record untouched until retry");
   app.setWorkspaceWritesAvailable();
-  await app.page.getByRole("tab", { name: "源码", exact: true }).click();
-  await app.page.getByRole("tab", { name: "问答", exact: true }).click();
-  await app.page.getByRole("option", { name: "Saved", exact: true }).waitFor({ state: "detached" });
+  await app.page.getByRole("complementary", { name: "AI 聊天" }).getByRole("button", { name: "重试保存", exact: true }).click();
+  await assertChatHistory(app.page, "Saved", false);
   await app.page.waitForFunction(async ({ apiOrigin }) => {
     const response = await fetch(`${apiOrigin}/api/workspace?repositoryId=recovery-local`);
     return (await response.json()).conversations?.length === 0;
   }, { apiOrigin: await app.page.evaluate(() => window.__REPOLENS_RUNTIME__?.apiOrigin) }, { timeout: 5000 });
   assert.deepEqual((await app.store.getRepository("recovery-local")).conversations, [], "explicitly deleted conversations are not resurrected by rereading storage");
-  assert.equal(await app.page.getByRole("button", { name: "重试读取本地问答记录" }).count(), 0, "successful reread clears the read-failure prompt");
+  assert.equal(await app.page.getByRole("button", { name: "重试读取问答记录" }).count(), 0, "successful reread clears the read-failure prompt");
 });
 
 test("a warning on a successful workspace response still blocks question autosave", async () => {
@@ -373,7 +438,8 @@ test("a warning on a successful workspace response still blocks question autosav
   const original = [{ id: "saved-conversation", title: "Saved", messages: [], updatedAt: 10 }];
   await app.store.saveConversations("recovery-local", original);
   app.setWorkspaceReadWarning("storage read is incomplete");
-  await app.page.goto(app.origin);
+  await openAppPage(app);
+  await returnToRepositoryHome(app.page);
   await app.page.locator("#repository-path").fill("recovery-fixture");
   await app.page.getByRole("button", { name: "打开仓库", exact: true }).click();
   await app.page.getByRole("tab", { name: "问答", exact: true }).click();
@@ -389,14 +455,15 @@ test("clearing the current workspace removes its in-memory question state withou
   const original = [{ id: "saved-conversation", title: "Saved", messages: [], updatedAt: 10 }];
   await app.store.saveConversations("recovery-local", original);
   await app.store.saveConversations("other-workspace", [{ id: "other", title: "Other", messages: [], updatedAt: 11 }]);
-  await app.page.goto(app.origin);
+  await openAppPage(app);
+  await returnToRepositoryHome(app.page);
   await app.page.locator("#repository-path").fill("recovery-fixture");
   await app.page.getByRole("button", { name: "打开仓库", exact: true }).click();
   await app.page.getByRole("tab", { name: "问答", exact: true }).click();
-  await app.page.waitForFunction(() => Array.from(document.querySelector('[aria-label="问答会话"]').options).some((option) => option.text === "Saved"));
+  await assertChatHistory(app.page, "Saved");
 
-  await app.page.getByRole("button", { name: "清除此仓库的保存数据", exact: true }).click();
-  await app.page.waitForFunction(() => Array.from(document.querySelector('[aria-label="问答会话"]').options).every((option) => option.text !== "Saved"));
+  await clickRepositoryMenuAction(app.page, "清除此仓库的阅读记录");
+  await assertChatHistory(app.page, "Saved", false);
   assert.deepEqual((await app.store.getRepository("recovery-local")).conversations, []);
   assert.equal((await app.store.getRepository("other-workspace")).conversations[0]?.id, "other");
 
@@ -414,15 +481,19 @@ test("clear-all removes the active question view and later edits do not resurrec
   app.setWorkspaceReadsAvailable();
   await app.store.saveConversations("recovery-local", [{ id: "saved-conversation", title: "Saved", messages: [], updatedAt: 10 }]);
   await app.store.saveConversations("other-workspace", [{ id: "other", title: "Other", messages: [], updatedAt: 11 }]);
-  await app.page.goto(app.origin);
+  await openAppPage(app);
+  await returnToRepositoryHome(app.page);
   await app.page.locator("#repository-path").fill("recovery-fixture");
   await app.page.getByRole("button", { name: "打开仓库", exact: true }).click();
   await app.page.getByRole("tab", { name: "问答", exact: true }).click();
-  await app.page.waitForFunction(() => Array.from(document.querySelector('[aria-label="问答会话"]').options).some((option) => option.text === "Saved"));
+  await assertChatHistory(app.page, "Saved");
 
-  await app.page.getByRole("button", { name: "清除全部本地保存数据", exact: true }).click();
-  await dismissWelcomeAfterClear(app.page);
-  await app.page.waitForFunction(() => Array.from(document.querySelector('[aria-label="问答会话"]').options).every((option) => option.text !== "Saved"));
+  const clearResponse = app.page.waitForResponse((response) => response.url().includes("/api/workspace") && response.request().method() === "POST" && response.request().postData()?.includes("clear-all"));
+  await clickRepositoryMenuAction(app.page, "清除全部 RepoLens 保存数据");
+  assert.equal((await clearResponse).status(), 200);
+  await openRecoveryLocal(app);
+  await app.page.getByRole("tab", { name: "问答", exact: true }).click();
+  await assertChatHistory(app.page, "Saved", false);
   assert.deepEqual((await app.store.getRepository("recovery-local")).conversations, []);
   assert.deepEqual((await app.store.getRepository("other-workspace")).conversations, []);
   await app.page.getByRole("button", { name: "新对话", exact: true }).click();
@@ -438,10 +509,11 @@ test("clear-all removes the active question view and later edits do not resurrec
 test("clear-all invalidates an import paused while validating source references", async () => {
   const app = await openDesktopPage();
   app.setWorkspaceReadsAvailable();
-  await app.page.goto(app.origin);
+  await openAppPage(app);
+  await returnToRepositoryHome(app.page);
   await app.page.locator("#repository-path").fill("recovery-fixture");
   await app.page.getByRole("button", { name: "打开仓库", exact: true }).click();
-  await app.page.getByText("本地仓库", { exact: true }).waitFor({ state: "visible" });
+  await app.page.locator(".repo-context .sample-badge").filter({ hasText: "本地仓库" }).waitFor({ state: "visible" });
   await app.page.getByRole("tab", { name: "讲解", exact: true }).click();
 
   const importedNote = {
@@ -458,7 +530,8 @@ test("clear-all invalidates an import paused while validating source references"
   await app.page.getByRole("button", { name: "确认导入", exact: true }).click();
   await sourceRead.started.promise;
   const clearResponse = app.page.waitForResponse((response) => response.url().includes("/api/workspace") && response.request().method() === "POST" && response.request().postData()?.includes("clear-all"));
-  await app.page.getByRole("button", { name: "清除全部本地保存数据", exact: true }).click();
+  // Simulate an external clear while the modal holds a validation request.
+  await app.page.evaluate(() => { const menu = document.querySelector(".repo-menu"); menu.open = true; const button = [...menu.querySelectorAll("button")].find((item) => item.textContent.includes("清除全部 RepoLens 保存数据")); button.click(); });
   assert.equal((await clearResponse).status(), 200);
   await dismissWelcomeAfterClear(app.page);
   assert.deepEqual((await app.store.getRepository("recovery-local")).readingNotes, []);
@@ -474,20 +547,20 @@ test("clearing a workspace during question generation aborts it before any stale
   const app = await openDesktopPage();
   app.setWorkspaceReadsAvailable();
   app.setAiConfigured();
-  await app.page.goto(app.origin);
+  await openAppPage(app);
+  await returnToRepositoryHome(app.page);
   await app.page.locator("#repository-path").fill("recovery-fixture");
   await app.page.getByRole("button", { name: "打开仓库", exact: true }).click();
   await app.page.getByRole("tab", { name: "问答", exact: true }).click();
   await app.page.getByLabel("提问或追问").fill("What does the entry do?");
-  await app.page.getByRole("button", { name: "预览发送范围", exact: true }).click();
-  await app.page.getByRole("button", { name: "确认发送并获取引用回答", exact: true }).waitFor({ state: "visible" });
+  await app.page.waitForFunction(() => !document.querySelector('.chat-send')?.disabled);
 
   const pending = app.holdNextGeneration();
-  await app.page.getByRole("button", { name: "确认发送并获取引用回答", exact: true }).click();
+  await app.page.getByRole("button", { name: "发送", exact: true }).click();
   await pending.started.promise;
   const clearRequest = app.page.waitForResponse((response) => response.url().includes("/api/workspace") && response.request().method() === "POST" && response.request().postData()?.includes("clear-repository"));
   try {
-    await app.page.getByRole("button", { name: "清除此仓库的保存数据", exact: true }).click();
+    await clickRepositoryMenuAction(app.page, "清除此仓库的阅读记录");
     await pending.aborted.promise;
     pending.release.resolve();
     await pending.settled.promise;
@@ -507,25 +580,27 @@ test("clearing a workspace invalidates an already-read but delayed conversation 
   const app = await openDesktopPage();
   app.setWorkspaceReadsAvailable();
   await app.store.saveConversations("recovery-local", [{ id: "old", title: "旧问答", messages: [], updatedAt: 1 }]);
-  await app.page.goto(app.origin);
+  await openAppPage(app);
+  await returnToRepositoryHome(app.page);
   await app.page.locator("#repository-path").fill("recovery-fixture");
   const openResponse = app.page.waitForResponse((response) => response.url().includes("/api/open"), { timeout: 5000 });
   await app.page.getByRole("button", { name: "打开仓库", exact: true }).click();
   assert.equal((await openResponse).status(), 200);
-  await app.page.getByText("本地仓库", { exact: true }).waitFor({ state: "visible" });
+  await app.page.locator(".repo-context .sample-badge").filter({ hasText: "本地仓库" }).waitFor({ state: "visible" });
   await app.page.waitForFunction(() => !document.body.innerText.includes("正在获取并扫描…"));
   const pendingRead = app.holdWorkspaceRead("recovery-local");
   await app.page.getByRole("tab", { name: "问答", exact: true }).click();
   await pendingRead.started.promise;
   const completedRecoveryRead = app.waitForWorkspaceRead("recovery-local", 2);
-  const clearButton = app.page.getByRole("button", { name: "清除此仓库的保存数据", exact: true });
+  await app.page.locator(".repo-menu summary").click();
+  const clearButton = app.page.getByRole("button", { name: "清除此仓库的阅读记录", exact: true });
   await clearButton.waitFor({ state: "visible" });
   try { await app.page.waitForFunction(() => {
-    const button = [...document.querySelectorAll("button")].find((item) => item.textContent?.trim() === "清除此仓库的保存数据");
+    const button = [...document.querySelectorAll("button")].find((item) => item.textContent?.trim() === "清除此仓库的阅读记录");
     return Boolean(button && !button.disabled);
   }); } catch {
     const state = await app.page.evaluate(() => {
-      const button = [...document.querySelectorAll("button")].find((item) => item.textContent?.trim() === "清除此仓库的保存数据");
+      const button = [...document.querySelectorAll("button")].find((item) => item.textContent?.trim() === "清除此仓库的阅读记录");
       return { button: button?.outerHTML, text: document.body.innerText.slice(-1200) };
     });
     throw new Error(`clear button remained disabled: ${JSON.stringify(state)}`);
@@ -538,21 +613,21 @@ test("clearing a workspace invalidates an already-read but delayed conversation 
   pendingRead.release.resolve();
   await pendingRead.settled.promise;
   await completedRecoveryRead;
-  await app.page.waitForFunction(() => Array.from(document.querySelector('[aria-label="问答会话"]').options).every((option) => option.text !== "旧问答"));
+  await assertChatHistory(app.page, "旧问答", false);
   assert.deepEqual((await app.store.getRepository("recovery-local")).conversations, [], "a read that began before clearing cannot repopulate or rewrite the old list");
 });
 
 test("clear-all waits for an in-flight desktop progress write before deleting saved data", async () => {
   const app = await openDesktopPage();
   app.setWorkspaceReadsAvailable();
-  await app.page.goto(app.origin);
+  await openAppPage(app);
   const delayedProgress = app.holdNextProgressWrite(2);
-  await app.page.getByRole("button", { name: "第 3 步：列表拆分为组件" }).click();
+  await chooseTourStep(app.page, 2, "查看列表渲染");
   await delayedProgress.started.promise;
 
   try {
-    await app.page.getByRole("button", { name: "清除全部本地保存数据", exact: true }).click();
-    await app.page.getByRole("button", { name: "正在清除…", exact: true }).first().waitFor({ state: "visible" });
+    await clickRepositoryMenuAction(app.page, "清除全部 RepoLens 保存数据");
+    await app.page.getByRole("status").filter({ hasText: "正在清除" }).waitFor({ state: "visible" });
     assert.equal(app.workspaceWrites.some((write) => write.action === "clear-all"), false, "clear must wait while the progress request is still unresolved");
 
     delayedProgress.release.resolve();
@@ -562,14 +637,16 @@ test("clear-all waits for an in-flight desktop progress write before deleting sa
     await dismissWelcomeAfterClear(app.page);
     const stored = await app.store.getRepository("taskflow-sample");
     assert.equal(Object.values(stored.progress).some((value) => JSON.parse(value).stepIndex === 2), false, "a completed clear must remove the old in-flight route progress");
-    await app.page.getByRole("button", { name: "第 1 步：从入口开始" }).waitFor();
+    const steps = app.page.locator(".tour-step-disclosure");
+    if (!await steps.evaluate((element) => element.open)) await steps.locator("summary").click();
+    await app.page.getByRole("button", { name: "第 1 步：从入口开始" }).waitFor({ state: "visible" });
   } finally {
     delayedProgress.release.resolve();
   }
 });
 
 test("clear-current waits for an in-flight desktop progress write before deleting that workspace", async () => {
-  const localTour = ["从入口开始", "页面组织内容", "列表拆分为组件", "状态集中在 Hook", "服务提供初始数据"].map((title, index) => ({
+  const localTour = ["从入口开始", "查看页面组织", "查看列表渲染", "跟随状态流转", "查看数据来源"].map((title, index) => ({
     id: `step-${index}`,
     title,
     focusFileId: "main.ts",
@@ -578,21 +655,27 @@ test("clear-current waits for an in-flight desktop progress write before deletin
   }));
   const app = await openDesktopPage({ localTour });
   app.setWorkspaceReadsAvailable();
-  await app.page.goto(app.origin);
+  await openAppPage(app);
+  await returnToRepositoryHome(app.page);
   await app.page.locator("#repository-path").fill("recovery-fixture");
   const openResponse = app.page.waitForResponse((response) => response.url().includes("/api/open"), { timeout: 5000 });
   await app.page.getByRole("button", { name: "打开仓库", exact: true }).click();
   assert.equal((await openResponse).status(), 200);
   await app.page.waitForFunction(() => !document.body.innerText.includes("正在获取并扫描…"));
   const delayedProgress = app.holdNextProgressWrite(2);
-  await app.page.getByRole("button", { name: "第 3 步：列表拆分为组件" }).click();
+  await chooseTourStep(app.page, 2, "查看列表渲染");
   await delayedProgress.started.promise;
 
   try {
-    const clearButton = app.page.getByRole("button", { name: "清除此仓库的保存数据", exact: true });
+    await app.page.locator(".repo-menu summary").click();
+    const clearButton = app.page.getByRole("button", { name: "清除此仓库的阅读记录", exact: true });
+    await app.page.waitForFunction(() => {
+      const button = [...document.querySelectorAll(".repo-menu button")].find((item) => item.textContent?.trim() === "清除此仓库的阅读记录");
+      return Boolean(button && !button.disabled);
+    });
     const clearResponse = app.page.waitForResponse((response) => response.url().includes("/api/workspace") && response.request().method() === "POST" && response.request().postData()?.includes("clear-repository"));
     await clearButton.click();
-    await app.page.getByRole("button", { name: "正在清除…", exact: true }).first().waitFor({ state: "visible" });
+    await app.page.getByRole("status").filter({ hasText: "正在清除" }).waitFor({ state: "visible" });
     assert.equal(app.workspaceWrites.some((write) => write.action === "clear-repository"), false, "current-workspace clear must wait for the pending progress write");
     delayedProgress.release.resolve();
     await delayedProgress.settled.promise;

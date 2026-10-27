@@ -1,4 +1,4 @@
-import { test, expect, createReturningPage, type Page } from './fixtures';
+import { closeModelSettings, enterRepositoryLocation, openModelSettings, openRepositoryMenu, openTourSteps, returnToSample, test, expect, createReturningPage, type Page } from './fixtures';
 import { createServer, request as httpRequest, type Server } from 'node:http';
 import { mkdir, mkdtemp, rm, unlink, writeFile } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -62,26 +62,31 @@ async function repository(source = 'export const a = 1;\nexport const b = 2;\nex
 
 async function open(page: Page, root: string) {
   if (page.url() === 'about:blank') await page.goto('/');
-  await page.getByRole('button', { name: '第 1 步：从入口开始' }).waitFor();
-  await page.getByLabel('本地仓库路径').fill(root);
+  await openTourSteps(page);
+  await enterRepositoryLocation(page, root);
   const responsePromise = page.waitForResponse((response) => response.url() === `${apiOrigin}/api/open`);
   await page.getByRole('button', { name: '打开仓库', exact: true }).click();
   const snapshot = await (await responsePromise).json();
   await expect(page.getByRole('treeitem', { name: 'main.ts', exact: true })).toBeVisible();
   await page.getByRole('tab', { name: '讲解', exact: true }).click();
-  await expect(page.getByText('AI 讲解（按需生成）', { exact: true })).toBeVisible();
-  await page.getByLabel('兼容服务地址').fill(modelOrigin);
-  await page.getByLabel('模型名称').fill('review-mock');
-  await page.getByLabel('API 密钥').fill('review-only-key');
-  await page.getByRole('button', { name: '保存本地配置' }).click();
-  await expect(page.getByText('模型配置已保存在本地服务内存中。')).toBeVisible();
+  await expect(page.getByText('AI 辅助阅读', { exact: true })).toBeVisible();
+  await expect(page.locator('.guide-scroll > :first-child')).toHaveAttribute('aria-label', 'AI 讲解');
+  await page.getByRole('region', { name: 'AI 讲解', exact: true }).getByRole('button', { name: '模型设置', exact: true }).click();
+  const settings = page.getByRole('dialog', { name: '模型设置', exact: true });
+  await expect(settings).toBeVisible();
+  await settings.getByLabel('模型服务地址').fill(modelOrigin);
+  await settings.getByLabel('模型名称').fill('review-mock');
+  await settings.getByLabel('API 密钥').fill('review-only-key');
+  await settings.getByRole('button', { name: '应用设置' }).click();
+  await expect(settings.getByText('模型设置已应用；桌面版会加密保存模型配置，浏览器版密钥仅在本次服务中保留。')).toBeVisible();
+  await closeModelSettings(page);
   return snapshot;
 }
 
 async function openOnly(page: Page, root: string, filename = 'main.ts') {
   await page.goto('/');
-  await page.getByRole('button', { name: '第 1 步：从入口开始' }).waitFor();
-  await page.getByLabel('本地仓库路径').fill(root);
+  await openTourSteps(page);
+  await enterRepositoryLocation(page, root);
   const openButton = page.getByRole('button', { name: '打开仓库', exact: true });
   await expect(openButton).toBeEnabled();
   await openButton.click();
@@ -140,7 +145,7 @@ test('A1 oversize preview must expose selectable source ranges', async ({ page }
   await expect(page.getByText('选择发送范围', { exact: true })).toBeVisible();
   await page.getByLabel('main.ts 结束行').fill('300');
   const previewPromise = page.waitForResponse((next) => next.url() === `${apiOrigin}/api/ai/preview`);
-  await page.getByRole('button', { name: '预览所选范围' }).click();
+  await page.getByRole('button', { name: '预览发送范围' }).click();
   expect((await previewPromise).status()).toBe(200);
   await expect(page.getByText('发送前确认', { exact: true })).toBeVisible();
 });
@@ -151,7 +156,7 @@ test('A1b a single oversized source line reports why it cannot be narrowed', asy
   await page.getByRole('button', { name: '生成当前文件讲解', exact: true }).click();
   await expect(page.getByText('选择发送范围', { exact: true })).toBeVisible();
   await expect(page.getByRole('alert')).toContainText('所选范围包含超长单行');
-  await expect(page.getByRole('button', { name: '预览所选范围' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: '预览发送范围' })).toBeDisabled();
 });
 
 test('A1c more than twelve imported files opens the scope selector', async ({ page }) => {
@@ -167,7 +172,7 @@ test('A1c more than twelve imported files opens the scope selector', async ({ pa
   await expect(page.locator('.ai-scope-picker label')).toHaveCount(13);
   await page.getByRole('checkbox', { name: /dep11\.ts/ }).uncheck();
   const previewPromise = page.waitForResponse((response) => response.url() === `${apiOrigin}/api/ai/preview`);
-  await page.getByRole('button', { name: '预览所选范围' }).click();
+  await page.getByRole('button', { name: '预览发送范围' }).click();
   expect((await previewPromise).status()).toBe(200);
   await expect(page.getByText('发送前确认', { exact: true })).toBeVisible();
 });
@@ -175,7 +180,7 @@ test('A1c more than twelve imported files opens the scope selector', async ({ pa
 test('A2 file explanation must not remove a generated route', async ({ page }) => {
   await open(page, await repository());
   await generate(page, '生成阅读路线');
-  await expect(page.getByRole('button', { name: '第 1 步：main.ts' })).toBeVisible();
+  await expect(await openTourSteps(page)).toHaveAttribute('aria-label', '第 1 步：main.ts');
   await page.getByRole('button', { name: '第 2 步：main.ts' }).click();
   await page.getByRole('tab', { name: '讲解', exact: true }).click();
   await generate(page, '生成当前文件讲解');
@@ -212,15 +217,17 @@ test('an expired AI route restores its progress without restoring stale source f
   await open(page, root);
   await page.getByRole('treeitem', { name: 'main.ts', exact: true }).click();
   await generate(page, '生成阅读路线');
+  await openTourSteps(page);
   const thirdStep = page.getByRole('button', { name: /第 3 步：middle\.ts/ });
   await thirdStep.click();
   await expect(thirdStep).toHaveAttribute('aria-current', 'step');
   await page.getByRole('tab', { name: '讲解', exact: true }).click();
   await writeFile(path.join(root, 'middle.ts'), "import { deep } from './deep'; export const value = deep + 1;\n");
   await expect(page.getByRole('button', { name: '完成导览' })).toBeDisabled({ timeout: 10_000 });
-  await page.getByRole('button', { name: '返回示例' }).click();
-  await page.getByLabel('本地仓库路径').fill(root);
+  await returnToSample(page);
+  await enterRepositoryLocation(page, root);
   await page.getByRole('button', { name: '打开仓库', exact: true }).click();
+  await openTourSteps(page);
   await expect(page.getByRole('button', { name: /第 3 步：middle\.ts/ })).toHaveAttribute('aria-current', 'step');
   await expect(page.getByRole('button', { name: '完成导览' })).toBeDisabled();
   await page.getByRole('tab', { name: '源码', exact: true }).click();
@@ -244,31 +251,33 @@ test('a delayed settings save cannot overwrite a newer unsaved draft', async ({ 
     await route.fulfill({ response });
   });
   await page.goto('/');
-  await page.getByRole('button', { name: '第 1 步：从入口开始' }).waitFor();
-  await page.getByLabel('本地仓库路径').fill(root);
+  await openTourSteps(page);
+  await enterRepositoryLocation(page, root);
   const openButton = page.getByRole('button', { name: '打开仓库', exact: true });
   await expect(openButton).toBeEnabled();
   await openButton.click();
   await expect(page.getByRole('treeitem', { name: 'main.ts', exact: true })).toBeVisible();
-  await page.getByLabel('兼容服务地址').fill(modelOrigin);
-  await page.getByLabel('模型名称').fill('old-model');
-  await page.getByLabel('API 密钥').fill('old-test-key');
-  await page.getByRole('button', { name: '保存本地配置' }).click();
+  const settings = await openModelSettings(page);
+  await settings.getByLabel('模型服务地址').fill(modelOrigin);
+  await settings.getByLabel('模型名称').fill('old-model');
+  await settings.getByLabel('API 密钥').fill('old-test-key');
+  await settings.getByRole('button', { name: '应用设置' }).click();
   await saveStarted;
-  await expect(page.getByRole('button', { name: '正在保存…' })).toBeDisabled();
-  await page.getByLabel('模型名称').fill('new-unsaved-model');
-  await page.getByLabel('API 密钥').fill('new-test-key');
+  await expect(settings.getByRole('button', { name: '正在应用…' })).toBeDisabled();
+  await settings.getByLabel('模型名称').fill('new-unsaved-model');
+  await settings.getByLabel('API 密钥').fill('new-test-key');
   releaseSave();
   await waitForSettingsResponseParsed(page, 'POST');
-  await expect(page.getByText('已保存较早的配置；当前表单包含更新内容，请再次保存后使用 AI。')).toBeVisible();
-  await expect(page.getByLabel('模型名称')).toHaveValue('new-unsaved-model');
-  await expect(page.getByLabel('API 密钥')).toHaveValue('new-test-key');
+  await expect(settings.getByText('较早的模型设置已应用，表单仍有未应用的修改。重新应用后再使用 AI。')).toBeVisible();
+  await expect(settings.getByLabel('模型名称')).toHaveValue('new-unsaved-model');
+  await expect(settings.getByLabel('API 密钥')).toHaveValue('new-test-key');
+  await closeModelSettings(page);
   await page.getByRole('button', { name: '生成当前文件讲解', exact: true }).click();
-  await expect(page.getByText('请先保存完整的模型服务地址、模型名称和密钥，再预览发送范围。')).toBeVisible();
+  await expect(page.getByText('请先填写模型服务地址、模型名称和密钥，再预览发送范围。')).toBeVisible();
 });
 
 for (const draft of [
-  { name: 'service address', label: '兼容服务地址', value: 'http://127.0.0.1:4319/unsaved-v2' },
+  { name: 'service address', label: '模型服务地址', value: 'http://127.0.0.1:4319/unsaved-v2' },
   { name: 'model name', label: '模型名称', value: 'uncommitted-model-draft' },
   { name: 'API key', label: 'API 密钥', value: 'uncommitted-secret-draft' },
 ]) {
@@ -288,17 +297,21 @@ for (const draft of [
     });
 
     await openOnly(page, root);
-    await expect(page.getByLabel('模型名称')).toHaveValue('persisted-test-model');
-    await page.getByLabel(draft.label).fill(draft.value);
-    await page.getByRole('button', { name: '返回示例', exact: true }).click();
-    await page.getByLabel('本地仓库路径').fill(root);
+    const settings = await openModelSettings(page);
+    await expect(settings.getByLabel('模型名称')).toHaveValue('persisted-test-model');
+    await settings.getByLabel(draft.label).fill(draft.value);
+    await closeModelSettings(page);
+    await returnToSample(page);
+    await enterRepositoryLocation(page, root);
     await page.getByRole('button', { name: '打开仓库', exact: true }).click();
     await expect(page.getByRole('treeitem', { name: 'main.ts', exact: true })).toBeVisible();
-    await expect(page.getByLabel('模型名称')).toHaveValue(draft.label === '模型名称' ? draft.value : 'persisted-test-model');
-    await expect(page.getByLabel(draft.label)).toHaveValue(draft.value);
+    const reopenedSettings = await openModelSettings(page);
+    await expect(reopenedSettings.getByLabel('模型名称')).toHaveValue(draft.label === '模型名称' ? draft.value : 'persisted-test-model');
+    await expect(reopenedSettings.getByLabel(draft.label)).toHaveValue(draft.value);
+    await closeModelSettings(page);
 
     await page.getByRole('button', { name: '生成当前文件讲解', exact: true }).click();
-    await expect(page.getByText('请先保存完整的模型服务地址、模型名称和密钥，再预览发送范围。')).toBeVisible();
+    await expect(page.getByText('请先填写模型服务地址、模型名称和密钥，再预览发送范围。')).toBeVisible();
     expect(previewRequests).toBe(0);
   });
 }
@@ -320,16 +333,18 @@ test('a delayed settings read cannot replace a draft entered after the read bega
   try {
     await openOnly(page, root);
     await readStarted;
-    await page.getByLabel('兼容服务地址').fill(modelOrigin);
-    await page.getByLabel('模型名称').fill('draft-after-read');
-    await page.getByLabel('API 密钥').fill('draft-key-after-read');
+    const settings = await openModelSettings(page);
+    await settings.getByLabel('模型服务地址').fill(modelOrigin);
+    await settings.getByLabel('模型名称').fill('draft-after-read');
+    await settings.getByLabel('API 密钥').fill('draft-key-after-read');
     releaseRead();
     await waitForSettingsResponseParsed(page, 'GET');
-    await expect(page.getByLabel('兼容服务地址')).toHaveValue(modelOrigin);
-    await expect(page.getByLabel('模型名称')).toHaveValue('draft-after-read');
-    await expect(page.getByLabel('API 密钥')).toHaveValue('draft-key-after-read');
+    await expect(settings.getByLabel('模型服务地址')).toHaveValue(modelOrigin);
+    await expect(settings.getByLabel('模型名称')).toHaveValue('draft-after-read');
+    await expect(settings.getByLabel('API 密钥')).toHaveValue('draft-key-after-read');
+    await closeModelSettings(page);
     await page.getByRole('button', { name: '生成当前文件讲解', exact: true }).click();
-    await expect(page.getByText('请先保存完整的模型服务地址、模型名称和密钥，再预览发送范围。')).toBeVisible();
+    await expect(page.getByText('请先填写模型服务地址、模型名称和密钥，再预览发送范围。')).toBeVisible();
   } finally {
     releaseRead();
   }
@@ -356,13 +371,16 @@ test('a settings read failure remains visible when the user edits the draft whil
   try {
     await openOnly(page, root);
     await readStarted;
-    await page.getByLabel('模型名称').fill('dirty-draft-after-read-start');
+    const settings = await openModelSettings(page);
+    await settings.getByLabel('模型名称').fill('dirty-draft-after-read-start');
     releaseRead();
     await waitForSettingsResponseParsed(page, 'GET');
-    await expect(page.locator('.ai-feedback')).toContainText('读取本地模型配置失败：模拟配置读取失败');
+    await expect(settings.locator('.ai-settings-read-error')).toContainText('模拟配置读取失败');
+    await closeModelSettings(page);
     await page.getByRole('button', { name: '生成当前文件讲解', exact: true }).click();
     expect(previewRequests).toBe(0);
-    await expect(page.getByLabel('模型名称')).toHaveValue('dirty-draft-after-read-start');
+    const recoveredSettings = await openModelSettings(page);
+    await expect(recoveredSettings.getByLabel('模型名称')).toHaveValue('dirty-draft-after-read-start');
   } finally {
     releaseRead();
   }
@@ -401,7 +419,7 @@ test('repository config diagnostics show paths and messages beside an AI route a
 
   await writeFile(path.join(root, 'tsconfig.json'), JSON.stringify({ compilerOptions: { moduleResolution: 'Bundler' } }));
   const rescan = page.waitForResponse((response) => response.url() === `${apiOrigin}/api/rescan`);
-  await page.locator('header').getByRole('button', { name: '重新扫描', exact: true }).click();
+  await (await openRepositoryMenu(page)).getByRole('button', { name: '重新扫描', exact: true }).click();
   expect((await rescan).ok()).toBeTruthy();
   await expect(diagnostics).toContainText('无诊断');
   await expect(diagnostics).not.toContainText('TS1005');
@@ -431,28 +449,31 @@ test('read and save failures are shown separately and a successful save clears b
   });
   await openOnly(page, root);
   await waitForSettingsResponseParsed(page, 'GET');
-  await expect(page.locator('.ai-settings-read-error')).toContainText('simulated read failure');
+  const settings = await openModelSettings(page);
+  await expect(settings.locator('.ai-settings-read-error')).toContainText('simulated read failure');
 
-  await page.getByLabel('兼容服务地址').fill(modelOrigin);
-  await page.getByLabel('模型名称').fill('settings-recovery-model');
-  await page.getByLabel('API 密钥').fill('settings-recovery-key');
+  await settings.getByLabel('模型服务地址').fill(modelOrigin);
+  await settings.getByLabel('模型名称').fill('settings-recovery-model');
+  await settings.getByLabel('API 密钥').fill('settings-recovery-key');
   const failedSave = page.waitForResponse((response) => response.url() === `${apiOrigin}/api/ai/settings` && response.request().method() === 'POST');
-  await page.getByRole('button', { name: '保存本地配置' }).click();
+  await settings.getByRole('button', { name: '应用设置' }).click();
   expect((await failedSave).status()).toBe(503);
   await waitForSettingsResponseParsed(page, 'POST', 1);
-  await expect(page.locator('.ai-settings-read-error')).toContainText('simulated read failure');
-  await expect(page.locator('.ai-settings-save-error')).toContainText('simulated save failure');
+  await expect(settings.locator('.ai-settings-read-error')).toContainText('simulated read failure');
+  await expect(settings.locator('.ai-settings-save-error')).toContainText('simulated save failure');
+  await closeModelSettings(page);
   await page.getByRole('button', { name: '生成当前文件讲解', exact: true }).click();
   expect(previewRequests).toBe(0);
 
+  const retrySettings = await openModelSettings(page);
   const successfulSave = page.waitForResponse((response) => response.url() === `${apiOrigin}/api/ai/settings` && response.request().method() === 'POST');
-  await page.getByRole('button', { name: '保存本地配置' }).click();
+  await retrySettings.getByRole('button', { name: '应用设置' }).click();
   expect((await successfulSave).ok()).toBeTruthy();
   await waitForSettingsResponseParsed(page, 'POST', 2);
-  await expect(page.locator('.ai-settings-read-error')).toHaveCount(0);
-  await expect(page.locator('.ai-settings-save-error')).toHaveCount(0);
-  await expect(page.getByLabel('API 密钥')).toHaveValue('');
-  await expect(page.getByText('模型配置已保存在本地服务内存中。')).toBeVisible();
+  await expect(retrySettings.locator('.ai-settings-read-error')).toHaveCount(0);
+  await expect(retrySettings.locator('.ai-settings-save-error')).toHaveCount(0);
+  await expect(retrySettings.getByLabel('API 密钥')).toHaveValue('');
+  await expect(retrySettings.getByText('模型设置已应用；桌面版会加密保存模型配置，浏览器版密钥仅在本次服务中保留。')).toBeVisible();
   expect(previewRequests).toBe(0);
 });
 
@@ -478,26 +499,30 @@ test('a delayed settings save from the previous repository cannot overwrite the 
   });
   try {
     await openOnly(page, firstRoot);
-    await page.getByLabel('兼容服务地址').fill(modelOrigin);
-    await page.getByLabel('模型名称').fill('previous-repository-model');
-    await page.getByLabel('API 密钥').fill('previous-repository-key');
-    await page.getByRole('button', { name: '保存本地配置' }).click();
+    const settings = await openModelSettings(page);
+    await settings.getByLabel('模型服务地址').fill(modelOrigin);
+    await settings.getByLabel('模型名称').fill('previous-repository-model');
+    await settings.getByLabel('API 密钥').fill('previous-repository-key');
+    await settings.getByRole('button', { name: '应用设置' }).click();
     await saveStarted;
 
-    await page.getByLabel('本地仓库路径').fill(secondRoot);
+    await closeModelSettings(page);
+    await enterRepositoryLocation(page, secondRoot);
     await page.getByRole('button', { name: '打开仓库', exact: true }).click();
     await expect(page.getByRole('treeitem', { name: 'other.ts', exact: true })).toBeVisible();
-    await expect(page.getByLabel('模型名称')).toHaveValue('previous-repository-model');
-    await page.getByLabel('兼容服务地址').fill('http://127.0.0.1:4319/v1');
-    await page.getByLabel('模型名称').fill('next-repository-draft');
-    await page.getByLabel('API 密钥').fill('next-repository-key');
+    const nextSettings = await openModelSettings(page);
+    await expect(nextSettings.getByLabel('模型名称')).toHaveValue('previous-repository-model');
+    await nextSettings.getByLabel('模型服务地址').fill('http://127.0.0.1:4319/v1');
+    await nextSettings.getByLabel('模型名称').fill('next-repository-draft');
+    await nextSettings.getByLabel('API 密钥').fill('next-repository-key');
 
     releaseSave();
     await waitForSettingsResponseParsed(page, 'POST');
-    await expect(page.getByLabel('模型名称')).toHaveValue('next-repository-draft');
-    await expect(page.getByLabel('API 密钥')).toHaveValue('next-repository-key');
+    await expect(nextSettings.getByLabel('模型名称')).toHaveValue('next-repository-draft');
+    await expect(nextSettings.getByLabel('API 密钥')).toHaveValue('next-repository-key');
+    await closeModelSettings(page);
     await page.getByRole('button', { name: '生成当前文件讲解', exact: true }).click();
-    await expect(page.getByText('请先保存完整的模型服务地址、模型名称和密钥，再预览发送范围。')).toBeVisible();
+    await expect(page.getByText('请先填写模型服务地址、模型名称和密钥，再预览发送范围。')).toBeVisible();
   } finally {
     releaseSave();
   }
@@ -508,6 +533,7 @@ test('A3 identical cached route must keep its content identity and progress', as
   const root = await repository();
   const snapshot = await open(page, root);
   await generate(page, '生成阅读路线');
+  await openTourSteps(page);
   await page.getByRole('button', { name: '第 2 步：main.ts' }).click();
   await page.getByRole('tab', { name: '讲解', exact: true }).click();
   const callsBefore = modelCalls;
@@ -521,38 +547,42 @@ test('A3 identical cached route must keep its content identity and progress', as
   await open(page, root);
   const afterReload = await generate(page, '生成阅读路线');
   expect(afterReload.cached).toBe(true);
+  await openTourSteps(page);
   await expect(page.getByRole('button', { name: '第 2 步：main.ts' })).toHaveAttribute('aria-current', 'step');
   expect(await resizeProbe.errors(), resizeProbe.logs.join('\n')).toEqual([]);
 });
 
-test('A4 a failed open must not strand the previous repository', async ({ page }) => {
-  const root = await repository();
-  const snapshot = await open(page, root);
-  await page.getByLabel('本地仓库路径').fill(path.join(root, 'does-not-exist'));
+test('A4 an invalid repository path reports the failure on the home page', async ({ page }) => {
+  await page.goto('/');
+  await openTourSteps(page);
+  await enterRepositoryLocation(page, path.join(os.tmpdir(), 'repolens-does-not-exist'));
   const failedOpenPromise = page.waitForResponse((response) => response.url() === `${apiOrigin}/api/open`);
   await page.getByRole('button', { name: '打开仓库', exact: true }).click();
   expect((await failedOpenPromise).status()).toBe(400);
-  await writeFile(path.join(root, 'added.ts'), 'export const added = true;\n');
-  const rescanPromise = page.waitForResponse((response) => response.url() === `${apiOrigin}/api/rescan`);
-  await page.getByRole('button', { name: '重新扫描', exact: true }).first().click();
-  const rescanned = await (await rescanPromise).json();
-  expect(rescanned.id).toBe(snapshot.id);
-  console.log('A4 backend new file', rescanned.files.some((file: { id: string }) => file.id === 'added.ts'));
-  expect(rescanned.files.some((file: { id: string }) => file.id === 'added.ts')).toBe(true);
-  await expect(page.getByRole('treeitem', { name: 'added.ts', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: '打开仓库，开始阅读' })).toBeVisible();
+  await expect(page.locator('.home-feedback')).toContainText('找不到这个目录，请检查路径后重试。');
 });
 
-test('A4b the original repository watcher keeps publishing after a failed open', async ({ page }) => {
+test('A4b a failed open can be corrected and retried from the home page', async ({ page }) => {
   const root = await repository();
-  await open(page, root);
-  await page.getByLabel('本地仓库路径').fill(path.join(root, 'missing-directory'));
+  await page.goto('/');
+  await openTourSteps(page);
+  await enterRepositoryLocation(page, path.join(root, 'missing-directory'));
   const failedOpenPromise = page.waitForResponse((response) => response.url() === `${apiOrigin}/api/open`);
   await page.getByRole('button', { name: '打开仓库', exact: true }).click();
   expect((await failedOpenPromise).status()).toBe(400);
+  await expect(page.locator('.home-feedback')).toBeVisible();
+  await enterRepositoryLocation(page, root);
+  const openResponse = page.waitForResponse((response) => response.url() === `${apiOrigin}/api/open`);
+  await page.getByRole('button', { name: '打开仓库', exact: true }).click();
+  expect((await openResponse).status()).toBe(200);
+  await expect(page.getByRole('treeitem', { name: 'main.ts', exact: true })).toBeVisible();
   const updatedPath = path.join(root, 'auto-added.ts');
   await writeFile(updatedPath, 'export const observed = true;\n');
   await expect(page.getByRole('treeitem', { name: 'auto-added.ts', exact: true })).toBeVisible({ timeout: 10_000 });
-  await expect(page.getByRole('button', { name: '重新扫描' }).first()).toBeEnabled();
+  await page.locator('.repo-menu > summary').click();
+  await expect(page.locator('.repo-menu').getByRole('button', { name: '重新扫描' })).toBeEnabled();
+  await page.keyboard.press('Escape');
   await page.getByRole('treeitem', { name: 'main.ts', exact: true }).click();
   await unlink(path.join(root, 'main.ts'));
   await expect(page.getByRole('treeitem', { name: 'main.ts', exact: true })).toHaveCount(0, { timeout: 10_000 });
@@ -748,7 +778,7 @@ test('A4c only the newest open commits, and close cancels a scan already in prog
 
 test('A5 changing graph directory must retain the new directory filter', async ({ page }) => {
   await page.goto('/');
-  await page.getByRole('button', { name: '第 1 步：从入口开始' }).waitFor();
+  await openTourSteps(page);
   const filter = page.getByLabel('筛选图谱目录');
   await filter.selectOption('src/components');
   await expect(filter).toHaveValue('src/components');
@@ -795,6 +825,7 @@ test('all three target viewports can follow, complete, restart, and return to th
   for (const viewport of [{ width: 1440, height: 900 }, { width: 1024, height: 768 }, { width: 375, height: 812 }]) {
     const page = await createReturningPage(browser, { viewport });
     await page.goto('/');
+    await openTourSteps(page);
     const steps = page.locator('.tour-step');
     await expect(steps).toHaveCount(5);
     await steps.nth(0).click();
@@ -805,9 +836,13 @@ test('all three target viewports can follow, complete, restart, and return to th
         await expect(steps.nth(4)).toHaveAttribute('aria-current', 'step');
         await page.getByRole('button', { name: '完成导览' }).click();
       }
-      await expect(steps.nth(index)).toHaveAttribute('aria-current', 'step');
-      if (index < 4) await expect(page.locator('.source-line.is-focused')).toBeVisible();
+      if (index < 4) {
+        await expect(steps.nth(index)).toHaveAttribute('aria-current', 'step');
+        await expect(page.locator('.source-line.is-focused')).toBeVisible();
+      }
     }
+    await expect(page.locator('.tourbar')).toBeHidden();
+    await page.locator('.route-visibility-trigger').click();
     await expect(page.getByRole('button', { name: '导览已完成' })).toBeVisible();
     if (viewport.width <= 860) {
       await page.getByRole('button', { name: '依赖图' }).click();
@@ -817,7 +852,12 @@ test('all three target viewports can follow, complete, restart, and return to th
       await page.getByRole('button', { name: '详情' }).click();
       await expect(page.locator('.source-line.is-focused')).toBeVisible();
     }
-    await page.getByRole('button', { name: '重新开始导览' }).click();
+    const resetTour = page.getByRole('button', { name: '重新开始当前路线' });
+    const resetBounds = await resetTour.boundingBox();
+    expect(resetBounds, `route reset should remain within ${viewport.width}px viewport`).not.toBeNull();
+    expect(resetBounds!.x).toBeGreaterThanOrEqual(0);
+    expect(resetBounds!.x + resetBounds!.width).toBeLessThanOrEqual(viewport.width);
+    await resetTour.click();
     await expect(steps.nth(0)).toHaveAttribute('aria-current', 'step');
     await page.close();
   }
@@ -870,7 +910,7 @@ test('current node remains visible after resizing a graph with several neighbors
   await writeFile(path.join(root, 'c.ts'), 'export const c = 3;\n');
   await openOnly(page, root);
   await page.getByRole('treeitem', { name: 'main.ts', exact: true }).click();
-  await expect(page.getByText(/当前文件的一跳关系 · 4\/4 个节点/)).toBeVisible();
+  await expect(page.getByText(/当前文件及其直接关联 · 4\/4 个节点/)).toBeVisible();
   await page.getByRole('button', { name: '定位当前文件', exact: true }).click();
   await page.setViewportSize({ width: 1024, height: 768 });
   expect(isGraphNodeWithinBounds(await waitForStableGraphGeometry(page))).toBe(true);
@@ -902,11 +942,12 @@ test('graph remains in bounds when resizing during tour navigation animation', a
   page.on('console', (message) => { if (message.type() === 'error') runtimeErrors.push(message.text()); });
   page.on('pageerror', (error) => runtimeErrors.push(error.message));
   await page.goto('/');
-  await page.getByRole('button', { name: '第 3 步：列表拆分为组件' }).click();
+  await openTourSteps(page);
+  await page.getByRole('button', { name: '第 3 步：查看列表渲染' }).click();
   await page.setViewportSize({ width: 1024, height: 768 });
   expect(isGraphNodeWithinBounds(await waitForStableGraphGeometry(page))).toBe(true);
 
-  await page.getByRole('button', { name: '第 5 步：服务提供初始数据' }).click();
+  await page.getByRole('button', { name: '第 5 步：查看数据来源' }).click();
   await page.setViewportSize({ width: 375, height: 812 });
   await page.getByRole('button', { name: '依赖图', exact: true }).click();
   expect(isGraphNodeWithinBounds(await waitForStableGraphGeometry(page))).toBe(true);
@@ -962,7 +1003,7 @@ test('graph separates file cards when a drag would make them overlap', async ({ 
 
   const main = page.locator('.react-flow__node[data-id="main.ts"]');
   const dependency = page.locator('.react-flow__node[data-id="dep.ts"]');
-  const beforeGeometry = await waitForStableGraphGeometry(page, { expectedNodeIds: ['main.ts', 'dep.ts'], minimumNodeCount: 2 });
+  await waitForStableGraphGeometry(page, { expectedNodeIds: ['main.ts', 'dep.ts'], minimumNodeCount: 2 });
   const mainBox = await main.boundingBox();
   const dependencyBox = await dependency.boundingBox();
   if (!mainBox || !dependencyBox) throw new Error('Graph nodes must have measurable bounds before dragging.');

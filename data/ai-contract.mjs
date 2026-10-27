@@ -17,7 +17,19 @@ export const AiGenerationEnvelopeSchema = z.object({
   repositoryId: z.string().min(1),
   entryFileId: z.string().min(1),
   mode: z.enum(["explanation", "route", "question"]),
+  chatPersisted: z.boolean().optional(),
+  warning: z.string().optional(),
 }).strict();
+
+export const AiStreamEventSchema = z.object({
+  type: z.enum(["status", "text", "replace", "complete", "error"]),
+  requestId: z.string().min(1), repositoryId: z.string().min(1), revision: z.string().min(1),
+  text: z.string().max(1_000_000).optional(),
+  status: z.enum(["generating", "validating", "repairing"]).optional(),
+  result: AiGenerationEnvelopeSchema.optional(), code: z.string().optional(), error: z.string().optional(),
+}).strict().superRefine((event, context) => {
+  if (["text", "replace"].includes(event.type) && event.text === undefined || event.type === "complete" && !event.result || event.type === "error" && !event.error || event.type === "status" && !event.status) context.addIssue({ code: "custom", message: "incomplete stream event" });
+});
 
 export const AiScopeCandidateSchema = z.object({
   fileId: z.string().min(1),

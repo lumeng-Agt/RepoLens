@@ -4,9 +4,9 @@ import { watch } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { scanRepository } from "../data/localRepository.mjs";
-import { cleanupGitHubRepository, cleanupPendingGitHubContent, parseGitHubRepositoryUrl, prepareGitHubRepository } from "../data/githubRepository.mjs";
-import { AiGenerationEnvelopeSchema, AiPreviewResponseSchema, createAiGenerationEnvelope } from "../data/ai-contract.mjs";
-import { AI_PROMPT_VERSION, requestChatCompletion, validateAiResult } from "../data/ai-generation.mjs";
+import { cleanupGitHubRepository, cleanupPendingGitHubContent, fetchGitHubRevision, parseGitHubRepositoryUrl, prepareGitHubRepository } from "../data/githubRepository.mjs";
+import { AiGenerationEnvelopeSchema, AiPreviewResponseSchema, AiStreamEventSchema, createAiGenerationEnvelope } from "../data/ai-contract.mjs";
+import { AI_PROMPT_VERSION, ModelRedirectError, requestChatCompletion, validateAiResult } from "../data/ai-generation.mjs";
 import { collectAiCandidates, questionCandidateIds, rankGoalCandidates, selectAiContext } from "../data/ai-context.mjs";
 import { rankQuestionCandidates } from "../data/question-retrieval.mjs";
 import { estimateTokens } from "../data/token-estimate.mjs";
@@ -15,6 +15,7 @@ import { buildRepositoryOverview } from "../data/repository-overview.mjs";
 import { compareRepositoryRevisions } from "../data/revision-comparison.mjs";
 import { createRepositoryCommandRegistry } from "../data/repository-command.mjs";
 import { createWorkspaceStore } from "../data/workspace-store.mjs";
+import { buildAiChatCompletion } from "../data/ai-chat-completion.mjs";
 import { readJsonRequestBody, sendJson, validateLocalRequest } from "../data/local-http.mjs";
 import { createSerialTaskQueue } from "../data/serial-task-queue.mjs";
 import { createOperationRecorder } from "../data/operation-log.mjs";
@@ -32,6 +33,8 @@ import {
   RepositoryRescanRequestSchema,
   RepositoryRevisionEventSchema,
   RepositorySnapshotSchema,
+  RevisionFetchRequestSchema,
+  RevisionFetchResponseSchema,
   SearchRequestSchema,
   SearchResponseSchema,
   RepositoryOverviewSchema,
@@ -47,6 +50,7 @@ const uiPort = Number(process.env.REPOLENS_UI_PORT ?? 5173);
 const workspaceDirectory = process.env.REPOLENS_USER_DATA_PATH
   ?? (process.platform === "win32" ? path.join(process.env.LOCALAPPDATA ?? path.join(os.homedir(), "AppData", "Local"), "RepoLens") : path.join(os.homedir(), ".local", "share", "repolens"));
 const workspaceStore = createWorkspaceStore(workspaceDirectory);
+const activeChatOperations = new Set();
 const modelTimeoutMs = Math.max(100, Number(process.env.REPOLENS_AI_TIMEOUT_MS ?? 45_000));
 const allowedOrigins = new Set([`http://127.0.0.1:${uiPort}`, `http://localhost:${uiPort}`, "http://127.0.0.1:8787", "http://localhost:8787", ...(process.env.REPOLENS_ALLOWED_ORIGINS ?? "").split(",").filter(Boolean)]);
 let session = null;
@@ -80,6 +84,26 @@ const githubOperations = new Set();
 const githubRescanQueue = createSerialTaskQueue();
 const operationRecorder = createOperationRecorder({ onRecord: (record) => process.stdout.write(`[RepoLens operation] ${JSON.stringify(record)}\n`) });
 const settings = { baseUrl: process.env.REPOLENS_AI_BASE_URL ?? "", model: process.env.REPOLENS_AI_MODEL ?? "", apiKey: process.env.REPOLENS_AI_API_KEY ?? "" };
+let settingsSaveId = 0;
+const settingsSaveWaiters = new Map();
+async function persistModelSettings(value) {
+  if (process.env.REPOLENS_DESKTOP_SETTINGS !== "1") return;
+  if (!process.connected) throw new Error("桌面连接已中断，模型配置未保存。");
+  return new Promise((resolve, reject) => {
+    const id = ++settingsSaveId;
+    const timeout = setTimeout(() => { settingsSaveWaiters.delete(id); reject(new Error("保存模型配置超时，请重试。")); }, 5000);
+    settingsSaveWaiters.set(id, { resolve, reject, timeout });
+    process.send({ type: "model-settings:save", id, settings: value });
+  });
+}
+process.on("message", (message) => {
+  if (message?.type !== "model-settings:saved") return;
+  const pending = settingsSaveWaiters.get(message.id);
+  if (!pending) return;
+  clearTimeout(pending.timeout); settingsSaveWaiters.delete(message.id);
+  if (message.ok) pending.resolve(); else pending.reject(new Error("无法加密保存模型配置，请重试。"));
+});
+
 const cache = new Map();
 const digest = (value) => createHash("sha256").update(value).digest("hex");
 const json = sendJson;
@@ -260,7 +284,7 @@ function collectQuestionCandidates(fileId, question) {
 }
 function buildPreview(input) {
   if (!session || input.repositoryId !== session.snapshot.id || !["explanation", "route", "question"].includes(input.mode)) throw new Error("仓库或生成类型无效。");
-  if (!settings.baseUrl || !settings.model || !settings.apiKey) throw new Error("请先配置完整的本地模型服务、模型名称和密钥。预览不会发送源码。");
+  if (!settings.baseUrl || !settings.model || !settings.apiKey) throw new Error("请先填写模型服务地址、模型名称和 API 密钥。预览不会发送源码。");
   if (input.mode === "question" && (!String(input.question ?? "").trim() || String(input.question).length > 12_000)) throw new Error("请输入不超过 12,000 字符的问题。");
   if (input.mode === "route" && String(input.goal ?? "").length > 300) throw new Error("导览目标不能超过 300 个字符。");
   const retrieval = input.mode === "question" ? collectQuestionCandidates(input.fileId, input.question) : null;
@@ -342,13 +366,15 @@ const server = createServer(async (request, response) => {
     }
     if (request.method === "POST" && url.pathname === "/api/workspace") {
       const input = parseRequest(await body(request), WorkspaceMutationRequestSchema, "工作区操作");
-      if (input.action !== "guide-preferences" && input.repositoryId.length > 160) return json(response, 400, { error: "工作区编号无效。" });
+      if (input.repositoryId && input.repositoryId.length > 160) return json(response, 400, { error: "工作区编号无效。" });
       const { repositoryId } = input;
       let result;
       const telemetry = operationRecorder.start("workspace.mutate", { repositoryId: repositoryId ?? "global", action: String(input.action ?? "unknown") });
       try {
       if (input.action === "guide-preferences") {
         result = await workspaceStore.saveGuidePreferences(input.preferences);
+      } else if (input.action === "layout-preferences") {
+        result = await workspaceStore.saveLayoutPreferences(input.preferences);
       } else if (input.action === "recent-touch") {
         if (!matchesPersistenceSession(input)) return json(response, 409, { error: "仓库会话已变化，最近记录未保存。" });
         const originInfo = session.snapshot.origin?.kind === "github" ? session.snapshot.origin : null;
@@ -387,9 +413,12 @@ const server = createServer(async (request, response) => {
         else if (input.action === "reading-notes") result = await workspaceStore.saveReadingNotes(workspaceId, input.notes);
         else result = await workspaceStore.saveTours(workspaceId, input.tours);
       } else if (input.action === "clear-all") {
+        for (const operation of activeChatOperations) operation.controller.abort();
         result = await workspaceStore.clearAll();
+        if (result.persisted) { await persistModelSettings(null); Object.assign(settings, { baseUrl: "", model: "", apiKey: "" }); invalidatePreviews(); }
       } else if (input.action === "clear-repository") {
         if (!matchesPersistenceSession(input)) return json(response, 409, { error: "仓库会话已变化，保存数据未清除。" });
+        for (const operation of activeChatOperations) if (operation.workspaceId === (session.snapshot.workspaceId ?? repositoryId)) operation.controller.abort();
         result = await workspaceStore.clearRepository(session.snapshot.workspaceId ?? repositoryId);
       } else return json(response, 400, { error: "工作区操作类型无效。" });
       return validatedJson(response, 200, { ok: result.persisted, warning: result.warning }, WorkspaceSaveResponseSchema, "工作区保存");
@@ -560,6 +589,39 @@ const server = createServer(async (request, response) => {
       if (session?.snapshot.id !== repositoryId || session.snapshot.revision !== revision) return json(response, 409, { error: "仓库已变化，概览结果已失效。" });
       return validatedJson(response, 200, value, RepositoryOverviewSchema, "仓库概览");
     }
+    if (request.method === "POST" && url.pathname === "/api/compare/fetch") {
+      const input = parseRequest(await body(request), RevisionFetchRequestSchema, "获取 GitHub 版本请求");
+      if (!matchesPersistenceSession(input)) return json(response, 409, { error: "仓库会话已变化，请重新打开后再获取版本。" });
+      if (input.revision !== session.snapshot.revision) return json(response, 409, { error: "仓库内容已变化，请重新打开获取窗口。" });
+      if (!session.githubWorkspace) return json(response, 409, { error: "只有 RepoLens 管理的 GitHub 仓库支持获取历史；本地仓库不会被修改。" });
+      const activeSession = session;
+      const workspace = activeSession.githubWorkspace;
+      const generation = sessionGeneration;
+      const operation = beginGitHubOperation(activeSession.snapshot.id, generation);
+      response.on("close", () => { if (!response.writableEnded) operation.controller.abort(); });
+      const telemetry = operationRecorder.start("github.history.fetch", { repositoryId: activeSession.snapshot.id, targetKind: /^[0-9a-f]{40,64}$/i.test(input.target) ? "commit" : "named-ref" });
+      try {
+        const outcome = await enqueueGitHubRescan(operation, async () => {
+          const fetched = await fetchGitHubRevision(workspace, input.target, { signal: operation.controller.signal });
+          if (operation.controller.signal.aborted || generation !== sessionGeneration || session !== activeSession || session.snapshot.revision !== input.revision) {
+            return { status: 409, value: { error: "仓库会话已变化，获取结果已失效。" } };
+          }
+          return { status: 200, value: { repositoryId: input.repositoryId, workspaceId: input.workspaceId, revision: input.revision, ...fetched } };
+        });
+        telemetry.finish(outcome.status === 200 ? "ok" : "stale");
+        return outcome.status === 200
+          ? validatedJson(response, outcome.status, outcome.value, RevisionFetchResponseSchema, "GitHub 版本获取")
+          : json(response, outcome.status, outcome.value);
+      } catch (error) {
+        telemetry.finish(error?.name === "AbortError" ? "cancelled" : "error", { message: error instanceof Error ? error.message : "GitHub 版本获取失败" });
+        if (error?.name === "AbortError" && !response.destroyed) return json(response, 409, { code: "OPERATION_CANCELLED", error: "GitHub 版本获取已取消。" });
+        if (error?.code && error?.status) return json(response, error.status, { code: error.code, error: error.message });
+        throw error;
+      } finally {
+        githubOperations.delete(operation);
+        operation.finish();
+      }
+    }
     if (request.method === "POST" && url.pathname === "/api/compare") {
       const input = parseRequest(await body(request), RevisionComparisonRequestSchema, "版本比较请求");
       if (!session || input.repositoryId !== session.snapshot.id) return json(response, 409, { error: "仓库会话已变化，请重新选择比较范围。" });
@@ -578,6 +640,7 @@ const server = createServer(async (request, response) => {
         return validatedJson(response, 200, value, RevisionComparisonResponseSchema, "版本比较");
       } catch (error) {
         telemetry.finish(error?.name === "AbortError" ? "cancelled" : "error", { message: error instanceof Error ? error.message : "比较失败" });
+        if (error?.code === "REVISION_OBJECT_MISSING" && session.githubWorkspace) return json(response, 409, { code: error.code, error: error.message });
         throw error;
       }
     }
@@ -595,9 +658,9 @@ const server = createServer(async (request, response) => {
       const baseUrl = String(input.baseUrl ?? "").trim();
       if (baseUrl) { const parsed = new URL(baseUrl); if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password || parsed.search || parsed.hash) throw new Error("模型地址须为不含账号信息的 HTTP(S) 服务地址。"); }
       const serviceChanged = baseUrl !== settings.baseUrl || String(input.model ?? "").trim() !== settings.model;
-      settings.baseUrl = baseUrl; settings.model = String(input.model ?? "").trim();
-      if (typeof input.apiKey === "string" && input.apiKey) settings.apiKey = input.apiKey;
-      else if (input.clearKey || serviceChanged) settings.apiKey = "";
+      const nextSettings = { baseUrl, model: String(input.model ?? "").trim(), apiKey: typeof input.apiKey === "string" && input.apiKey ? input.apiKey : input.clearKey || serviceChanged ? "" : settings.apiKey };
+      await persistModelSettings(nextSettings);
+      Object.assign(settings, nextSettings);
       invalidatePreviews();
       return validatedJson(response, 200, { baseUrl: settings.baseUrl, model: settings.model, configured: Boolean(settings.baseUrl && settings.model && settings.apiKey) }, AiSettingsResponseSchema, "模型设置");
     }
@@ -627,6 +690,8 @@ const server = createServer(async (request, response) => {
       let aiTelemetry;
       let aiOutcome = "error";
       let aiCached = false;
+      let chatOperation;
+      let emit;
       try {
         const input = parseRequest(await body(request), AiGenerationRequestSchema, "AI 生成请求");
         ensureActive();
@@ -634,50 +699,104 @@ const server = createServer(async (request, response) => {
         if (!preview || preview.used) return json(response, 409, { error: "发送确认已失效或已使用，请重新预览。" });
         // Claim the confirmation before the first asynchronous verification.
         preview.used = true;
+        const originSession = session;
+        if (input.chat) {
+          chatOperation = { controller, workspaceId: originSession.snapshot.workspaceId ?? preview.repositoryId };
+          activeChatOperations.add(chatOperation);
+        }
         aiTelemetry = operationRecorder.start("ai.generate", { repositoryId: preview.repositoryId, mode: preview.mode });
         await refreshPreviewRepository(preview);
         ensureActive();
         const context = contextFromPreview(preview);
+        const stream = request.headers.accept?.includes("text/event-stream") === true;
+        let shownAnswer = "";
+        if (stream) {
+          response.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no" });
+          response.flushHeaders();
+          emit = (event, allowAborted = false) => {
+            if (!allowAborted) ensureActive();
+            response.write(`data: ${JSON.stringify(AiStreamEventSchema.parse({ requestId: input.previewId, repositoryId: context.repositoryId, revision: context.revision, ...event }))}\n\n`);
+          };
+          emit({ type: "status", status: "generating" });
+        }
+        const streamOptions = stream && context.mode === "question" && input.stream !== false ? { stream: true, onAnswer: (answer) => {
+          if (answer.startsWith(shownAnswer)) emit({ type: "text", text: answer.slice(shownAnswer.length) });
+          else emit({ type: "replace", text: answer });
+          shownAnswer = answer;
+        } } : {};
+        const respond = async (result, cached) => {
+          const envelope = createAiGenerationEnvelope(result, context, cached);
+          if (input.chat) {
+            ensureActive();
+            const completion = buildAiChatCompletion(context, result, input.chat);
+            const persisted = await workspaceStore.commitAiChatCompletion(chatOperation.workspaceId, input.chat.conversationId, completion.messages, completion.artifacts, () => !controller.signal.aborted);
+            ensureActive();
+            envelope.chatPersisted = persisted.persisted;
+            if (persisted.warning) envelope.warning = persisted.warning;
+          }
+          if (emit) { emit({ type: "complete", result: AiGenerationEnvelopeSchema.parse(envelope) }); response.end(); return; }
+          return validatedJson(response, 200, envelope, AiGenerationEnvelopeSchema, "AI 生成");
+        };
         const key = digest(JSON.stringify([AI_PROMPT_VERSION, context.baseUrl, context.model, digest(context.apiKey), context.mode, context.entryFileId, context.goal ?? null, context.question ?? null, context.history ?? [], context.sources.map((source) => [source.fileId, source.contentHash, source.startLine, source.endLine])]));
         if (cache.has(key)) {
           const result = validateAiResult(cache.get(key), context);
           ensureActive();
           aiOutcome = "ok";
           aiCached = true;
-          return validatedJson(response, 200, createAiGenerationEnvelope(result, context, true), AiGenerationEnvelopeSchema, "AI 生成");
+          return await respond(result, true);
         }
 
         timeout = setTimeout(cancelForTimeout, modelTimeoutMs);
         timeout.unref?.();
         ensureActive();
         let raw; let result; let needsRepair = false;
-        try { raw = await requestChatCompletion(context, context.mode, controller.signal); result = validateAiResult(raw, context); }
+        try { raw = await requestChatCompletion(context, context.mode, controller.signal, false, fetch, streamOptions); emit?.({ type: "status", status: "validating" }); result = validateAiResult(raw, context); }
         catch (error) {
           if (error.name === "AbortError") {
             if (clientCancelled) throw error;
             throw new Error("模型请求超时或已取消。");
           }
+          if (error instanceof ModelRedirectError) throw error;
+          if (error.code) throw error;
           if (error instanceof SyntaxError || /格式|引用|源码/.test(error.message)) needsRepair = true;
           else throw error;
         }
         ensureActive();
         if (needsRepair) {
           ensureActive();
-          raw = await requestChatCompletion(context, context.mode, controller.signal, true);
+          emit?.({ type: "replace", text: "" });
+          shownAnswer = "";
+          emit?.({ type: "status", status: "repairing" });
+          raw = await requestChatCompletion(context, context.mode, controller.signal, true, fetch, streamOptions);
           result = validateAiResult(raw, context);
         }
         ensureActive();
-        await refreshPreviewRepository(context);
+        // A confirmed chat owns immutable source text in memory. Switching to a
+        // different repository releases its checkout but does not cancel this job.
+        // If the originating session is still open, retain the final source check.
+        const originatingSessionIsOpen = () => session?.persistenceSessionId === originSession.persistenceSessionId
+          && session?.snapshot.id === originSession.snapshot.id
+          && (session?.snapshot.workspaceId ?? session?.snapshot.id) === (originSession.snapshot.workspaceId ?? originSession.snapshot.id);
+        if (!input.chat || originatingSessionIsOpen()) await refreshPreviewRepository(context);
         ensureActive();
-        if (!session || session.snapshot.id !== context.repositoryId || session.snapshot.revision !== context.revision) throw new Error("生成期间仓库内容发生变化，结果已丢弃。");
+        if ((!input.chat || originatingSessionIsOpen()) && (!session || session.snapshot.id !== context.repositoryId || session.snapshot.revision !== context.revision)) throw conflict("生成期间仓库内容发生变化，结果已丢弃。");
         cache.set(key, result);
         if (cache.size > 50) cache.delete(cache.keys().next().value);
         ensureActive();
         aiOutcome = "ok";
-        return validatedJson(response, 200, createAiGenerationEnvelope(result, context, false), AiGenerationEnvelopeSchema, "AI 生成");
+        return await respond(result, false);
+      } catch (error) {
+        if (emit && !response.destroyed && !response.writableEnded) {
+          // Error events must still be sent after a model timeout aborted its controller.
+          const event = { type: "error", error: error instanceof Error ? error.message : "模型请求失败。", code: error.code };
+          emit(event, true);
+          response.end(); return;
+        }
+        throw error;
       } finally {
         if (aiTelemetry) aiTelemetry.finish(controller.signal.aborted ? "cancelled" : aiOutcome, { cached: aiCached });
         clearTimeout(timeout);
+        if (chatOperation) activeChatOperations.delete(chatOperation);
         request.off("aborted", cancelForClient);
       }
     }

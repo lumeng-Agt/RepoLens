@@ -5,6 +5,7 @@ import path from "node:path";
 
 const APPLICATION_ROOTS = [
   "desktop/main.mjs",
+  "desktop/model-settings.mjs",
   "desktop/preload.cjs",
   "desktop/security-policy.mjs",
   "desktop/renderer",

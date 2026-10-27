@@ -110,6 +110,40 @@ test("local service opens GitHub URLs, retains failed-open sessions, and refresh
   const mainWorkspaceId = snapshot.workspaceId;
   assert.ok(mainWorkspaceId, "GitHub snapshots expose a stable ref-scoped persistence identity");
   assert.ok(snapshot.persistenceSessionId, "opened snapshots carry their persistence session identity");
+
+  const featureCommitForFetch = git(working, "rev-parse", "refs/heads/feature/test");
+  const fetchRequest = (target, overrides = {}) => ({
+    repositoryId: snapshot.id,
+    workspaceId: snapshot.workspaceId,
+    persistenceSessionId: snapshot.persistenceSessionId,
+    revision: snapshot.revision,
+    target,
+    ...overrides,
+  });
+  const missingCompare = await api("/api/compare", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repositoryId: snapshot.id, revision: snapshot.revision, mode: "commits", baseRef: snapshot.origin.commit, headRef: "refs/heads/feature/test" }) });
+  assert.equal(missingCompare.status, 409);
+  assert.equal((await missingCompare.json()).code, "REVISION_OBJECT_MISSING", "a missing GitHub object is reported distinctly so the user can choose to fetch it");
+  for (const invalidTarget of ["feature/test", featureCommitForFetch.slice(0, 12), "https://github.com/elsewhere/repo", "--upload-pack=evil"]) {
+    const invalidFetch = await api("/api/compare/fetch", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(fetchRequest(invalidTarget)) });
+    assert.equal(invalidFetch.status, 400, `unqualified or unsafe target is rejected before Git runs: ${invalidTarget}`);
+  }
+  const staleFetch = await api("/api/compare/fetch", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(fetchRequest("refs/heads/feature/test", { revision: "stale-revision" })) });
+  assert.equal(staleFetch.status, 409, "history fetch is bound to the active repository revision");
+  const absentFetch = await api("/api/compare/fetch", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(fetchRequest("refs/heads/not-found")) });
+  assert.equal(absentFetch.status, 404);
+  assert.equal((await absentFetch.json()).code, "REVISION_TARGET_MISSING");
+  const sessionBeforeFetch = { id: snapshot.id, workspaceId: snapshot.workspaceId, persistenceSessionId: snapshot.persistenceSessionId, revision: snapshot.revision, sequence: snapshot.sequence, ref: snapshot.origin.resolvedRef, commit: snapshot.origin.commit };
+  const fetchResponse = await api("/api/compare/fetch", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(fetchRequest("refs/heads/feature/test")) });
+  assert.equal(fetchResponse.status, 200, JSON.stringify(await fetchResponse.clone().json()));
+  const fetchResult = await fetchResponse.json();
+  assert.equal(fetchResult.commit, featureCommitForFetch);
+  assert.equal(fetchResult.objectsAvailable, true);
+  snapshot = await (await api("/api/snapshot?repositoryId=" + snapshot.id)).json();
+  assert.deepEqual({ id: snapshot.id, workspaceId: snapshot.workspaceId, persistenceSessionId: snapshot.persistenceSessionId, revision: snapshot.revision, sequence: snapshot.sequence, ref: snapshot.origin.resolvedRef, commit: snapshot.origin.commit }, sessionBeforeFetch, "fetching comparison history does not switch or revise the active snapshot");
+  const fetchedCompare = await api("/api/compare", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repositoryId: snapshot.id, revision: snapshot.revision, mode: "commits", baseRef: snapshot.origin.commit, headRef: fetchResult.commit }) });
+  assert.equal(fetchedCompare.status, 200, JSON.stringify(await fetchedCompare.clone().json()));
+  assert.ok((await fetchedCompare.json()).files.some((file) => file.path === "src/main.ts"), "the fetched object can be compared after explicit confirmation");
+
   const shortCommitOpen = await api("/api/open", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: `https://github.com/repolens-test/demo/tree/${snapshot.origin.commit.slice(0, 7)}`, command: command() }) });
   assert.equal(shortCommitOpen.status, 200, JSON.stringify(await shortCommitOpen.clone().json()));
   const shortCommitSnapshot = await shortCommitOpen.json();

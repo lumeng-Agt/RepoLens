@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
 import { AI_PROMPT_VERSION, buildChatCompletionRequest, requestChatCompletion, validateAiResult } from "./ai-generation.mjs";
 
 const context = {
@@ -63,4 +64,57 @@ test("mockable Chat Completions client preserves abort signal and parses JSON", 
   assert.equal(captured.url, "https://model.example/v1/chat/completions");
   assert.equal(captured.options.signal, controller.signal);
   assert.equal(captured.options.headers.Authorization, "Bearer secret");
+  assert.equal(captured.options.redirect, "manual");
+});
+
+test("chat completion rejects every redirect without contacting its target", async (testContext) => {
+  let targetRequests = 0;
+  const target = createServer((_request, response) => {
+    targetRequests += 1;
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ choices: [{ message: { content: "{}" } }] }));
+  });
+  const targetPort = await new Promise((resolve, reject) => {
+    target.once("error", reject);
+    target.listen(0, "127.0.0.1", () => resolve(target.address().port));
+  });
+  const redirector = createServer((request, response) => {
+    const url = new URL(request.url, "http://127.0.0.1");
+    if (url.pathname.startsWith("/target/")) {
+      targetRequests += 1;
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ choices: [{ message: { content: "{}" } }] }));
+      return;
+    }
+    const status = Number(url.searchParams.get("status"));
+    const targetKind = url.searchParams.get("target");
+    const location = targetKind === "same-origin"
+      ? `http://127.0.0.1:${redirector.address().port}/target/${status}`
+      : targetKind === "cross-port"
+        ? `http://127.0.0.1:${targetPort}/target/${status}`
+        : `http://localhost:${targetPort}/target/${status}`;
+    response.writeHead(status, { Location: location });
+    response.end();
+  });
+  const redirectorPort = await new Promise((resolve, reject) => {
+    redirector.once("error", reject);
+    redirector.listen(0, "127.0.0.1", () => resolve(redirector.address().port));
+  });
+  testContext.after(async () => {
+    await Promise.all([redirector, target].map((server) => new Promise((resolve, reject) => {
+      server.closeAllConnections();
+      server.close((error) => error ? reject(error) : resolve());
+    })));
+  });
+
+  for (const status of [301, 302, 303, 307, 308]) {
+    for (const targetKind of ["same-origin", "cross-port", "cross-host"]) {
+      await assert.rejects(
+        requestChatCompletion({ ...context, baseUrl: `http://127.0.0.1:${redirectorPort}/v1?status=${status}&target=${targetKind}` }, "explanation"),
+        (error) => error.code === "MODEL_REDIRECT",
+        `${status} ${targetKind} redirect must be rejected`,
+      );
+      assert.equal(targetRequests, 0, `${status} ${targetKind} target must receive no request`);
+    }
+  }
 });

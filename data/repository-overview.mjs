@@ -34,7 +34,7 @@ export async function buildRepositoryOverview(root, snapshot) {
   const candidates = snapshot.files.filter((file) => !incoming.has(file.id) || preferred.test(file.name)).map((file) => ({
     fileId: file.id,
     path: file.path,
-    reason: preferred.test(file.name) ? "入口名称候选" : "没有仓库内文件直接导入此文件",
+    reason: preferred.test(file.name) ? "文件名符合常见入口命名" : "没有仓库内文件直接引用此文件",
   })).sort((a, b) => Number(preferred.test(path.posix.basename(b.path))) - Number(preferred.test(path.posix.basename(a.path))) || a.path.localeCompare(b.path)).slice(0, 12);
   const directories = new Map();
   const languages = new Map();
@@ -56,6 +56,6 @@ export async function buildRepositoryOverview(root, snapshot) {
     tests: tests.slice(0, 30),
     testCount: tests.length,
     diagnosticCount: snapshot.diagnostics?.length ?? 0,
-    limitations: "入口是基于静态引用和文件名的候选；依赖关系表示静态引用，不代表运行时调用。",
+    limitations: "入口是根据静态引用和文件名筛出的候选；依赖关系表示静态引用，不代表运行时调用。",
   };
 }

@@ -85,6 +85,28 @@ async function waitForTcp(port, child) {
   }
   throw new Error("RepoLens UI did not start listening.");
 }
+async function openRepositoryHome(page) {
+  const heading = page.getByRole("heading", { name: "打开仓库，开始阅读" });
+  if (!await heading.isVisible().catch(() => false)) {
+    const menu = page.locator(".repo-menu");
+    const isOpen = await menu.evaluate((element) => element.open);
+    if (!isOpen) await menu.locator("summary").click();
+    await menu.getByRole("button", { name: "返回首页", exact: true }).click();
+  }
+  await heading.waitFor({ state: "visible", timeout: 30_000 });
+}
+async function openSample(page) {
+  const menu = page.locator(".repo-menu");
+  const isOpen = await menu.evaluate((element) => element.open);
+  if (!isOpen) await menu.locator("summary").click();
+  await menu.getByRole("button", { name: "打开示例", exact: true }).click();
+}
+async function setDisclosureOpen(page, selector, open) {
+  const disclosure = page.locator(selector);
+  const isOpen = await disclosure.evaluate((element) => element.open);
+  if (isOpen !== open) await disclosure.locator(":scope > summary").click();
+  await page.waitForFunction(({ selector, open }) => document.querySelector(selector)?.open === open, { selector, open });
+}
 
 const fixtureSources = {
   "src/index.ts": 'import { summarize } from "@/summary";\nexport const output = summarize([]);\n',
@@ -190,8 +212,9 @@ try {
   page.setDefaultTimeout(15_000);
 
   await page.goto(uiOrigin, { waitUntil: "domcontentloaded" });
-  await page.locator(".graph-file-card").first().waitFor({ state: "visible" });
-  await page.getByLabel("本地仓库路径或 GitHub 链接").fill("https://github.com/repolens-test/ai-fixture/tree/main/src");
+  await page.locator('[data-app-ready="true"]:visible').waitFor({ state: "visible", timeout: 15_000 });
+  await openRepositoryHome(page);
+  await page.getByLabel("本地路径或 GitHub 仓库链接").fill("https://github.com/repolens-test/ai-fixture/tree/main/src");
   const openedResponse = page.waitForResponse((response) => response.url() === apiOrigin + "/api/open");
   await page.getByRole("button", { name: "打开仓库" }).click();
   assert.equal((await openedResponse).status(), 200);
@@ -252,10 +275,12 @@ try {
   const routeTask = modelRequestBodies[1].messages.find((message) => message.role === "user").content.match(/^任务信息：(.+)$/m);
   assert.ok(routeTask, "the confirmed route request includes task metadata");
   assert.deepEqual(JSON.parse(routeTask[1]), { promptVersion: "prompt-v4", mode: "route", entryFileId: "src/index.ts" });
+  await setDisclosureOpen(page, ".tour-step-disclosure", true);
   const routeStep = page.getByRole("button", { name: "第 1 步：index.ts" });
   await routeStep.waitFor({ state: "visible" });
   await page.getByRole("button", { name: "第 2 步：summary.ts" }).click();
-  assert.match(await page.locator(".tour-description").innerText(), /阅读摘要组织/);
+  await setDisclosureOpen(page, ".tour-step-description", true);
+  assert.match(await page.locator(".tour-step-description > div").innerText(), /阅读摘要组织/);
   assert.equal(modelCalls, 2);
   if (demoEvidenceDirectory) await page.screenshot({ path: path.join(demoEvidenceDirectory, "mock-ai-reading-route.png") });
 
@@ -297,6 +322,7 @@ try {
   assert.ok(statusTask, "the model request follows the newly selected file");
   assert.equal(JSON.parse(statusTask[1]).entryFileId, "src/status.ts");
 
+  await setDisclosureOpen(page, ".repo-menu", true);
   const repositoryResponse = page.waitForResponse((response) => response.url() === apiOrigin + "/api/rescan");
   await page.getByRole("button", { name: "检查远端更新" }).first().click();
   const unchangedSnapshot = await repositoryResponse;
@@ -304,8 +330,10 @@ try {
   const unchangedValue = await unchangedSnapshot.json();
   assert.equal(unchangedValue.revision, initialSnapshot.revision);
   assert.equal(unchangedValue.sequence, initialSnapshot.sequence);
-  const originalCommit = await page.locator("[aria-label='GitHub 来源信息']").innerText();
-  assert.match(originalCommit, /refs\/heads\/main/);
+  assert.match(await page.locator(".workspace-context-label").innerText(), /refs\/heads\/main/);
+  await setDisclosureOpen(page, ".overview-disclosure", true);
+  await page.getByText(`commit · ${initialSnapshot.origin.commit}`).waitFor({ state: "visible" });
+  await setDisclosureOpen(page, ".overview-disclosure", false);
   const parallelRescans = await Promise.all(Array.from({ length: 2 }, () => fetch(`${apiOrigin}/api/rescan`, {
     method: "POST", headers: { Origin: uiOrigin, "Content-Type": "application/json" }, body: JSON.stringify({ repositoryId: initialSnapshot.id }),
   })));
@@ -317,6 +345,7 @@ try {
   git(work, "add", "src/index.ts");
   git(work, "commit", "-m", "remote update");
   git(work, "push", "origin", "main");
+  await setDisclosureOpen(page, ".repo-menu", true);
   const updatedResponsePromise = page.waitForResponse((response) => response.url() === apiOrigin + "/api/rescan");
   await page.getByRole("button", { name: "检查远端更新" }).first().click();
   const updatedResponse = await updatedResponsePromise;
@@ -328,15 +357,15 @@ try {
   await page.getByRole("tab", { name: "讲解", exact: true }).click();
   await page.waitForFunction(() => document.querySelector('button[aria-label="第 1 步：index.ts"]')?.disabled === true);
   assert.equal(await page.getByRole("button", { name: "第 1 步：index.ts" }).isDisabled(), true);
-  assert.match(await page.locator(".tour-description").innerText(), /阅读摘要组织/);
-  assert.match(await page.locator(".tour-description").innerText(), /阅读摘要组织/);
+  await setDisclosureOpen(page, ".tour-step-description", true);
+  assert.match(await page.locator(".tour-step-description > div").innerText(), /阅读摘要组织/);
   await page.getByRole("tab", { name: "源码", exact: true }).click();
   await page.locator(".source-code").waitFor({ state: "visible" });
   assert.match(await page.locator(".source-code").innerText(), /export const changed = true/);
   assert.deepEqual(pageErrors, []);
 
   const closeResponse = page.waitForResponse((response) => response.url() === apiOrigin + "/api/close");
-  await page.getByRole("button", { name: "返回示例" }).click();
+  await openSample(page);
   assert.equal((await closeResponse).status(), 200);
   await page.getByText("示例仓库", { exact: true }).waitFor({ state: "visible" });
   const leftovers = (await readdir(tempWorkspaces)).filter((name) => name.startsWith("repolens-github-"));

@@ -1,0 +1,1 @@
+export function buildAiChatCompletion(context: Record<string, unknown>, result: Record<string, unknown>, chat: { conversationId: string; userMessageId: string; answerMessageId: string }): { messages: unknown[]; artifacts: Record<string, unknown> };

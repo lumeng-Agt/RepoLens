@@ -48,6 +48,34 @@ async function waitForTcp(port, child) {
   }
   throw new Error("Local RepoLens UI did not start listening within 30 seconds.");
 }
+async function openRepositoryHome(page) {
+  const heading = page.getByRole("heading", { name: "打开仓库，开始阅读" });
+  if (!await heading.isVisible().catch(() => false)) {
+    const menu = page.locator(".repo-menu");
+    const isOpen = await menu.evaluate((element) => element.open);
+    if (!isOpen) await menu.locator("summary").click();
+    await menu.getByRole("button", { name: "返回首页", exact: true }).click();
+  }
+  await heading.waitFor({ state: "visible", timeout: 30_000 });
+}
+async function openSample(page) {
+  const home = page.getByRole("heading", { name: "打开仓库，开始阅读" });
+  if (await home.isVisible().catch(() => false)) {
+    await page.getByRole("button", { name: "打开示例", exact: true }).click();
+    const guide = page.getByRole("dialog", { name: "使用指南" });
+    if (await guide.isVisible().catch(() => false)) await guide.getByRole("button", { name: "关闭使用指南" }).click();
+  } else {
+    const menu = page.locator(".repo-menu");
+    const isOpen = await menu.evaluate((element) => element.open);
+    if (!isOpen) await menu.locator("summary").click();
+    await menu.getByRole("button", { name: "打开示例", exact: true }).click();
+  }
+}
+async function clickRepositoryMenuAction(page, name) {
+  const menu = page.locator(".repo-menu");
+  if (!await menu.evaluate((element) => element.open)) await menu.locator("summary").click();
+  await menu.getByRole("button", { name, exact: true }).click();
+}
 
 const uiPort = await freePort();
 const apiPort = await freePort();
@@ -118,9 +146,11 @@ try {
       } else await route.continue();
     });
   }
+  const initialWorkspace = page.waitForResponse((response) => response.url().includes("/api/workspace?") && response.request().method() === "GET", { timeout: 120_000 });
   await page.goto(uiOrigin, { waitUntil: "domcontentloaded", timeout: 120_000 });
-  await page.locator(".graph-file-card").first().waitFor({ state: "visible", timeout: 30_000 });
-  await page.getByLabel("本地仓库路径或 GitHub 链接").fill(url);
+  await initialWorkspace;
+  await openRepositoryHome(page);
+  await page.getByLabel("本地路径或 GitHub 仓库链接").fill(url);
   assert.equal(await page.getByRole("button", { name: "打开仓库" }).isEnabled(), true, "the repository URL should enable opening");
   const opened = page.waitForResponse((response) => response.url() === apiOrigin + "/api/open", { timeout: 120_000 });
   await page.getByRole("button", { name: "打开仓库" }).click();
@@ -150,7 +180,7 @@ try {
     assert.ok(resolvedDependencyCounts.package > 0, "the Go project should include resolved package dependencies");
   }
   await page.getByText("GitHub 远端", { exact: true }).waitFor({ state: "visible" });
-  await page.getByText(snapshot.origin.commit.slice(0, 12), { exact: false }).waitFor({ state: "visible" });
+  await page.locator(".workspace-context-label").filter({ hasText: snapshot.origin.commit.slice(0, 12) }).waitFor({ state: "visible" });
   const file = [...snapshot.files].sort((left, right) => left.path.localeCompare(right.path))[0];
   await page.getByRole("treeitem", { name: file.name, exact: true }).click();
   await page.getByRole("tab", { name: "源码", exact: true }).click();
@@ -159,7 +189,7 @@ try {
   assert.ok(sourceText.length > 0, "source should be readable from the local service");
   if (evidenceDirectory) await page.screenshot({ path: path.join(evidenceDirectory, `${evidenceSlug}.png`) });
   const unchangedResponsePromise = page.waitForResponse((response) => response.url() === apiOrigin + "/api/rescan", { timeout: 120_000 });
-  await page.getByRole("button", { name: "检查远端更新" }).first().click();
+  await clickRepositoryMenuAction(page, "检查远端更新");
   const unchangedResponse = await unchangedResponsePromise;
   const unchangedSnapshot = await unchangedResponse.json();
   assert.equal(unchangedResponse.status(), 200, "the public GitHub no-change rescan should succeed: " + (unchangedSnapshot.error ?? "unknown local-service error"));
@@ -170,7 +200,7 @@ try {
   assert.equal(modelRequests, 0, "the smoke check must not send source code to an AI service");
   assert.deepEqual(runtimeErrors, [], "the public repository should open without browser errors");
   const closedResponse = page.waitForResponse((response) => response.url() === apiOrigin + "/api/close", { timeout: 30_000 });
-  await page.getByRole("button", { name: "返回示例" }).click();
+  await openSample(page);
   const closeResult = await closedResponse;
   assert.equal(closeResult.status(), 200, "returning to the sample must wait for successful remote cleanup");
   repositoryClosed = true;

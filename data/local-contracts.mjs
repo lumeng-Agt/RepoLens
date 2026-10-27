@@ -44,6 +44,9 @@ export const UsageGuidePreferencesSchema = z.object({
   checklistOpen: z.boolean(),
   noticeDismissed: z.boolean(),
 }).passthrough();
+const layoutSharesSchema = z.object({ files: z.number().finite().positive().max(100), graph: z.number().finite().positive().max(100), details: z.number().finite().positive().max(100) }).passthrough();
+const readingLayoutSharesSchema = z.object({ files: z.number().finite().positive().max(100), details: z.number().finite().positive().max(100) }).passthrough();
+export const WorkspaceLayoutPreferencesSchema = z.object({ version: z.literal(1), structure: layoutSharesSchema, reading: readingLayoutSharesSchema, chatWidth: z.number().finite().min(320).max(800).optional() }).passthrough();
 const questionReferenceSchema = z.object({ fileId: z.string(), startLine: z.number().int().positive(), endLine: z.number().int().positive().optional() }).passthrough();
 const routeSourceReferenceSchema = z.object({ fileId: z.string(), startLine: z.number().int().positive(), endLine: z.union([z.number().int().positive(), z.null()]).optional() }).passthrough();
 const questionMessageSchema = z.object({
@@ -79,6 +82,7 @@ export const LocalWorkspaceStateSchema = z.object({
   conversations: z.array(conversationSchema), warning: z.string().optional(), persistenceReady: z.boolean().optional(),
   readingNotes: z.array(readingNoteSchema).optional(), savedTours: z.array(savedAiRouteSchema).optional(),
   guidePreferences: UsageGuidePreferencesSchema.nullable().optional(),
+  layoutPreferences: WorkspaceLayoutPreferencesSchema.nullable().optional(),
 }).passthrough();
 
 export const SourceResponseSchema = z.object({ source: z.string(), repositoryId: z.string().optional(), revision: z.string().optional() }).passthrough();
@@ -96,7 +100,7 @@ const repositorySessionSchema = z.object({ repositoryId: z.string().min(1).max(1
 const workspaceRequestBase = repositorySessionSchema.extend({ action: z.string() }).passthrough();
 export const WorkspaceMutationRequestSchema = z.discriminatedUnion("action", [
   workspaceRequestBase.extend({ action: z.literal("recent-touch") }),
-  workspaceRequestBase.extend({ action: z.literal("recent-remove"), targetId: z.string().min(1).max(240).optional() }),
+  z.object({ action: z.literal("recent-remove"), targetId: z.string().min(1).max(240).optional(), repositoryId: z.string().min(1).max(160).optional() }).passthrough(),
   workspaceRequestBase.extend({ action: z.literal("progress"), key: z.string().min(1).max(500), value: z.string() }),
   workspaceRequestBase.extend({ action: z.literal("node-positions"), positions: z.record(z.string(), z.object({ x: z.number().finite(), y: z.number().finite() }).passthrough()) }),
   workspaceRequestBase.extend({ action: z.literal("ai-result"), fileId: z.string().min(1), record: savedAiResultSchema }),
@@ -106,10 +110,11 @@ export const WorkspaceMutationRequestSchema = z.discriminatedUnion("action", [
   workspaceRequestBase.extend({ action: z.literal("saved-tours"), tours: z.array(savedAiRouteSchema).max(100) }),
   workspaceRequestBase.extend({ action: z.literal("clear-repository") }),
   z.object({ action: z.literal("guide-preferences"), preferences: UsageGuidePreferencesSchema }).passthrough(),
+  z.object({ action: z.literal("layout-preferences"), preferences: WorkspaceLayoutPreferencesSchema }).passthrough(),
   z.object({ action: z.literal("clear-all"), repositoryId: z.string().max(160) }).passthrough(),
 ]);
 export const AiSettingsRequestSchema = z.object({ baseUrl: z.string().max(4_096), model: z.string().max(500), apiKey: z.string().max(10_000).optional(), clearKey: z.boolean().optional() }).passthrough();
-export const AiGenerationRequestSchema = z.object({ previewId: z.string().min(1).max(200) }).passthrough();
+export const AiGenerationRequestSchema = z.object({ previewId: z.string().min(1).max(200), stream: z.boolean().optional(), chat: z.object({ conversationId: z.string().min(1).max(160), userMessageId: z.string().min(1).max(160), answerMessageId: z.string().min(1).max(160) }).strict().optional() }).passthrough();
 export const AiPreviewRequestSchema = z.object({ repositoryId: z.string().min(1).max(160), fileId: z.string().min(1).max(4_096), mode: z.enum(["explanation", "route"]), goal: z.string().max(300).optional(), fileIds: z.array(z.string().min(1).max(4_096)).max(5_000).optional(), scopePrefix: z.string().max(4_096).optional(), ranges: z.record(z.string(), z.object({ startLine: z.number().int().positive(), endLine: z.number().int().positive() }).passthrough()).optional() }).passthrough();
 export const AiQuestionPreviewRequestSchema = z.object({ repositoryId: z.string().min(1).max(160), fileId: z.string().min(1).max(4_096), question: z.string().min(1).max(12_000), history: z.array(z.object({ role: z.enum(["user", "assistant"]), content: z.string().max(12_000) }).passthrough()).max(6).optional(), fileIds: z.array(z.string().min(1).max(4_096)).max(5_000).optional(), ranges: z.record(z.string(), z.object({ startLine: z.number().int().positive(), endLine: z.number().int().positive() }).passthrough()).optional() }).passthrough();
 export const SearchRequestSchema = z.object({ repositoryId: z.string().min(1).max(160), revision: z.string().min(1).max(200), query: z.string().min(1).max(256), offset: z.number().int().min(0).max(10_000).optional(), pathPrefix: z.string().max(4_096).optional(), language: z.string().max(24).optional(), matchCase: z.boolean().optional(), wholeWord: z.boolean().optional(), regex: z.boolean().optional(), excludeTests: z.boolean().optional() }).passthrough();
@@ -117,12 +122,16 @@ export const SearchResponseSchema = z.object({ revision: z.string().min(1), file
 export const RepositoryOverviewSchema = z.object({ revision: z.string(), readme: z.object({ path: z.string(), summary: z.string().nullable() }).nullable(), manifests: z.array(z.string()), candidates: z.array(z.object({ fileId: z.string(), path: z.string(), reason: z.string() }).passthrough()), directories: z.array(z.object({ name: z.string(), files: z.number().int().nonnegative() }).passthrough()), languages: z.array(z.object({ name: z.string(), files: z.number().int().nonnegative() }).passthrough()), tests: z.array(z.string()), testCount: z.number().int().nonnegative(), diagnosticCount: z.number().int().nonnegative(), limitations: z.string() }).passthrough();
 export const RevisionComparisonRequestSchema = z.object({ repositoryId: z.string().min(1).max(160), revision: z.string().min(1).max(200), mode: z.enum(["working-tree", "commits"]), baseRef: z.string().max(200).optional(), headRef: z.string().max(200).optional() }).strict().superRefine((value, context) => { if (value.mode === "commits" && (!value.baseRef || !value.headRef)) context.addIssue({ code: "custom", message: "提交比较需要起始和目标提交。" }); });
 export const RevisionComparisonResponseSchema = z.object({ revision: z.string(), mode: z.enum(["working-tree", "commits"]), baseCommit: z.string(), headCommit: z.string(), files: z.array(z.object({ status: z.enum(["added", "modified", "deleted", "renamed"]), path: z.string(), oldPath: z.string().optional() }).passthrough()), diff: z.string(), limits: z.object({ maxFiles: z.number().int().positive(), maxDiffBytes: z.number().int().positive() }).passthrough() }).passthrough();
+export const RevisionFetchRequestSchema = z.object({ repositoryId: z.string().min(1).max(160), workspaceId: z.string().min(1).max(200), persistenceSessionId: z.string().min(1).max(200), revision: z.string().min(1).max(200), target: z.string().min(1).max(256).regex(/^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64}|refs\/(?:heads|tags)\/[^\s\0]+)$/) }).strict();
+export const RevisionFetchResponseSchema = z.object({ repositoryId: z.string().min(1), workspaceId: z.string().min(1), revision: z.string().min(1), target: z.string().min(1), commit: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/), objectsAvailable: z.literal(true) }).strict();
 
 /** Parse a response body without discarding legacy fields; callers decide endpoint-specific fallback text. */
 export function parseLocalApiResponse(value, status, schema, fallback = "本地服务响应格式无效。") {
   if (status < 200 || status >= 300) {
-    const error = value && typeof value === "object" && typeof value.error === "string" ? value.error : `本地服务返回 ${status}`;
-    throw new Error(error);
+    const error = new Error(value && typeof value === "object" && typeof value.error === "string" ? value.error : `本地服务返回 ${status}`);
+    error.status = status;
+    if (value && typeof value === "object" && typeof value.code === "string") error.code = value.code;
+    throw error;
   }
   const parsed = schema.safeParse(value);
   if (!parsed.success) throw new Error(`${fallback} ${parsed.error.issues.map((issue) => issue.path.join(".") || "响应").join("、")}`);

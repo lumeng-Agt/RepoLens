@@ -32,6 +32,31 @@ test("workspace store persists recents, results, route progress, and positions w
   assert.doesNotMatch(await readFile(path.join(directory, "workspace-v1.json"), "utf8"), /sourceText|rawSource|"source"\s*:/);
 });
 
+test("unified chat completion stores the transcript and generated artifacts atomically", async (context) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "repolens-ai-chat-store-"));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const store = createWorkspaceStore(directory);
+  const route = { repositoryId: "repo", entryFileId: "a.ts", revision: "r1", title: "Route", signature: "route-1", sourceSteps: [], steps: [] };
+  const explanation = { __repositoryId: "repo", __entryFileId: "a.ts", __revision: "r1", __mode: "explanation", __contextFiles: [{ fileId: "a.ts", contentHash: "h" }], role: "Entry" };
+  const messages = [
+    { id: "user-1", role: "user", content: "Explain a.ts", references: [], contextFiles: [{ fileId: "a.ts", contentHash: "h" }] },
+    { id: "answer-1", role: "assistant", content: "A is the entry.", references: [{ fileId: "a.ts", startLine: 1 }], contextFiles: [{ fileId: "a.ts", contentHash: "h" }], route, explanation },
+  ];
+  const result = await store.commitAiChatCompletion("workspace-a", "conversation-1", messages, { route, explanation });
+  assert.equal(result.persisted, true);
+  const restored = await createWorkspaceStore(directory).getRepository("workspace-a");
+  assert.equal(restored.conversations.length, 1);
+  assert.deepEqual(restored.conversations[0].messages.map((message) => message.id), ["user-1", "answer-1"]);
+  assert.equal(restored.conversations[0].messages[1].route.signature, "route-1");
+  assert.equal(restored.conversations[0].messages[1].explanation.role, "Entry");
+  assert.equal(restored.aiResults["a.ts"].role, "Entry");
+  assert.equal(restored.savedTours[0].signature, "route-1");
+  assert.equal(restored.aiRoute.signature, "route-1");
+  await assert.rejects(store.commitAiChatCompletion("workspace-a", "conversation-2", messages, {}, () => false), { name: "AbortError" });
+  const afterAbort = await createWorkspaceStore(directory).getRepository("workspace-a");
+  assert.equal(afterAbort.conversations.some((conversation) => conversation.id === "conversation-2"), false);
+});
+
 test("reading artifacts are workspace-scoped and removed by the existing clear operation", async (context) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "repolens-reading-artifacts-"));
   context.after(() => rm(directory, { recursive: true, force: true }));
@@ -60,6 +85,19 @@ test("usage guide preferences are global, survive repository clearing, and are r
 
   await store.clearAll();
   assert.equal((await createWorkspaceStore(directory).getRepository("workspace-a")).guidePreferences, null);
+});
+
+test("workspace layout preferences survive repository changes and are removed by clear-all", async (context) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "repolens-layout-preferences-"));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const store = createWorkspaceStore(directory);
+  const preferences = { version: 1, structure: { files: 25, graph: 45, details: 30 }, reading: { files: 35, details: 65 } };
+  await store.saveLayoutPreferences(preferences);
+  assert.deepEqual((await store.getRepository("workspace-a")).layoutPreferences, preferences);
+  await store.clearRepository("workspace-a");
+  assert.deepEqual((await createWorkspaceStore(directory).getRepository("workspace-b")).layoutPreferences, preferences);
+  await store.clearAll();
+  assert.equal((await createWorkspaceStore(directory).getRepository("workspace-a")).layoutPreferences, null);
 });
 
 test("workspace store limits recents and quarantines damaged records while staying usable", async (context) => {

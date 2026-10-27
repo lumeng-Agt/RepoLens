@@ -43,7 +43,11 @@ export async function installResizeObserverProbe(page: Page) {
         workspace: document.querySelector('.workspace-grid')?.className,
         graph: describe(graph),
         canvas: describe(canvas),
-        callbacks: trace.callbacks.slice(-8).map((entry) => entry.split('\n').slice(-1)[0]),
+        callbacks: trace.callbacks.slice(-8).map((entry) => ({
+          observer: entry.split('\n').slice(0, 4).join('\n'),
+          measurement: entry.split('\n').slice(-1)[0],
+        })),
+        errorStack: event.error instanceof Error ? event.error.stack : null,
       });
       trace.errors.push(detail);
       console.error('[RepoLens resize]', detail);

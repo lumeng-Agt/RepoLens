@@ -9,6 +9,8 @@ import {
   RepositoryOpenRequestSchema,
   RepositoryRescanRequestSchema,
   RepositorySnapshotSchema,
+  RevisionFetchRequestSchema,
+  RevisionFetchResponseSchema,
   SourceResponseSchema,
   UsageGuidePreferencesSchema,
   WorkspaceSaveResponseSchema,
@@ -22,6 +24,10 @@ const snapshot = {
   files: [{ id: "src/main.ts", path: "src/main.ts", name: "main.ts", kind: "typescript", imports: [], legacyTag: "keep" }],
   dependencies: [], tour: [], futureField: { value: 1 },
 };
+
+test("recent removal is independent of the currently opened repository", () => {
+  assert.equal(WorkspaceMutationRequestSchema.safeParse({ action: "recent-remove", targetId: "github:old-target" }).success, true);
+});
 
 test("snapshot contract validates the required structure and preserves forward-compatible fields", () => {
   const parsed = parseLocalApiResponse(snapshot, 200, RepositorySnapshotSchema);
@@ -117,6 +123,21 @@ test("server request contracts reject malformed actions before route logic and p
   assert.equal(WorkspaceMutationRequestSchema.safeParse({ action: "progress", repositoryId: "repo", key: "repolens:repo:v1", value: "{}" }).success, true);
   assert.equal(WorkspaceMutationRequestSchema.safeParse({ action: "node-positions", repositoryId: "repo", positions: { "a.ts": { x: Number.NaN, y: 1 } } }).success, false);
   assert.equal(WorkspaceMutationRequestSchema.safeParse({ action: "unknown", repositoryId: "repo" }).success, false);
+  const fetchRequest = { repositoryId: "repo", workspaceId: "workspace", persistenceSessionId: "session", revision: "r1", target: "refs/heads/feature/test" };
+  assert.equal(RevisionFetchRequestSchema.safeParse(fetchRequest).success, true);
+  assert.equal(RevisionFetchRequestSchema.safeParse({ ...fetchRequest, target: "feature/test" }).success, false);
+  assert.equal(RevisionFetchRequestSchema.safeParse({ ...fetchRequest, target: "a".repeat(12) }).success, false);
+  assert.equal(RevisionFetchRequestSchema.safeParse({ ...fetchRequest, target: "--upload-pack=evil" }).success, false);
+  assert.equal(RevisionFetchResponseSchema.safeParse({ repositoryId: "repo", workspaceId: "workspace", revision: "r1", target: fetchRequest.target, commit: "a".repeat(40), objectsAvailable: true }).success, true);
+});
+
+test("API errors retain machine-readable status and code for recoverable history gaps", () => {
+  assert.throws(() => parseLocalApiResponse({ code: "REVISION_OBJECT_MISSING", error: "missing" }, 409, RevisionFetchResponseSchema), (error) => {
+    assert.equal(error.status, 409);
+    assert.equal(error.code, "REVISION_OBJECT_MISSING");
+    assert.equal(error.message, "missing");
+    return true;
+  });
 });
 
 test("usage guide preferences are optional in workspace records and validated by the existing mutation route", () => {
@@ -125,6 +146,9 @@ test("usage guide preferences are optional in workspace records and validated by
   assert.equal(UsageGuidePreferencesSchema.safeParse({ ...preferences, completedTaskIds: ["unknown"] }).success, false);
   assert.equal(WorkspaceMutationRequestSchema.safeParse({ action: "guide-preferences", preferences }).success, true);
   assert.equal(WorkspaceMutationRequestSchema.safeParse({ action: "guide-preferences", preferences: { ...preferences, version: 2 } }).success, false);
+  const layoutPreferences = { version: 1, structure: { files: 22, graph: 48, details: 30 }, reading: { files: 28, details: 72 } };
+  assert.equal(WorkspaceMutationRequestSchema.safeParse({ action: "layout-preferences", preferences: layoutPreferences }).success, true);
+  assert.equal(WorkspaceMutationRequestSchema.safeParse({ action: "layout-preferences", preferences: { ...layoutPreferences, version: 2 } }).success, false);
   const state = LocalWorkspaceStateSchema.parse({ version: 1, recentRepositories: [], aiResults: {}, aiRoute: null, progress: {}, nodePositions: {}, conversations: [], readingNotes: [], savedTours: [], guidePreferences: preferences });
   assert.equal(state.guidePreferences.futureField, "keep");
 });

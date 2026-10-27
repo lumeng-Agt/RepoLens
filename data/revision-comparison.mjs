@@ -35,7 +35,9 @@ function safeGitArgs(args) {
 }
 
 function missingObjectError() {
-  return new Error("本地缺少版本比较所需的 Git 对象；为保护仓库，RepoLens 不会自动获取。请手动获取所需提交后重试。");
+  const error = new Error("本地缺少版本比较所需的 Git 对象；RepoLens 不会自动获取。请获取所需版本后重新比较。");
+  error.code = "REVISION_OBJECT_MISSING";
+  return error;
 }
 
 function isMissingObjectFailure(message) {
@@ -48,7 +50,10 @@ async function ensureNoLazyFetchSupport() {
     timeout: 3_000,
     encoding: "utf8",
     env: cleanGitEnvironment(),
-  }).then(() => true, () => false);
+  }).then(() => true, (error) => {
+    if (error.code === "ENOENT") throw new Error("未找到 Git。安装 Git 后才能比较提交；仓库源码阅读仍可继续。");
+    return false;
+  });
   if (!await noLazyFetchSupported) throw new Error("当前 Git 版本不支持安全的本地对象比较。请更新 Git；仓库源码阅读仍可继续。");
 }
 
@@ -67,6 +72,7 @@ async function git(root, args, options = {}) {
     if (error.name === "AbortError") throw error;
     if (error.code === "ENOENT") throw new Error("未找到 Git。安装 Git 后才能比较提交；仓库源码阅读仍可继续。");
     if (error.killed || error.signal === "SIGTERM") throw new Error("版本比较已超时或取消。");
+    if (/not a git repository/i.test(String(error.stderr))) throw new Error("此目录不属于 Git 仓库，无法比较版本；源码阅读仍可继续。");
     throw new Error(`Git 版本比较失败：${String(error.stderr || error.message).trim().slice(0, 500)}`);
   }
 }
@@ -132,7 +138,13 @@ function validateRef(ref, label) {
 
 async function resolveCommit(root, ref, label, signal) {
   const value = validateRef(ref, label);
-  const { stdout } = await git(root, ["rev-parse", "--verify", "--end-of-options", `${value}^{commit}`], { signal });
+  let stdout;
+  try { ({ stdout } = await git(root, ["rev-parse", "--verify", "--end-of-options", `${value}^{commit}`], { signal })); }
+  catch (error) {
+    const fetchable = /^[a-f0-9]{40,64}$/i.test(value) || /^refs\/(?:heads|tags)\//.test(value);
+    if (fetchable && /needed a single revision|unknown revision|bad revision|not a valid object name|ambiguous argument/i.test(error.message)) throw missingObjectError();
+    throw error;
+  }
   const commit = stdout.trim();
   if (!/^[a-f0-9]{40,64}$/i.test(commit)) throw new Error(`${label}没有解析为提交对象。`);
   return commit;
@@ -322,9 +334,17 @@ export async function compareRepositoryRevisions({ root, gitDir = root, currentC
   const head = mode === "working-tree" ? immutableSnapshot ? base : "WORKTREE" : await resolveCommit(gitDir, headRef, "目标", signal);
   if (immutableSnapshot || mode === "commits" && base === head) return emptyComparison({ revision, mode, baseCommit: base, headCommit: head });
 
-  const left = await readCommitTree(gitDir, base, signal);
+  // Commit trees are relative to the Git root; working files are relative to the
+  // directory the user opened. Scope both sides before comparing their paths.
+  let prefix = "";
+  if (!currentCommit) {
+    const top = (await git(root, ["rev-parse", "--show-toplevel"], { signal })).stdout.trim();
+    prefix = path.relative(await realpath(top), await realpath(root)).split(path.sep).join("/");
+  }
+  const scopedTree = (tree) => prefix ? new Map([...tree].filter(([name]) => name.startsWith(`${prefix}/`)).map(([name, file]) => [name.slice(prefix.length + 1), file])) : tree;
+  const left = scopedTree(await readCommitTree(gitDir, base, signal));
   let right;
-  if (mode === "commits") right = await readCommitTree(gitDir, head, signal);
+  if (mode === "commits") right = scopedTree(await readCommitTree(gitDir, head, signal));
   else right = await readRawWorkingFiles(root, left, signal);
   const changedPaths = changedEntries(left, right);
   if (!changedPaths.length) return emptyComparison({ revision, mode, baseCommit: base, headCommit: head });

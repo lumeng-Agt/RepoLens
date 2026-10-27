@@ -1,8 +1,7 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent, type RefObject } from "react";
-import { ChevronDown, FileCode2, FileText, Folder, FolderOpen, Search, SearchX, Trash2, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import { ChevronDown, FileCode2, FileText, Folder, Search, SearchX, X } from "lucide-react";
 import type { FileRecord, RepositorySnapshot, SearchRequest, SearchResponse } from "@/data/model";
 import { localRepositoryProvider } from "@/data/providers";
-import { recentRepositoryOpenLocation, recentRepositoryTargetLabel } from "@/data/recent-repository-label.mjs";
 
 type FolderEntry = { type: "folder"; name: string; path: string; children: TreeEntry[] };
 type FileEntry = { type: "file"; file: FileRecord };
@@ -63,13 +62,8 @@ function TreeRows({ folder, depth, matchingIds, selectedId, collapsed, query, on
   })}</>;
 }
 
-export function DirectoryPanel({ repository, mobileView, searchQuery, onSearchChange, repoPath, onRepoPathChange, repoBusy, repoMessage, desktopMode, serviceAvailable = true, clearDataBusy = false, onPickDirectory, onOpenRepository, onRescan, recentRepositories = [], onOpenRecent, onRemoveRecent, onClearRepositoryData, onClearSavedData, selectedFileId, collapsedFolders, onToggleFolder, onSelectFile, onOpenSearchResult, onAddSearchResult, searchInputRef }: {
+export function DirectoryPanel({ repository, mobileView, searchQuery, onSearchChange, selectedFileId, collapsedFolders, onToggleFolder, onSelectFile, onOpenSearchResult, onAddSearchResult, searchInputRef }: {
   repository: RepositorySnapshot; mobileView: "files" | "graph" | "details"; searchQuery: string; onSearchChange: (value: string) => void;
-  repoPath: string; onRepoPathChange: (value: string) => void; repoBusy: boolean; repoMessage: string;
-  desktopMode: boolean; serviceAvailable?: boolean; clearDataBusy?: boolean; onPickDirectory: () => void;
-  onOpenRepository: (event: FormEvent<HTMLFormElement>) => void; onRescan: () => void;
-  recentRepositories?: { id: string; targetId?: string; workspaceId?: string; name: string; location: string; kind: "local" | "github"; lastOpenedAt: number; requestedRef?: string; resolvedRef?: string; commit?: string; subdirectory?: string }[];
-  onOpenRecent?: (location: string) => void; onRemoveRecent?: (id: string) => void; onClearRepositoryData?: () => void; onClearSavedData?: () => void;
   selectedFileId: string; collapsedFolders: string[]; onToggleFolder: (path: string) => void; onSelectFile: (file: FileRecord) => void;
   onOpenSearchResult: (fileId: string, line: number) => void; onAddSearchResult: (fileIds: string[]) => void;
   searchInputRef: RefObject<HTMLInputElement | null>;
@@ -141,31 +135,7 @@ export function DirectoryPanel({ repository, mobileView, searchQuery, onSearchCh
     finally { if (searchController.current === controller) searchController.current = null; if (requestId === searchSequence.current) setSearchBusy(false); }
   };
   return <aside className={`files-pane${mobileView !== "files" ? " mobile-hidden" : ""}`} aria-label="文件目录">
-    <div className="pane-heading"><div><span className="pane-overline">EXPLORER</span><h2>文件目录</h2></div><span className="file-count">{repository.files.length}</span></div>
-    <form className="repository-open-form" onSubmit={onOpenRepository}>
-      <label htmlFor="repository-path">本地仓库路径或 GitHub 链接</label>
-      <input id="repository-path" value={repoPath} onChange={(event) => onRepoPathChange(event.target.value)} placeholder="输入本地路径或 GitHub 链接" />
-      {desktopMode && <button type="button" onClick={onPickDirectory} disabled={repoBusy || clearDataBusy || !serviceAvailable}><FolderOpen size={15} />选择本地目录</button>}
-      <button type="submit" disabled={repoBusy || clearDataBusy || !serviceAvailable || !repoPath.trim()}>{repoBusy ? "正在获取并扫描…" : "打开仓库"}</button>
-      {repository.source === "local" && <button type="button" onClick={onRescan} disabled={repoBusy || clearDataBusy || !serviceAvailable}>{repository.origin?.kind === "github" ? "检查远端更新" : "重新扫描"}</button>}
-    </form>
-    {repository.origin?.kind === "github" && <div className="github-origin" aria-label="GitHub 来源信息">
-      <a href={repository.origin.url} target="_blank" rel="noreferrer">{repository.origin.url}</a>
-      <span>ref · {repository.origin.resolvedRef}</span>
-      <span>commit · {repository.origin.commit.slice(0, 12)}</span>
-    </div>}
-    {repoMessage && <div className="repo-message" role="status">{repoMessage}</div>}
-    {desktopMode && <section className="recent-repositories" aria-label="最近打开的仓库及本地保存">
-      <div className="recent-repositories-heading"><strong>最近仓库</strong><span>{recentRepositories.length}/20</span></div>
-      {recentRepositories.length > 0 && <ul>{recentRepositories.map((recent) => <li key={recent.id}>
-        <button className="recent-repository-open" type="button" disabled={repoBusy || clearDataBusy || !serviceAvailable} onClick={() => onOpenRecent?.(recentRepositoryOpenLocation(recent))} title={recentRepositoryOpenLocation(recent)}>
-          <span>{recent.name}</span><small>{recentRepositoryTargetLabel(recent)}</small>
-        </button>
-        <button type="button" className="recent-repository-remove" aria-label={`从最近仓库移除 ${recent.name}`} disabled={clearDataBusy || !serviceAvailable} onClick={() => onRemoveRecent?.(recent.targetId ?? recent.id)}><Trash2 size={13} /></button>
-      </li>)}</ul>}
-      {repository.source === "local" && <button className="clear-saved-data" type="button" disabled={!serviceAvailable || repoBusy || clearDataBusy} onClick={onClearRepositoryData}>{clearDataBusy ? "正在清除…" : "清除此仓库的保存数据"}</button>}
-      <button className="clear-saved-data" type="button" disabled={!serviceAvailable || repoBusy || clearDataBusy} onClick={onClearSavedData}>{clearDataBusy ? "正在清除…" : "清除全部本地保存数据"}</button>
-    </section>}
+<div className="pane-heading"><h2>文件</h2></div>
     <div className="search-mode-switch" role="group" aria-label="搜索范围"><button type="button" className={searchMode === "files" ? "is-active" : ""} onClick={() => { invalidateSearch(); setSearchMode("files"); }}>文件</button><button type="button" className={searchMode === "content" ? "is-active" : ""} onClick={() => { invalidateSearch(); setSearchMode("content"); }}>内容</button></div>
     <label className="search-field"><Search size={15} aria-hidden="true" /><input ref={searchInputRef} value={searchQuery} onChange={(event) => { invalidateSearch(); onSearchChange(event.target.value); }} placeholder={searchMode === "content" ? "搜索源码内容…" : "搜索文件…"} aria-label={searchMode === "content" ? "搜索源码内容" : "搜索文件名或路径"} />
       {searchQuery && <button type="button" aria-label="清除搜索" onClick={() => { invalidateSearch(); onSearchChange(""); }}><X size={14} /></button>}{!searchQuery && <kbd>/</kbd>}
@@ -179,11 +149,11 @@ export function DirectoryPanel({ repository, mobileView, searchQuery, onSearchCh
       {searchMode === "content" ? <div className="content-search-results" aria-live="polite">
         {searchBusy && <p role="status">正在搜索已索引源码…</p>}{searchError && <p role="alert">{searchError}</p>}
         {searchResultsStale && <p role="status">仓库快照已更新，旧搜索位置已停用，正在重新查询。</p>}
-        {currentSearchPage && <><p className="content-search-summary">{currentSearchPage.total} 处匹配 · 检查 {currentSearchPage.filesSearched} 个文件{currentSearchPage.capped ? " · 已达到 10,000 条结果上限" : ""}</p>{currentSearchPage.results.length > 0 && <div className="content-search-bulk"><label><input type="checkbox" aria-label="全选当前页搜索文件" checked={currentSearchPage.results.every((result) => selectedSearchFiles.includes(result.fileId))} onChange={(event) => setSelectedSearchFiles(event.target.checked ? [...new Set([...selectedSearchFiles, ...currentSearchPage.results.map((result) => result.fileId)])] : selectedSearchFiles.filter((id) => !currentSearchPage.results.some((result) => result.fileId === id)))} />全选当前页</label><button type="button" disabled={!selectedSearchFiles.length} onClick={() => { onAddSearchResult(selectedSearchFiles); setSelectedSearchFiles([]); }}>加入问答范围（{selectedSearchFiles.length} 个文件）</button></div>}{currentSearchPage.results.map((result) => <article className="content-search-result" key={`${result.fileId}:${result.line}`}><label className="content-search-select"><input type="checkbox" aria-label={`选择 ${result.path} 第 ${result.line} 行`} checked={selectedSearchFiles.includes(result.fileId)} onChange={(event) => setSelectedSearchFiles((current) => event.target.checked ? [...new Set([...current, result.fileId])] : current.filter((id) => id !== result.fileId))} /></label><button type="button" className="content-search-hit" onClick={() => onOpenSearchResult(result.fileId, result.line)}><strong>{result.path}<small>:{result.line}</small></strong><code>{result.contextStartColumn > 1 && "…"}{result.text.slice(0, Math.max(0, result.matchStartColumn - result.contextStartColumn))}<mark>{result.text.slice(Math.max(0, result.matchStartColumn - result.contextStartColumn), Math.max(0, result.matchEndColumn - result.contextStartColumn + 1))}</mark>{result.text.slice(Math.max(0, result.matchEndColumn - result.contextStartColumn + 1))}{result.contextEndColumn < result.lineLength && "…"}</code></button><button type="button" className="content-search-add" onClick={() => onAddSearchResult([result.fileId])}>加入问答</button></article>)}{!currentSearchPage.results.length && !searchBusy && <div className="empty-search"><SearchX size={24} /><strong>没有找到匹配内容</strong><span>试试调整关键词或筛选条件</span></div>}{currentSearchPage.hasMore && repository.source === "local" && <button type="button" className="search-load-more" onClick={() => void loadMoreSearch()} disabled={searchBusy}>加载更多结果</button>}</>}
+        {currentSearchPage && <><p className="content-search-summary">找到 {currentSearchPage.total} 处匹配 · 已检查 {currentSearchPage.filesSearched} 个文件{currentSearchPage.capped ? " · 已达到 10,000 条结果上限" : ""}</p>{currentSearchPage.results.length > 0 && <div className="content-search-bulk"><label><input type="checkbox" aria-label="全选当前页搜索文件" checked={currentSearchPage.results.every((result) => selectedSearchFiles.includes(result.fileId))} onChange={(event) => setSelectedSearchFiles(event.target.checked ? [...new Set([...selectedSearchFiles, ...currentSearchPage.results.map((result) => result.fileId)])] : selectedSearchFiles.filter((id) => !currentSearchPage.results.some((result) => result.fileId === id)))} />全选当前页</label><button type="button" disabled={!selectedSearchFiles.length} onClick={() => { onAddSearchResult(selectedSearchFiles); setSelectedSearchFiles([]); }}>加入问答范围（{selectedSearchFiles.length} 个文件）</button></div>}{currentSearchPage.results.map((result) => <article className="content-search-result" key={`${result.fileId}:${result.line}`}><label className="content-search-select"><input type="checkbox" aria-label={`选择 ${result.path} 第 ${result.line} 行`} checked={selectedSearchFiles.includes(result.fileId)} onChange={(event) => setSelectedSearchFiles((current) => event.target.checked ? [...new Set([...current, result.fileId])] : current.filter((id) => id !== result.fileId))} /></label><button type="button" className="content-search-hit" onClick={() => onOpenSearchResult(result.fileId, result.line)}><strong>{result.path}<small>:{result.line}</small></strong><code>{result.contextStartColumn > 1 && "…"}{result.text.slice(0, Math.max(0, result.matchStartColumn - result.contextStartColumn))}<mark>{result.text.slice(Math.max(0, result.matchStartColumn - result.contextStartColumn), Math.max(0, result.matchEndColumn - result.contextStartColumn + 1))}</mark>{result.text.slice(Math.max(0, result.matchEndColumn - result.contextStartColumn + 1))}{result.contextEndColumn < result.lineLength && "…"}</code></button><button type="button" className="content-search-add" onClick={() => onAddSearchResult([result.fileId])}>加入问答</button></article>)}{!currentSearchPage.results.length && !searchBusy && <div className="empty-search"><SearchX size={24} /><strong>没有找到匹配内容</strong><span>试试调整关键词或筛选条件</span></div>}{currentSearchPage.hasMore && repository.source === "local" && <button type="button" className="search-load-more" onClick={() => void loadMoreSearch()} disabled={searchBusy}>加载更多结果</button>}</>}
       </div> : <div className="tree-list" role="tree" aria-label={`${repository.name} 仓库文件`}>
         {!matchingIds.size ? <div className="empty-search"><SearchX size={24} /><strong>没有找到文件</strong><span>试试其他文件名或路径</span></div> : <TreeRows folder={rootFolder} depth={0} matchingIds={matchingIds} selectedId={selectedFileId} collapsed={collapsedFolders} query={query} onToggleFolder={onToggleFolder} onSelect={onSelectFile} />}
       </div>}
     </div>
-    <div className="sidebar-footnote"><span className="footnote-glyph">i</span><span>{repository.origin?.kind === "github" ? <>远端快照 · 点击“检查远端更新”获取最新提交</> : repository.source === "local" ? <>本地静态分析 · 保存时自动更新</> : <>目录内容来自内置示例<br />尚未读取本地仓库</>}</span></div>
+<div className="sidebar-footnote"><span>{repository.source === "local" ? "本地静态分析 · 保存文件后自动更新" : "内置示例 · 未访问本地文件"}</span></div>
   </aside>;
 }

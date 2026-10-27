@@ -1,3 +1,4 @@
+import { WorkspaceDialog } from "./WorkspaceDialog";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import { Download, FileDown, Plus, Trash2 } from "lucide-react";
 import type { AiRouteRecord, FileRecord, ReadingNote, RepositorySnapshot, SourceReference } from "@/data/model";
@@ -6,7 +7,7 @@ import { isReadingRangeValid, mergeReadingNotes, mergeSavedTours, readingArtifac
 import { localRepositoryProvider } from "@/data/providers";
 
 type ExportFile = { format: "repolens-reading"; version: 1; workspaceId: string; ref?: string; notes: ReadingNote[]; tours: AiRouteRecord[] };
-type RouteDraft = { sourceSignature: string; repositoryId: string; revision: string; title: string; goal: string; steps: { fileId: string; purpose: string; relationship: string; question: string; startLine: number; endLine?: number }[] };
+type RouteDraft = { sourceSignature: string; repositoryId: string; revision: string; title: string; goal: string; steps: { fileId: string; purpose: string; relationship: string; question: string; startLine: number; endLine?: number; originalFileId: string; originalStartLine: number; originalEndLine?: number; references: { fileId: string; startLine: number; endLine?: number | null }[] }[] };
 const download = (name: string, type: string, content: string) => {
   const url = URL.createObjectURL(new Blob([content], { type }));
   const link = document.createElement("a"); link.href = url; link.download = name; link.click();
@@ -76,16 +77,16 @@ export function ReadingArtifactsPanel({ repository, currentFile, filesById, focu
     if (clearing) return;
     const selected = notes.filter((note) => selectedNoteIds.includes(note.id) && !note.stale && filesById.get(note.fileId)?.contentHash === note.contentHash);
     if (!selected.length) { setError("请至少选择一条当前源码仍有效的笔记或书签。"); return; }
-    const route = createAiRouteRecord({ repositoryId: repository.id, entryFileId: selected[0].fileId, revision: repository.revision ?? repository.version, title: manualTitle.trim() || "手动阅读路线", goal: manualGoal.trim() || undefined, steps: selected.map((note, index) => ({ fileId: note.fileId, purpose: note.text, ...(note.kind === "question" ? { question: note.text } : {}), relationship: index === 0 ? "用户选定的阅读入口" : "按用户选择顺序继续；此顺序不代表运行时调用顺序", references: [{ fileId: note.fileId, startLine: note.startLine, ...(note.endLine ? { endLine: note.endLine } : {}) }] })), contextFiles: [...new Map(selected.map((note) => [note.fileId, { fileId: note.fileId, contentHash: filesById.get(note.fileId)?.contentHash ?? "" }])).values()] }, (fileId) => filesById.get(fileId)?.name ?? fileId);
+    const route = createAiRouteRecord({ repositoryId: repository.id, entryFileId: selected[0].fileId, revision: repository.revision ?? repository.version, title: manualTitle.trim() || "手动阅读路线", goal: manualGoal.trim() || undefined, steps: selected.map((note, index) => ({ fileId: note.fileId, purpose: note.text, ...(note.kind === "question" ? { question: note.text } : {}), relationship: index === 0 ? "用户选定的阅读入口" : "按所选顺序继续阅读，不代表程序运行时的调用顺序", references: [{ fileId: note.fileId, startLine: note.startLine, ...(note.endLine ? { endLine: note.endLine } : {}) }] })), contextFiles: [...new Map(selected.map((note) => [note.fileId, { fileId: note.fileId, contentHash: filesById.get(note.fileId)?.contentHash ?? "" }])).values()] }, (fileId) => filesById.get(fileId)?.name ?? fileId);
     const next = [...tours.filter((item) => item.signature !== route.signature), route];
     const saved = await onSaveTours(next, activeTarget);
     if (!sameTarget(activeTarget, currentTargetRef.current)) return;
-    onActivateTour(route); setManualTitle(""); setManualGoal(""); setError(saved ? "手动路线已保存并设为当前路线。" : "手动路线已保留在当前页面；请检查保存状态并重试。");
+    onActivateTour(route); setManualTitle(""); setManualGoal(""); setError(saved ? "手动路线已保存并设为当前路线。" : "手动路线未保存。请检查保存状态后重试。");
   };
   const exportJson = () => download("repolens-reading.json", "application/json", JSON.stringify({ format: "repolens-reading", version: 1, workspaceId: repository.workspaceId ?? repository.id, ...(refLabel ? { ref: refLabel } : {}), notes: exportNotes, tours: exportTours } satisfies ExportFile, null, 2));
   const exportMarkdown = () => {
     const noteText = orderedNotes.filter((note) => exportNoteSelection[note.id] !== false).map((note) => `### ${note.path}:${note.startLine}${note.endLine ? `-${note.endLine}` : ""}\n\n${note.text}`).join("\n\n");
-    const routeText = exportTours.map((tour) => `## ${tour.title}${tour.goal ? `：${tour.goal}` : ""}\n\n${tour.steps.map((step, index) => `${index + 1}. ${step.title} — ${step.description}（${step.reference.fileId}:${step.reference.line}）${step.question ? `\n   自测：${step.question}` : ""}`).join("\n")}`).join("\n\n");
+    const routeText = exportTours.map((tour) => `## ${tour.title}${tour.goal ? `：${tour.goal}` : ""}\n\n${tour.steps.map((step, index) => `${index + 1}. ${step.title}：${step.description}（${step.reference.fileId}:${step.reference.line}）${step.question ? `\n   自测：${step.question}` : ""}`).join("\n")}`).join("\n\n");
     download("repolens-reading.md", "text/markdown;charset=utf-8", `# RepoLens 阅读记录\n\n${refLabel ? `来源：${refLabel}\n\n` : ""}${noteText}${noteText && routeText ? "\n\n" : ""}${routeText}\n`);
   };
   const readImport = async (event: ChangeEvent<HTMLInputElement>) => {
@@ -203,7 +204,7 @@ export function ReadingArtifactsPanel({ repository, currentFile, filesById, focu
       if (finalTours.added) toursSaved = await onSaveTours(finalTours.records, expectedTarget) && toursSaved;
       setImportPreview(null);
       const importedMessage = `已导入 ${noteMerge.added + reconciledNotes.added} 条笔记和 ${tourMerge.added} 条路线；${noteMerge.conflicts + reconciledNotes.conflicts + tourMerge.conflicts + reconciledTours.conflicts + finalTours.conflicts} 条冲突已作为副本保留，完全相同的记录已跳过。`;
-      setError(notesSaved && toursSaved ? importedMessage : `${importedMessage} 部分修改仅保留在当前页面，保存失败后可重试。`);
+      setError(notesSaved && toursSaved ? importedMessage : `${importedMessage} 部分内容尚未保存到本地，请检查保存状态后重试。`);
     } catch (cause) {
       if ((cause as Error)?.name !== "AbortError") setError(cause instanceof Error ? cause.message : "无法完成导入。原有记录没有更改。");
     } finally { if (importController.current === controller) importController.current = null; if (requestId === importSequence.current) setImportConfirmBusy(false); }
@@ -211,7 +212,7 @@ export function ReadingArtifactsPanel({ repository, currentFile, filesById, focu
   const beginEditRoute = (route: AiRouteRecord) => setRouteDraft({
     sourceSignature: route.signature, repositoryId: repository.id, revision: repository.revision ?? repository.version,
     title: route.title, goal: route.goal ?? "",
-    steps: route.steps.map((step) => ({ fileId: step.focusFileId, purpose: step.description, relationship: step.relationship ?? "", question: step.question ?? "", startLine: step.reference.fileId === step.focusFileId ? step.reference.line : 1, ...(step.reference.endLine ? { endLine: step.reference.endLine } : {}) })),
+    steps: route.steps.map((step, index) => ({ references: route.sourceSteps?.[index]?.references ?? [{ fileId: step.reference.fileId, startLine: step.reference.line, endLine: step.reference.endLine }], originalFileId: step.focusFileId, originalStartLine: step.reference.line, originalEndLine: step.reference.endLine, fileId: step.focusFileId, purpose: step.description, relationship: step.relationship ?? "", question: step.question ?? "", startLine: step.reference.fileId === step.focusFileId ? step.reference.line : 1, ...(step.reference.endLine ? { endLine: step.reference.endLine } : {}) })),
   });
   const moveDraftStep = (index: number, delta: -1 | 1) => setRouteDraft((draft) => {
     if (!draft) return draft;
@@ -225,7 +226,8 @@ export function ReadingArtifactsPanel({ repository, currentFile, filesById, focu
     if (!routeDraft.title.trim() || routeDraft.steps.length < 1 || routeDraft.steps.length > 7) { setError("路线需要标题，并至少包含一个步骤。"); return; }
     const controller = new AbortController(); routeEditController.current?.abort(); routeEditController.current = controller; setRouteSaveBusy(true); setError("");
     try {
-      const uniqueFileIds = [...new Set(routeDraft.steps.map((step) => step.fileId))];
+      const referencesFor = (step: RouteDraft["steps"][number]) => step.references.map((reference) => reference.fileId === step.originalFileId && reference.startLine === step.originalStartLine && (reference.endLine ?? undefined) === step.originalEndLine ? { fileId: step.fileId, startLine: step.startLine, endLine: step.endLine } : reference);
+      const uniqueFileIds = [...new Set(routeDraft.steps.flatMap((step) => referencesFor(step).map((reference) => reference.fileId)))];
       const lineCounts = new Map<string, number>();
       for (const fileId of uniqueFileIds) {
         if (!filesById.has(fileId)) throw new Error(`路线文件不存在：${fileId}`);
@@ -234,16 +236,16 @@ export function ReadingArtifactsPanel({ repository, currentFile, filesById, focu
       }
       if (controller.signal.aborted) return;
       for (const [index, step] of routeDraft.steps.entries()) {
-        if (!isReadingRangeValid(lineCounts.get(step.fileId) ?? 0, step.startLine, step.endLine)) throw new Error(`第 ${index + 1} 步的源码行范围已失效：${step.fileId}:${step.startLine}`);
+        if (referencesFor(step).some((reference) => !isReadingRangeValid(lineCounts.get(reference.fileId) ?? 0, reference.startLine, reference.endLine ?? undefined))) throw new Error(`第 ${index + 1} 步的源码行范围已失效：${step.fileId}:${step.startLine}`);
       }
       const contextFiles = uniqueFileIds.map((fileId) => ({ fileId, contentHash: filesById.get(fileId)?.contentHash ?? "" }));
       const route = createAiRouteRecord({
         repositoryId: repository.id, entryFileId: routeDraft.steps[0].fileId, revision: repository.revision ?? repository.version,
         title: routeDraft.title.trim(), goal: routeDraft.goal.trim() || undefined,
-        steps: routeDraft.steps.map((step) => ({ fileId: step.fileId, purpose: step.purpose.trim() || `阅读 ${filesById.get(step.fileId)?.name ?? step.fileId}`, ...(step.relationship.trim() ? { relationship: step.relationship.trim() } : {}), ...(step.question.trim() ? { question: step.question.trim() } : {}), references: [{ fileId: step.fileId, startLine: step.startLine, ...(step.endLine ? { endLine: step.endLine } : {}) }] })),
+        steps: routeDraft.steps.map((step) => ({ fileId: step.fileId, purpose: step.purpose.trim() || `阅读 ${filesById.get(step.fileId)?.name ?? step.fileId}`, ...(step.relationship.trim() ? { relationship: step.relationship.trim() } : {}), ...(step.question.trim() ? { question: step.question.trim() } : {}), references: referencesFor(step) })),
         contextFiles,
       }, (fileId) => filesById.get(fileId)?.name ?? fileId);
-      const next = [...tours.filter((item) => item.signature !== routeDraft.sourceSignature && item.signature !== route.signature), route];
+      const next = [...latestArtifactsRef.current.tours.filter((item) => item.signature !== routeDraft.sourceSignature && item.signature !== route.signature), route];
       const saved = await onSaveTours(next, activeTarget);
       if (!sameTarget(activeTarget, currentTargetRef.current)) return;
       onActivateTour(route); setRouteDraft(null); setError(saved ? "路线已更新；每一步引用均已按当前源码行范围校验。" : "路线已更新并保留在页面；请检查保存状态并重试。");
@@ -266,7 +268,7 @@ export function ReadingArtifactsPanel({ repository, currentFile, filesById, focu
       const current = routeIsCurrent(tour);
       return <article key={tour.signature} className={!current ? "is-stale" : ""}><div><strong>{tour.title}</strong><button type="button" disabled={!current} onClick={() => onActivateTour(tour)}>打开路线</button><button type="button" onClick={() => beginEditRoute(tour)}>编辑</button></div>{tour.goal && <small>{tour.goal}</small>}<p>{tour.steps.length} 步 · {tour.steps[0]?.focusFileId}</p>{!current && <small>路线的源码依据已变化或未通过导入校验；旧行号已停用，可编辑并重新校验。</small>}</article>;
     })}</details>}
-    {routeDraft && <div className="route-editor" role="dialog" aria-label="编辑阅读路线">
+    {routeDraft && <WorkspaceDialog onDismiss={() => { routeEditController.current?.abort(); setRouteDraft(null); }} className="route-editor" aria-label="编辑阅读路线">
       <strong>编辑路线并校验引用</strong>
       <label>路线标题<input value={routeDraft.title} maxLength={120} onChange={(event) => setRouteDraft((draft) => draft ? { ...draft, title: event.target.value } : draft)} /></label>
       <label>阅读目标<input value={routeDraft.goal} maxLength={300} onChange={(event) => setRouteDraft((draft) => draft ? { ...draft, goal: event.target.value } : draft)} /></label>
@@ -278,10 +280,10 @@ export function ReadingArtifactsPanel({ repository, currentFile, filesById, focu
         <label>与上一步的关系<input value={step.relationship} maxLength={500} onChange={(event) => setRouteDraft((draft) => draft ? { ...draft, steps: draft.steps.map((item, stepIndex) => stepIndex === index ? { ...item, relationship: event.target.value } : item) } : draft)} /></label>
         <label>检查理解的问题<input value={step.question} maxLength={500} onChange={(event) => setRouteDraft((draft) => draft ? { ...draft, steps: draft.steps.map((item, stepIndex) => stepIndex === index ? { ...item, question: event.target.value } : item) } : draft)} /></label>
       </li>)}</ol>
-      <p>每步的引用将重新读取当前仓库源码并校验行号。保存后路线签名会更新，旧路线进度保留在原签名下。</p>
+      <p>保存时会重新读取源码并校验每步行号。修改后的路线会单独记录进度，原路线进度仍保留。</p>
       <button type="button" disabled={clearing || routeSaveBusy || routeDraft.steps.length < 1 || routeDraft.steps.length > 7} onClick={() => void saveRouteDraft()}>{routeSaveBusy ? "正在校验…" : "校验并保存路线"}</button><button type="button" disabled={routeSaveBusy} onClick={() => { routeEditController.current?.abort(); setRouteDraft(null); }}>取消</button>
-    </div>}
-    {activeImportPreview && <div className="reading-import-preview" role="dialog" aria-label="导入预览"><strong>导入预览</strong><p>{activeImportPreview.data.notes.length} 条笔记 · {activeImportPreview.data.tours.length} 条路线 · {activeImportPreview.conflicts} 个 ID 冲突</p>{activeImportPreview.crossTarget && <p role="alert">来源工作区或 ref 不同，需要明确确认；无效源码位置将保留说明并停用跳转。</p>}<p>导入位置会逐条检查；确认时会再核对仓库、引用和当前 ID 冲突。</p><button type="button" disabled={clearing || importConfirmBusy} onClick={() => void confirmImport()}>{importConfirmBusy ? "正在重新校验…" : "确认导入"}</button><button type="button" disabled={importConfirmBusy} onClick={() => setImportPreview(null)}>取消</button></div>}
+    </WorkspaceDialog>}
+    {activeImportPreview && <WorkspaceDialog onDismiss={() => { importController.current?.abort(); importSequence.current += 1; setImportPreview(null); }} className="reading-import-preview" aria-label="导入预览"><strong>导入预览</strong><p>{activeImportPreview.data.notes.length} 条笔记 · {activeImportPreview.data.tours.length} 条路线 · {activeImportPreview.conflicts} 条记录冲突</p>{activeImportPreview.crossTarget && <p role="alert">来源工作区或 Git 版本标识不同，需要明确确认；无效源码位置会保留说明并停用跳转。</p>}<p>导入位置会逐条检查；确认时会重新核对仓库、引用和记录冲突。</p><button type="button" disabled={clearing || importConfirmBusy} onClick={() => void confirmImport()}>{importConfirmBusy ? "正在重新校验…" : "确认导入"}</button><button type="button" disabled={importConfirmBusy} onClick={() => setImportPreview(null)}>取消</button></WorkspaceDialog>}
     {error && <p role="status" className="reading-feedback">{error}</p>}
   </section>;
 }
