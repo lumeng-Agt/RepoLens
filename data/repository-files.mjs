@@ -28,7 +28,14 @@ export function createRepositoryFileAccess(inputRoot, { expectedIdentity } = {})
   const canonicalPath = fs.realpathSync.native ?? fs.realpathSync;
   const rootIdentity = fs.lstatSync(root);
   if (expectedIdentity && !sameIdentity(expectedIdentity, rootIdentity)) throw new Error("仓库目录在打开期间发生变化，请重新选择文件夹。");
-  if (!rootIdentity.isDirectory() || rootIdentity.isSymbolicLink() || path.relative(root, canonicalPath(root))) throw new Error("请选择一个真实的仓库文件夹。");
+  if (!rootIdentity.isDirectory() || rootIdentity.isSymbolicLink()) throw new Error("请选择一个真实的仓库文件夹。");
+  // Windows temporary directories may have a junction or short-name ancestor.
+  // Pin the resolved root identity instead of treating a spelling change as a link inside it.
+  const canonicalRoot = canonicalPath(root);
+  const resolvedIdentity = fs.lstatSync(canonicalRoot);
+  const requestedAfter = fs.lstatSync(root);
+  if (!resolvedIdentity.isDirectory() || resolvedIdentity.isSymbolicLink() || requestedAfter.isSymbolicLink()
+    || !sameIdentity(rootIdentity, resolvedIdentity) || !sameIdentity(rootIdentity, requestedAfter)) throw new Error("仓库目录在打开期间发生变化，请重新选择文件夹。");
   function failure(fileName, code) {
     const absolute = path.resolve(root, fileName);
     const name = contained(root, absolute) ? path.relative(root, absolute).split(path.sep).join("/") || "." : "仓库外路径";
@@ -54,7 +61,7 @@ export function createRepositoryFileAccess(inputRoot, { expectedIdentity } = {})
         chain.push({ name: current, info });
       }
       const realPath = canonicalPath(absolute);
-      if (!contained(root, realPath)) throw failure(fileName, "REPOSITORY_FILE_BLOCKED");
+      if (!contained(canonicalRoot, realPath)) throw failure(fileName, "REPOSITORY_FILE_BLOCKED");
       return { path: absolute, realPath, info: chain.at(-1).info, chain };
     } catch (error) {
       if (String(error.code).startsWith("REPOSITORY_")) throw error;

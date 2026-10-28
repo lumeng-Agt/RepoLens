@@ -1,7 +1,7 @@
 // Deterministic fault injection for local-server AI lifecycle tests only.
 import fs from "node:fs/promises";
 import http from "node:http";
-import { existsSync, unlinkSync, watch, writeFileSync } from "node:fs";
+import { existsSync, realpathSync, unlinkSync, watch, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import path from "node:path";
 
@@ -12,14 +12,18 @@ if (gateDirectory && process.argv[1]?.endsWith("local-server.mjs")) {
   const mark = (kind, id) => {
     if (id && /^[a-z0-9-]+$/i.test(id)) writeFileSync(path.join(gateDirectory, `${kind}-${id}`), "ready\n");
   };
+  const physicalPath = file => {
+    const absolute = path.resolve(String(file));
+    try { return (realpathSync.native ?? realpathSync)(absolute); } catch { return absolute; }
+  };
   const gatedRead = async (file, operation) => {
     const id = process.env.REPOLENS_TEST_AI_READ_ID;
     const target = process.env.REPOLENS_TEST_AI_TARGET;
     const prefix = process.env.REPOLENS_TEST_AI_PREFIX;
     const suffix = process.env.REPOLENS_TEST_AI_SUFFIX;
-    const absoluteFile = path.resolve(String(file));
-    const isExactTarget = target && absoluteFile === path.resolve(target);
-    const relativeToPrefix = prefix ? path.relative(path.resolve(prefix), absoluteFile) : "";
+    const absoluteFile = physicalPath(file);
+    const isExactTarget = target && !path.relative(physicalPath(target), absoluteFile);
+    const relativeToPrefix = prefix ? path.relative(physicalPath(prefix), absoluteFile) : "";
     const isUnderPrefix = prefix && relativeToPrefix && relativeToPrefix !== ".." && !relativeToPrefix.startsWith(`..${path.sep}`) && !path.isAbsolute(relativeToPrefix);
     const matchesPrefixTarget = isUnderPrefix && suffix && absoluteFile.toLowerCase().endsWith(suffix.toLowerCase());
     const arm = path.join(gateDirectory, "read-arm");

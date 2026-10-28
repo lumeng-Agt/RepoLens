@@ -12,7 +12,7 @@ import { execFileSync } from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
 
 async function fixture(t) {
-  const parent = await mkdtemp(path.join(os.tmpdir(), "repolens-file-boundary-"));
+  const parent = fs.realpathSync.native(await mkdtemp(path.join(os.tmpdir(), "repolens-file-boundary-")));
   t.after(() => rm(parent, { recursive: true, force: true }));
   const root = path.join(parent, "repo"); const outside = path.join(parent, "outside");
   await mkdir(root); await mkdir(outside);
@@ -21,6 +21,20 @@ async function fixture(t) {
   await writeFile(path.join(root, "tsconfig.json"), JSON.stringify({ extends: "../outside/shared.json" }));
   return { root, outside };
 }
+
+test("repository reads accept an aliased ancestor while rejecting links inside the repository", async t => {
+  const { root, outside } = await fixture(t);
+  const alias = path.join(path.dirname(root), "parent-alias");
+  fs.symlinkSync(path.dirname(root), alias, "junction");
+  const aliasedRoot = path.join(alias, "repo");
+  const access = createRepositoryFileAccess(aliasedRoot);
+  assert.match(access.readFileSync("target.ts").content, /value = 1/);
+  assert.match((await access.readFile(path.join(aliasedRoot, "target.ts"))).content, /value = 1/);
+  fs.symlinkSync(outside, path.join(root, "linked"), "junction");
+  await writeFile(path.join(outside, "secret.ts"), "EXTERNAL_BODY");
+  await assert.rejects(access.readFile("linked/secret.ts"), { code: "REPOSITORY_FILE_BLOCKED" });
+  assert.throws(() => createRepositoryFileAccess(path.join(root, "linked")), /真实的仓库文件夹/);
+});
 
 test("TypeScript extends outside the repository cannot supply compiler options", async t => {
   const { root, outside } = await fixture(t);

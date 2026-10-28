@@ -31,6 +31,14 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: npm
+      - name: Record temporary directory resolution
+        shell: pwsh
+        run: |
+          @'
+          const fs = require('node:fs');
+          const os = require('node:os');
+          console.log(JSON.stringify({ node: process.version, temporaryPath: os.tmpdir(), resolvedTemporaryPath: fs.realpathSync.native(os.tmpdir()) }));
+          '@ | node
       - name: Install locked dependencies
         run: npm ci
       - name: Install browser for browser-backed regression tests
@@ -46,7 +54,11 @@ jobs:
         run: npm run typecheck
       - name: Run Node 22 tests
         if: matrix.profile == 'compatibility'
-        run: npm test
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force .artifacts/verify/node-22 | Out-Null
+          npm test 2>&1 | Tee-Object -FilePath .artifacts/verify/node-22/node.log
+          exit $LASTEXITCODE
       - name: Preserve failure evidence
         if: always()
         uses: actions/upload-artifact@v4

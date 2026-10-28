@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { watch } from "node:fs";
+import { symlinkSync, watch } from "node:fs";
 import { access, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
@@ -44,7 +44,11 @@ async function waitForFile(filePath) {
 
 async function createFixture(context) {
   const root = await mkdtemp(path.join(os.tmpdir(), "repolens-ai-generation-life-"));
-  const repository = path.join(root, "repository");
+  const physical = path.join(root, "physical");
+  const alias = path.join(root, "path-alias");
+  await mkdir(physical);
+  symlinkSync(physical, alias, "junction");
+  const repository = path.join(alias, "repository");
   const gates = path.join(root, "gates");
   await mkdir(repository);
   await mkdir(gates);

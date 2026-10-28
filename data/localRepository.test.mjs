@@ -614,12 +614,13 @@ test("revalidates inherited config contents even when config metadata is unchang
 
   await writeFile(configPath, JSON.stringify({ compilerOptions: { baseUrl: ".", paths: { "@value": ["src/b/value.ts"] } } }));
   const current = await stat(configPath);
-  const configKey = configPath.replaceAll("\\", "/");
-  first.configCache.get(configPath).configFiles.set(configKey, {
+  const resolvedConfigPath = path.join(first.root, "tsconfig.json");
+  const configKey = resolvedConfigPath.replaceAll("\\", "/");
+  first.configCache.get(resolvedConfigPath).configFiles.set(configKey, {
     size: current.size,
     mtimeMs: current.mtimeMs,
     ctimeMs: current.ctimeMs,
-    contentHash: first.configCache.get(configPath).configFiles.get(configKey).contentHash,
+    contentHash: first.configCache.get(resolvedConfigPath).configFiles.get(configKey).contentHash,
   });
 
   const updated = await scanRepository(root, first);
