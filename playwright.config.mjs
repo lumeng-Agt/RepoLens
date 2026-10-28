@@ -8,6 +8,7 @@ const apiPort = 4319;
 const baseURL = `http://127.0.0.1:${uiPort}`;
 const serverLogDirectory = path.join(os.tmpdir(), "repolens-e2e-server-logs");
 mkdirSync(serverLogDirectory, { recursive: true });
+const isolatedUserData = path.join(serverLogDirectory, `${process.pid}-${Date.now()}-user-data`);
 const serverLogPath = path.join(serverLogDirectory, `${process.pid}-${Date.now()}.log`);
 process.env.REPOLENS_E2E_SERVER_LOG = serverLogPath;
 
@@ -33,6 +34,7 @@ export default defineConfig({
     timeout: 120_000,
     env: {
       REPOLENS_PORT: String(apiPort),
+      REPOLENS_USER_DATA_PATH: isolatedUserData,
       REPOLENS_UI_PORT: String(uiPort),
       VINEXT_NO_DEV_LOCK: "1",
       NEXT_PUBLIC_REPOLENS_API_ORIGIN: `http://127.0.0.1:${apiPort}`,

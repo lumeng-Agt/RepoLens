@@ -1,4 +1,5 @@
 import { z } from "zod";
+export { InvestigationResultSchema } from "./investigation.mjs";
 
 export const AiSourceReferenceSchema = z.object({ fileId: z.string().min(1), startLine: z.number().int().positive(), endLine: z.number().int().positive().optional() }).strict();
 export const AiExplanationSchema = z.object({ role: z.string().min(1), keyPoints: z.array(z.string()), references: z.array(AiSourceReferenceSchema).min(1) }).strict();
@@ -16,7 +17,7 @@ export const AiGenerationEnvelopeSchema = z.object({
   revision: z.string().min(1),
   repositoryId: z.string().min(1),
   entryFileId: z.string().min(1),
-  mode: z.enum(["explanation", "route", "question"]),
+  mode: z.enum(["explanation", "route", "question", "investigation"]),
   chatPersisted: z.boolean().optional(),
   warning: z.string().optional(),
 }).strict();
@@ -55,12 +56,12 @@ export const AiPreviewSuccessSchema = z.object({
   scopeRequired: z.literal(false),
   preview: z.object({
     id: z.string().min(1), repositoryId: z.string().min(1), revision: z.string().min(1),
-    entryFileId: z.string().min(1), mode: z.enum(["explanation", "route", "question"]),
+    entryFileId: z.string().min(1), mode: z.enum(["explanation", "route", "question", "investigation"]),
     goal: z.string().max(300).optional(),
     baseUrl: z.string().min(1), model: z.string().min(1),
     files: z.array(z.object({ fileId: z.string().min(1), startLine: z.number().int().positive(), endLine: z.number().int().positive(), contentHash: z.string().min(1), reasons: z.array(z.string().min(1)).optional() }).strict()),
     characters: z.number().int().nonnegative(), tokenEstimate: z.number().int().nonnegative().optional(), expiresAt: z.number().int().positive(),
-    question: z.string().optional(),
+    excludedFileIds: z.array(z.string()).optional(), question: z.string().optional(),
     history: z.array(z.object({ role: z.enum(["user", "assistant"]), content: z.string() }).strict()).max(6).optional(),
     retrievalInsufficient: z.boolean().optional(),
   }).strict(),

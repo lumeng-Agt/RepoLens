@@ -1,0 +1,14 @@
+import type { Investigation } from "./model";
+export type InvestigationState = { records: Investigation[]; loaded: boolean; pending: number; error: string; saving: boolean };
+export function getInvestigationState(id: string): InvestigationState;
+export function registerInvestigationSession(id: string, sessionId: string): void;
+export function subscribeInvestigations(id: string, callback: () => void): () => void;
+export function restoreInvestigations(id: string, records: Investigation[]): InvestigationState;
+export function failInvestigationRead(id: string, message: string): InvestigationState;
+export function changeInvestigation(id: string, record: Investigation): boolean;
+export function deleteInvestigation(id: string, recordId: string): boolean;
+export function persistInvestigations(id: string, write: (records: Investigation[]) => Promise<void>): Promise<boolean>;
+export function invalidateInvestigationTasks(id: string): void;
+export function getInvestigationEpoch(id: string): number;
+export function clearInvestigationMemory(id: string): void;
+export function knownInvestigationWorkspaces(): string[];

@@ -12,8 +12,7 @@ if (gateDirectory && process.argv[1]?.endsWith("local-server.mjs")) {
   const mark = (kind, id) => {
     if (id && /^[a-z0-9-]+$/i.test(id)) writeFileSync(path.join(gateDirectory, `${kind}-${id}`), "ready\n");
   };
-  const originalReadFile = fs.readFile;
-  fs.readFile = async function gatedReadFile(file, ...args) {
+  const gatedRead = async (file, operation) => {
     const id = process.env.REPOLENS_TEST_AI_READ_ID;
     const target = process.env.REPOLENS_TEST_AI_TARGET;
     const prefix = process.env.REPOLENS_TEST_AI_PREFIX;
@@ -42,9 +41,18 @@ if (gateDirectory && process.argv[1]?.endsWith("local-server.mjs")) {
         finish();
       });
     }
-    const value = await originalReadFile.call(this, file, ...args);
+    const value = await operation();
     if (shouldHold) mark("read-finished", id);
     return value;
+  };
+  const originalReadFile = fs.readFile;
+  fs.readFile = function gatedReadFile(file, ...args) { return gatedRead(file, () => originalReadFile.call(this, file, ...args)); };
+  const originalOpen = fs.open;
+  fs.open = async function gatedOpen(file, ...args) {
+    const handle = await originalOpen.call(this, file, ...args);
+    const originalRead = handle.read.bind(handle);
+    handle.read = (...readArgs) => gatedRead(file, () => originalRead(...readArgs));
+    return handle;
   };
 
   const originalCreateServer = http.createServer;

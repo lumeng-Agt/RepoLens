@@ -89,6 +89,7 @@ async function createFixture(context) {
       REPOLENS_UI_PORT: "5173",
       REPOLENS_AI_TIMEOUT_MS: "5000",
       REPOLENS_TEST_AI_GATE_DIR: gates,
+      REPOLENS_USER_DATA_PATH: path.join(root, "user-data"),
       REPOLENS_TEST_AI_TARGET: sourcePath,
       REPOLENS_TEST_AI_READ_ID: "cancel-check",
       NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --import=${pathToFileURL(gate).href}`.trim(),

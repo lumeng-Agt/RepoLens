@@ -1,7 +1,7 @@
-import { AiExplanationSchema, AiQuestionAnswerSchema, AiRouteSchema } from "./ai-contract.mjs";
+import { AiExplanationSchema, AiQuestionAnswerSchema, AiRouteSchema, InvestigationResultSchema } from "./ai-contract.mjs";
 import { readSseData, partialAnswer } from "./ai-stream.mjs";
 
-export const AI_PROMPT_VERSION = "prompt-v4";
+export const AI_PROMPT_VERSION = "prompt-v5-investigation";
 
 export class ModelRedirectError extends Error {
   constructor() {
@@ -13,6 +13,7 @@ export class ModelRedirectError extends Error {
 }
 
 function schemaFor(mode) {
+  if (mode === "investigation") return InvestigationResultSchema;
   if (mode === "route") return AiRouteSchema;
   if (mode === "question") return AiQuestionAnswerSchema;
   return AiExplanationSchema;
@@ -27,11 +28,11 @@ export function validateAiResult(value, preview) {
     if (index === 0 && step.fileId !== preview.entryFileId) throw new Error("阅读路线第一步必须从所选入口文件开始，并引用该文件源码。");
     if (!step.references.some((reference) => reference.fileId === step.fileId)) throw new Error("路线步骤必须引用本步骤对应文件的源码。");
     return step.references;
-  }) : parsed.data.references;
+  }) : preview.mode === "investigation" ? parsed.data.items.flatMap(item => item.references) : parsed.data.references;
   if (preview.mode === "explanation" && !parsed.data.references.some((reference) => reference.fileId === preview.entryFileId)) {
     throw new Error("文件讲解必须引用所选入口文件的源码。");
   }
-  if (!references.length && !(preview.mode === "question" && parsed.data.insufficientEvidence)) throw new Error("模型没有返回可用的源码引用。");
+  if (!references.length && !(preview.mode === "question" && parsed.data.insufficientEvidence) && !(preview.mode === "investigation" && !parsed.data.items.length)) throw new Error("模型没有返回可用的源码引用。");
   for (const reference of references) {
     const source = sources.get(reference.fileId);
     const endLine = reference.endLine ?? reference.startLine;
@@ -46,7 +47,9 @@ export function buildChatCompletionRequest(context, mode, repair = false) {
   configured.pathname = /\/chat\/completions$/i.test(pathname) ? pathname : `${pathname}${/\/v1$/i.test(pathname) ? "" : "/v1"}/chat/completions`;
   const lines = context.sources.map(({ fileId, source, startLine, endLine }) => `FILE ${fileId} LINES ${startLine}-${endLine}\n${source}`).join("\n\n");
   const taskMetadata = `任务信息：${JSON.stringify({ promptVersion: AI_PROMPT_VERSION, mode, entryFileId: context.entryFileId })}`;
-  const modeText = mode === "route"
+  const modeText = mode === "investigation"
+    ? `根据需求定位候选改动位置：${context.question}。只给出值得调查的候选，不断言必须修改。每项 reason 说明基于源码的推断，不把静态导入称为实际调用；无法确认时在 questions 中说明。候选引用必须在发送范围内。没有依据时 items 留空。suggestedFileId 仅是下次建议补读的路径，不附未发送源码。返回 JSON: {"summary":string,"items":[{"id":string,"title":string,"responsibility":string,"reason":string,"references":[{"fileId":string,"startLine":number,"endLine":number}]}],"questions":[{"question":string,"suggestedFileId":string}]}。`
+    : mode === "route"
     ? `从入口文件 ${context.entryFileId} 开始，目标是“${context.goal || "理解仓库的核心流程"}”，按静态依赖关系安排阅读。第一步的 fileId 必须是该入口，且引用它的源码。返回 JSON: {"title":string,"steps":[{"fileId":string,"purpose":string,"relationship":string,"question":string,"references":[{"fileId":string,"startLine":number,"endLine":number}]}]}。steps 需 3 到 7 个，每步都引用本步骤对应文件的源码；relationship 说明它与前一步的关系，不得把静态依赖描述为已验证的运行时调用顺序；question 是一个帮助读者自测的问题。`
     : mode === "question"
       ? `回答用户当前问题：${context.question}\n仅依据下面发送的源码片段。若证据不足，明确说明无法从已发送源码判断，返回 insufficientEvidence=true 且 references=[]；否则返回 insufficientEvidence=false，并给出至少一条支持回答的有效引用。优先将答案拆成结论段落，每条 claims 包含 text 与对应 references 数组下标 referenceIndices。JSON 格式：{"answer":string,"insufficientEvidence":boolean,"references":[{"fileId":string,"startLine":number,"endLine":number}],"claims":[{"text":string,"referenceIndices":[0]}]}。不要提出或执行任何操作。`

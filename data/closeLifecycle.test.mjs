@@ -37,7 +37,7 @@ async function fixture(context, { wrapper = false, refuse = false } = {}) {
   const url = "https://github.com/repolens-test/close-lifecycle.git";
   const child = spawn(process.execPath, wrapper ? ["scripts/with-local-service.mjs", "-e", "process.stdin.once('data',()=>process.exit(0));setInterval(()=>{},1000)"] : ["scripts/local-server.mjs"], {
     cwd: project, windowsHide: true, stdio: ["pipe", "pipe", "pipe", "ipc"],
-    env: { ...process.env, REPOLENS_PORT: String(port), REPOLENS_TEMP_ROOT: root,
+    env: { ...process.env, REPOLENS_PORT: String(port), REPOLENS_TEMP_ROOT: root, REPOLENS_USER_DATA_PATH: path.join(root, "user-data"),
       REPOLENS_TEST_GIT_CLOSE_ARM: arm, REPOLENS_TEST_GIT_CLOSE_ENTERED: entered, REPOLENS_TEST_GIT_CLOSE_RELEASE: release,
       REPOLENS_TEST_CLEANUP_BLOCK: block, REPOLENS_TEST_REFUSE_SHUTDOWN: refuse ? "1" : "0",
       NODE_OPTIONS: ["github-git-close-gate.mjs", "lifecycle-test-gate.mjs"].map(f => `--import=${pathToFileURL(path.join(project, "data", f)).href}`).join(" "),
@@ -61,7 +61,10 @@ async function fixture(context, { wrapper = false, refuse = false } = {}) {
     }
     assert.ok(root.startsWith(path.resolve(os.tmpdir()) + path.sep)); await rm(root, { recursive: true, force: true });
   });
-  for (let i = 0; i < 100; i++) { try { await api("/api/health"); break; } catch { await new Promise(r => setTimeout(r, 30)); } }
+  // The service imports TypeScript on startup; a 3 s window fails under load.
+  let ready = false;
+  for (let i = 0; i < 250 && !ready; i++) { try { await api("/api/health"); ready = true; } catch { await new Promise(r => setTimeout(r, 30)); } }
+  assert.ok(ready, `本地服务未在 7.5 秒内就绪：${output}`);
   return { root, local, url, api, child, exited, message, output: () => output,
     command: (n, clientId = "test") => ({ clientId, intentSequence: n }),
     directories: async () => (await readdir(root)).filter(n => n.startsWith("repolens-github-")),

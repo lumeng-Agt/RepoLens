@@ -265,7 +265,7 @@ test("the preview wrapper cleans remote workspaces after UI exits and explicit s
   const child = spawn(process.execPath, [wrapper, "-e", `process.stdin.once('data', () => process.exit(${uiExitCode})); setInterval(() => {}, 1000);`], {
     cwd: projectRoot,
     env: {
-      ...process.env,
+      ...process.env, REPOLENS_USER_DATA_PATH: path.join(testRoot, "user-data"),
       REPOLENS_PORT: String(apiPort), REPOLENS_UI_PORT: "5173", REPOLENS_TEMP_ROOT: testRoot,
       GIT_CONFIG_COUNT: "1",
       GIT_CONFIG_KEY_0: "url." + pathToFileURL(remote).href + ".insteadOf",
@@ -349,7 +349,7 @@ test("the local service waits for a delayed Git close event before cleaning on c
   const child = spawn(process.execPath, [path.join(projectRoot, "scripts/local-server.mjs")], {
     cwd: projectRoot,
     env: {
-      ...process.env,
+      ...process.env, REPOLENS_USER_DATA_PATH: path.join(testRoot, "user-data"),
       REPOLENS_PORT: String(apiPort),
       REPOLENS_UI_PORT: "5173",
       REPOLENS_TEMP_ROOT: testRoot,
@@ -526,7 +526,7 @@ test("GitHub AI verification preserves remote identity, revision, cache, and wor
   const child = spawn(process.execPath, [path.join(projectRoot, "scripts/local-server.mjs")], {
     cwd: projectRoot,
     env: {
-      ...process.env,
+      ...process.env, REPOLENS_USER_DATA_PATH: path.join(testRoot, "user-data"),
       REPOLENS_PORT: String(apiPort), REPOLENS_UI_PORT: "5173", REPOLENS_TEMP_ROOT: testRoot,
       GIT_CONFIG_COUNT: "1",
       GIT_CONFIG_KEY_0: "url." + pathToFileURL(remote).href + ".insteadOf",

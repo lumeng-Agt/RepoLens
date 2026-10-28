@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Telescope } from "lucide-react";
 import type { AiRouteRecord, ReadingNote, RepositoryOverview as OverviewData, RepositorySnapshot } from "@/data/model";
 import type { AiResultRecord } from "@/components/repolens/AiResultView";
 import { localRepositoryProvider } from "@/data/providers";
 import { RevisionComparisonPanel } from "@/components/repolens/RevisionComparisonPanel";
 
-export function WorkspaceOverview({ repository, stepCount, compact = false, clearVersion = 0, notes, tours, results, statusMessage, onSelectFile, onDismissMessage }: { repository: RepositorySnapshot; stepCount: number; compact?: boolean; clearVersion?: number; notes: ReadingNote[]; tours: AiRouteRecord[]; results: AiResultRecord[]; statusMessage?: string; onSelectFile: (fileId: string) => void; onDismissMessage?: () => void }) {
+export function WorkspaceOverview({ repository, stepCount, compact = false, clearVersion = 0, notes, tours, results, statusMessage, onSelectFile, onDismissMessage, investigationEntry }: { repository: RepositorySnapshot; stepCount: number; compact?: boolean; clearVersion?: number; investigationEntry?: ReactNode; notes: ReadingNote[]; tours: AiRouteRecord[]; results: AiResultRecord[]; statusMessage?: string; onSelectFile: (fileId: string) => void; onDismissMessage?: () => void }) {
   const [expanded, setExpanded] = useState(false);
   const [remoteOverview, setRemoteOverview] = useState<OverviewData | null>(null);
   const [overviewError, setOverviewError] = useState<{ revision: string; message: string } | null>(null);
@@ -29,6 +29,7 @@ export function WorkspaceOverview({ repository, stepCount, compact = false, clea
   return <section className={`workspace-overview${compact ? " is-compact" : ""}`} aria-label="仓库概览">
     <div className="workspace-overview-copy"><span className="workspace-context-label">{repository.origin?.kind === "github" ? `${repository.origin.resolvedRef} · ${repository.origin.commit.slice(0, 12)}` : repository.source === "local" ? "本地仓库 · 静态分析" : "内置示例"}</span></div>
     <div className="workspace-overview-actions">
+      {investigationEntry}
       {statusMessage && <div className="workspace-message" role="status" title={statusMessage}><span>{statusMessage}</span>{onDismissMessage && <button type="button" aria-label="关闭提示" onClick={onDismissMessage}>×</button>}</div>}
       <details className="overview-disclosure" onToggle={(event) => setExpanded(event.currentTarget.open)}>
         <summary><Telescope size={14} />仓库概览</summary>

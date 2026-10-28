@@ -6,7 +6,7 @@ import { normalizeWorkspaceLayout } from "./workspace-layout.mjs";
 const VERSION = 1;
 const MAX_STORE_BYTES = 64 * 1024 * 1024;
 const MAX_PROGRESS_BYTES = 16 * 1024;
-const emptyState = () => ({ version: VERSION, recentRepositories: [], aiResults: {}, aiRoutes: {}, progress: {}, nodePositions: {}, conversations: {}, readingNotes: {}, savedTours: {}, guidePreferences: null, layoutPreferences: null });
+const emptyState = () => ({ version: VERSION, recentRepositories: [], aiResults: {}, aiRoutes: {}, progress: {}, nodePositions: {}, conversations: {}, readingNotes: {}, savedTours: {}, investigations: {}, guidePreferences: null, layoutPreferences: null });
 const clone = (value) => structuredClone(value);
 
 class UnsupportedStoreVersionError extends Error {}
@@ -15,7 +15,7 @@ function validateState(value) {
   if (!value || typeof value !== "object" || value.version !== VERSION) throw new UnsupportedStoreVersionError("工作区存储版本不受支持。");
   const state = emptyState();
   state.recentRepositories = Array.isArray(value.recentRepositories) ? value.recentRepositories.filter((item) => item && typeof item.id === "string" && typeof item.name === "string" && typeof item.location === "string").slice(0, 20) : [];
-  for (const key of ["aiResults", "aiRoutes", "progress", "nodePositions", "conversations", "readingNotes", "savedTours"]) {
+  for (const key of ["aiResults", "aiRoutes", "progress", "nodePositions", "conversations", "readingNotes", "savedTours", "investigations"]) {
     if (value[key] && typeof value[key] === "object" && !Array.isArray(value[key])) state[key] = value[key];
   }
   if (Object.hasOwn(value, "guidePreferences")) state.guidePreferences = value.guidePreferences;
@@ -127,7 +127,7 @@ export function createWorkspaceStore(directory) {
 
   function removeRepositoryFromState(target, repositoryId) {
     target.recentRepositories = target.recentRepositories.filter((item) => (item.workspaceId ?? item.id) !== repositoryId);
-    delete target.aiResults[repositoryId]; delete target.aiRoutes[repositoryId]; delete target.readingNotes[repositoryId]; delete target.savedTours[repositoryId];
+    delete target.aiResults[repositoryId]; delete target.aiRoutes[repositoryId]; delete target.readingNotes[repositoryId]; delete target.savedTours[repositoryId]; delete target.investigations[repositoryId];
     delete target.nodePositions[repositoryId]; delete target.conversations[repositoryId];
     for (const key of Object.keys(target.progress)) if (key.startsWith(`repolens:${repositoryId}:`)) delete target.progress[key];
   }
@@ -196,6 +196,7 @@ export function createWorkspaceStore(directory) {
         progress: Object.fromEntries(Object.entries(state.progress).filter(([key]) => key.startsWith(prefix))),
         nodePositions: clone(state.nodePositions[repositoryId] ?? {}),
         conversations: clone(state.conversations[repositoryId] ?? []),
+        investigations: clone(state.investigations[repositoryId] ?? []),
         readingNotes: clone(state.readingNotes[repositoryId] ?? []),
         savedTours: clone(state.savedTours[repositoryId] ?? []),
         guidePreferences: clone(state.guidePreferences),
@@ -252,6 +253,9 @@ export function createWorkspaceStore(directory) {
           current.aiResults[workspaceId][artifacts.explanation.__entryFileId] = artifacts.explanation;
         }
       });
+    },
+    async saveInvestigations(repositoryId, records) {
+      return mutate((current) => { current.investigations[repositoryId] = records; });
     },
     async saveReadingNotes(repositoryId, notes) {
       if (!Array.isArray(notes) || notes.length > 10_000) throw new Error("阅读笔记数量超出限制。");

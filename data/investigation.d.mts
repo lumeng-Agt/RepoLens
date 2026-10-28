@@ -1,0 +1,11 @@
+import type { z } from "zod";
+import type { Investigation, InvestigationItem, InvestigationResult, RepositorySnapshot, FileRecord } from "./model";
+export const InvestigationSchema: z.ZodTypeAny;
+export const InvestigationItemSchema: z.ZodTypeAny;
+export const InvestigationResultSchema: z.ZodTypeAny;
+export function createInvestigation(input: { result: InvestigationResult; question: string; repository: RepositorySnapshot; contextFiles: Investigation["contextFiles"]; excludedFileIds?: string[]; id?: string; now?: number }): Investigation;
+export function investigationItemIsStale(item: InvestigationItem, investigation: Investigation, files: FileRecord[]): boolean;
+export function appendInvestigationResult(latest: Investigation, result: InvestigationResult, contextFiles: Investigation["contextFiles"], exclusions: string[], selectionReasons?: Record<string, string[]>, createId?: () => string): Investigation;
+export function exportInvestigations(records: Investigation[], format: "json" | "markdown"): string;
+export function parseInvestigationImport(text: string): Investigation[];
+export function mergeInvestigationImport(existing: Investigation[], incoming: Investigation[], workspaceId: string, createId?: () => string): { records: Investigation[]; conflicts: number; skipped: number };

@@ -41,6 +41,7 @@ test("unified chat rejects stale source after a same-session rescan", async (con
   const commandClientId = `local-server-test-${process.pid}`; let intentSequence = 0;
   const command = () => ({ clientId: commandClientId, intentSequence: ++intentSequence });
   const repoPath = await mkdtemp(path.join(os.tmpdir(), "repolens-api-"));
+  const userDataPath = await mkdtemp(path.join(os.tmpdir(), "repolens-api-state-"));
   await mkdir(path.join(repoPath, "src"));
   await writeFile(path.join(repoPath, "README.md"), "# Local Sample\n\nA safe text overview.");
   await writeFile(path.join(repoPath, "package.json"), JSON.stringify({ name: "local-sample" }));
@@ -97,11 +98,12 @@ test("unified chat rejects stale source after a same-session rescan", async (con
     response.end();
   });
   redirectServer.listen(redirectPort, "127.0.0.1"); await once(redirectServer, "listening");
-  const child = spawn(process.execPath, [path.join(projectRoot, "scripts/local-server.mjs")], { cwd: projectRoot, env: { ...process.env, REPOLENS_PORT: String(apiPort), REPOLENS_AI_TIMEOUT_MS: "10000" }, stdio: "ignore" });
+  const child = spawn(process.execPath, [path.join(projectRoot, "scripts/local-server.mjs")], { cwd: projectRoot, env: { ...process.env, REPOLENS_PORT: String(apiPort), REPOLENS_USER_DATA_PATH: userDataPath, REPOLENS_AI_TIMEOUT_MS: "10000" }, stdio: "ignore" });
   context.after(async () => {
-    child.kill("SIGTERM");
+    if (child.exitCode === null) { const exited = once(child, "exit"); child.kill("SIGTERM"); await exited; }
     await Promise.all([modelServer, redirectServer].map((server) => new Promise((resolve) => { server.closeAllConnections(); server.close(resolve); })));
     await rm(repoPath, { recursive: true, force: true });
+    await rm(userDataPath, { recursive: true, force: true });
   });
   await waitForService(origin, child);
 

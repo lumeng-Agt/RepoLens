@@ -36,7 +36,8 @@ test("real local service streams before completion and persists only a validated
   t.after(async () => { release?.(); if (server.connected) server.send({ type: "shutdown" }); await exited; model.closeAllConnections(); await new Promise(resolve => model.close(resolve)); assert.ok(root.startsWith(os.tmpdir())); await rm(root, { recursive: true, force: true }); });
   const origin = `http://127.0.0.1:${port}`;
   const request = async (route, body) => fetch(origin + route, { method: body ? "POST" : "GET", signal: AbortSignal.timeout(10000), headers: { Origin: "http://127.0.0.1:5173", "Content-Type": "application/json" }, ...(body ? { body: JSON.stringify(body) } : {}) });
-  for (let i = 0; i < 100; i++) { try { if ((await request("/api/health")).ok) break; } catch {} if (i === 99) throw Error(logs); await new Promise(resolve => setTimeout(resolve, 30)); }
+  // The service imports TypeScript on startup; a 3 s window fails under load.
+  for (let i = 0; i < 250; i++) { try { if ((await request("/api/health")).ok) break; } catch {} if (i === 249) throw Error(logs || "本地服务未在 7.5 秒内就绪。"); await new Promise(resolve => setTimeout(resolve, 30)); }
   const opened = await (await request("/api/open", { path: repo, command: { clientId: "stream-test", intentSequence: 1 } })).json();
   assert.ok(opened.id, JSON.stringify(opened));
   await request("/api/ai/settings", { baseUrl: `http://127.0.0.1:${model.address().port}/v1`, model: "stream-model", apiKey: "test-key" });

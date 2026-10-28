@@ -1,3 +1,4 @@
+import { AI_PROMPT_VERSION } from "../data/ai-generation.mjs";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
@@ -119,6 +120,7 @@ let browser;
 let browserContext;
 let page;
 let application;
+let applicationOutput = "";
 let modelCalls = 0;
 let modelRequestBodies = [];
 const modelServer = createServer(async (request, response) => {
@@ -180,7 +182,7 @@ try {
     cwd: projectRoot,
     env: {
       ...process.env,
-      REPOLENS_PORT: String(apiPort), REPOLENS_UI_PORT: String(uiPort), REPOLENS_TEMP_ROOT: tempWorkspaces,
+      REPOLENS_PORT: String(apiPort), REPOLENS_UI_PORT: String(uiPort), REPOLENS_TEMP_ROOT: tempWorkspaces, REPOLENS_USER_DATA_PATH: path.join(temporaryRoot, "user-data"),
       NEXT_PUBLIC_REPOLENS_API_ORIGIN: apiOrigin,
       VINEXT_NO_DEV_LOCK: "1",
       GIT_CONFIG_COUNT: "1",
@@ -195,8 +197,10 @@ try {
       REPOLENS_TEST_AI_READ_ID: "ui-cancel",
       NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --import=${pathToFileURL(path.join(projectRoot, "data", "ai-generation-gate.mjs")).href}`.trim(),
     },
-    stdio: "ignore", windowsHide: true,
+    stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
   });
+  const captureOutput = chunk => { applicationOutput = (applicationOutput + chunk.toString()).slice(-100000); };
+  application.stdout.on("data", captureOutput); application.stderr.on("data", captureOutput);
   await waitForHealth(apiOrigin, application);
   await waitForTcp(uiPort, application);
   browser = await chromium.launch({ headless: true });
@@ -240,7 +244,7 @@ try {
   assert.ok(modelRequestBodies[0].messages.some((message) => message.content.includes("FILE src/summary.ts LINES 1-")));
   const explanationTask = modelRequestBodies[0].messages.find((message) => message.role === "user").content.match(/^任务信息：(.+)$/m);
   assert.ok(explanationTask, "the confirmed model request includes task metadata");
-  assert.deepEqual(JSON.parse(explanationTask[1]), { promptVersion: "prompt-v4", mode: "explanation", entryFileId: "src/summary.ts" });
+  assert.deepEqual(JSON.parse(explanationTask[1]), { promptVersion: AI_PROMPT_VERSION, mode: "explanation", entryFileId: "src/summary.ts" });
   await page.getByRole("tab", { name: "讲解", exact: true }).click();
   await page.locator(".ai-result [aria-label='AI 源码引用'] .reference-row").first().click();
   await page.getByRole("tab", { name: "源码", exact: true }).click();
@@ -274,7 +278,7 @@ try {
   assert.equal(routeValue.result.steps[0].fileId, "src/index.ts", "the first route step matches the selected entry");
   const routeTask = modelRequestBodies[1].messages.find((message) => message.role === "user").content.match(/^任务信息：(.+)$/m);
   assert.ok(routeTask, "the confirmed route request includes task metadata");
-  assert.deepEqual(JSON.parse(routeTask[1]), { promptVersion: "prompt-v4", mode: "route", entryFileId: "src/index.ts" });
+  assert.deepEqual(JSON.parse(routeTask[1]), { promptVersion: AI_PROMPT_VERSION, mode: "route", entryFileId: "src/index.ts" });
   await setDisclosureOpen(page, ".tour-step-disclosure", true);
   const routeStep = page.getByRole("button", { name: "第 1 步：index.ts" });
   await routeStep.waitFor({ state: "visible" });
@@ -371,6 +375,13 @@ try {
   const leftovers = (await readdir(tempWorkspaces)).filter((name) => name.startsWith("repolens-github-"));
   assert.deepEqual(leftovers, [], "returning to the sample removes all temporary remote files");
   process.stdout.write(JSON.stringify({ browserFlow: "passed", modelCalls, cancelledDuringVerification: true, files: Object.keys(fixtureSources).length, cachedExplanation: true, revision: updatedSnapshot.sequence }) + "\n");
+} catch (error) {
+  const directory = path.join(projectRoot, ".artifacts", "github-browser-integration");
+  await mkdir(directory, { recursive: true });
+  const logPath = path.join(directory, `${Date.now()}-service.log`);
+  await writeFile(logPath, `${error.stack ?? error.message}\n\n${applicationOutput}`, "utf8");
+  process.stderr.write(`服务联动失败日志：${logPath}\n`);
+  throw error;
 } finally {
   const demoVideo = page?.video();
   if (browserContext) await browserContext.close();

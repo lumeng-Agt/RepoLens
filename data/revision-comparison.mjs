@@ -1,16 +1,22 @@
 import { execFile as execFileCallback, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { deflateSync } from "node:zlib";
-import { lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import os from "node:os";
 import path from "node:path";
+import { createRepositoryFileAccess } from "./repository-files.mjs";
 
 const execFile = promisify(execFileCallback);
 const MAX_DIFF_BYTES = 2 * 1024 * 1024;
 const MAX_CHANGED_FILES = 500;
 const MAX_CHANGED_CONTENT_BYTES = 32 * 1024 * 1024;
 const MAX_OUTPUT_BYTES = MAX_DIFF_BYTES + 64_000;
+// Files above this size are still compared by object id so an unrelated large
+// asset cannot fail the whole comparison; only their line diff is skipped.
+const MAX_DIFF_FILE_BYTES = 1024 * 1024;
+// Beyond this size even hashing every comparison costs more than it is worth.
+const MAX_HASH_FILE_BYTES = 64 * 1024 * 1024;
 let noLazyFetchSupported;
 
 function cleanGitEnvironment(extra = {}) {
@@ -171,16 +177,16 @@ function parseTree(output) {
     if (!record) continue;
     const tab = record.indexOf("\t");
     if (tab < 0) continue;
-    const [mode, type, oid] = record.slice(0, tab).split(" ");
+    const [mode, type, oid, size] = record.slice(0, tab).trim().split(/\s+/);
     const filePath = record.slice(tab + 1);
-    if (type === "blob" && (mode === "100644" || mode === "100755")) result.set(filePath, { mode, oid });
+    if (type === "blob" && (mode === "100644" || mode === "100755")) result.set(filePath, { mode, oid, size: Number(size) });
   }
   return result;
 }
 
 async function readCommitTree(root, commit, signal) {
   try {
-    const { stdout } = await git(root, ["ls-tree", "-r", "-z", "--full-tree", commit], { signal, maxBuffer: 128 * 1024 * 1024 });
+    const { stdout } = await git(root, ["ls-tree", "-r", "-l", "-z", "--full-tree", commit], { signal, maxBuffer: 128 * 1024 * 1024 });
     return parseTree(Buffer.from(stdout, "utf8"));
   } catch (error) {
     if (isMissingObjectFailure(String(error?.message ?? error))) throw missingObjectError();
@@ -222,43 +228,64 @@ function validateRelativePath(value) {
   return value.replaceAll("\\", "/");
 }
 
+async function hashFileStreaming(inspected, size, signal) {
+  const hash = createHash("sha1").update(`blob ${size}\0`);
+  await inspected.consume({ maximumBytes: MAX_HASH_FILE_BYTES, signal }, chunk => hash.update(chunk));
+  return hash.digest("hex");
+}
+
 async function readRawWorkingFiles(root, baseFiles, signal) {
-  const rootReal = await realpath(root);
+  const access = createRepositoryFileAccess(root);
+  const rootReal = access.root;
   const { stdout } = await git(root, ["ls-files", "--cached", "--others", "--exclude-standard", "-z"], { signal, maxBuffer: 128 * 1024 * 1024 });
   const paths = [...new Set(stdout.split("\0").filter(Boolean).map(validateRelativePath))];
   if (paths.length > 5_000) throw new Error(`版本比较候选文件共 ${paths.length} 个，超过 5,000 个限制。`);
   const files = new Map();
+  const skipped = new Map();
   let changedContentBytes = 0;
   for (const relativePath of paths) {
     if (signal?.aborted) throw Object.assign(new Error("版本比较已取消。"), { name: "AbortError" });
     const absolute = path.resolve(rootReal, ...relativePath.split("/"));
     const relative = path.relative(rootReal, absolute);
     if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error("仓库文件越出根目录，已停止版本比较。");
-    let cursor = rootReal;
-    let symbolic = false;
-    for (const part of relativePath.split("/")) {
-      cursor = path.join(cursor, part);
-      try { if ((await lstat(cursor)).isSymbolicLink()) symbolic = true; }
-      catch (error) { if (error.code === "ENOENT" || error.code === "ENOTDIR") { symbolic = true; break; } throw error; }
+    let stat; let inspected;
+    try { inspected = access.inspectSync(absolute); stat = inspected.info; }
+    catch (error) {
+      if (error.code === "ENOENT" || error.code === "ENOTDIR") continue;
+      if (error.code === "REPOSITORY_FILE_BLOCKED") {
+        files.set(relativePath, { mode: baseFiles.get(relativePath)?.mode ?? "100644", oid: baseFiles.get(relativePath)?.oid ?? "" });
+        skipped.set(relativePath, "不符合安全读取限制，未比较内容");
+        continue;
+      }
+      throw error;
     }
-    if (symbolic) continue;
-    const stat = await lstat(absolute);
     if (!stat.isFile()) continue;
-    const realFile = await realpath(absolute);
-    const realRelative = path.relative(rootReal, realFile);
-    if (realRelative === ".." || realRelative.startsWith(`..${path.sep}`) || path.isAbsolute(realRelative)) throw new Error("仓库文件解析后越出根目录。");
-    if (stat.size > 1024 * 1024) throw new Error(`比较文件超过 1 MiB 上限：${relativePath}`);
-    const content = await readFile(realFile);
     const mode = process.platform !== "win32" && (stat.mode & 0o111) ? "100755" : "100644";
-    const oid = blobOid(content);
     const base = baseFiles.get(relativePath);
+    if (stat.size > MAX_HASH_FILE_BYTES) {
+      // Refuse to stream absurdly large assets on every comparison; report them
+      // as unchecked instead of failing or silently claiming they are unchanged.
+      files.set(relativePath, { mode, oid: base?.oid ?? "" });
+      skipped.set(relativePath, `超过 ${MAX_HASH_FILE_BYTES / 1024 / 1024} MiB，未比较内容`);
+      continue;
+    }
+    if (stat.size > MAX_DIFF_FILE_BYTES) {
+      // Hash without keeping the bytes: an unchanged large asset must not break
+      // the comparison, and a changed one is reported instead of being diffed.
+      const oid = await hashFileStreaming(inspected, stat.size, signal);
+      files.set(relativePath, { mode, oid });
+      if (!base || base.oid !== oid || base.mode !== mode) skipped.set(relativePath, `超过 ${MAX_DIFF_FILE_BYTES / 1024 / 1024} MiB，未生成逐行差异`);
+      continue;
+    }
+    const { content } = await inspected.readFile({ encoding: null, maximumBytes: MAX_DIFF_FILE_BYTES, signal });
+    const oid = blobOid(content);
     if (!base || base.oid !== oid || base.mode !== mode) {
       changedContentBytes += content.length;
       if (changedContentBytes > MAX_CHANGED_CONTENT_BYTES) throw new Error("变更源码内容超过 32 MiB 比较上限；请缩小提交范围。");
       files.set(relativePath, { mode, oid, content });
     } else files.set(relativePath, { mode, oid });
   }
-  return files;
+  return { files, skipped };
 }
 
 function changedEntries(left, right) {
@@ -322,8 +349,8 @@ async function createRawComparison(root, leftFiles, rightFiles, changedPaths, si
   }
 }
 
-function emptyComparison({ revision, mode, baseCommit, headCommit }) {
-  return { revision, mode, baseCommit, headCommit, files: [], diff: "", limits: { maxFiles: MAX_CHANGED_FILES, maxDiffBytes: MAX_DIFF_BYTES } };
+function emptyComparison({ revision, mode, baseCommit, headCommit, skipped = [] }) {
+  return { revision, mode, baseCommit, headCommit, files: [], diff: "", skipped, limits: { maxFiles: MAX_CHANGED_FILES, maxDiffBytes: MAX_DIFF_BYTES } };
 }
 
 export async function compareRepositoryRevisions({ root, gitDir = root, currentCommit, mode, baseRef, headRef, revision, signal }) {
@@ -344,10 +371,24 @@ export async function compareRepositoryRevisions({ root, gitDir = root, currentC
   const scopedTree = (tree) => prefix ? new Map([...tree].filter(([name]) => name.startsWith(`${prefix}/`)).map(([name, file]) => [name.slice(prefix.length + 1), file])) : tree;
   const left = scopedTree(await readCommitTree(gitDir, base, signal));
   let right;
+  let skipped = new Map();
   if (mode === "commits") right = scopedTree(await readCommitTree(gitDir, head, signal));
-  else right = await readRawWorkingFiles(root, left, signal);
-  const changedPaths = changedEntries(left, right);
-  if (!changedPaths.length) return emptyComparison({ revision, mode, baseCommit: base, headCommit: head });
+  else {
+    const workingFiles = await readRawWorkingFiles(root, left, signal);
+    right = workingFiles.files;
+    skipped = workingFiles.skipped;
+  }
+  const oversized = (file) => Boolean(file) && Number.isFinite(file.size) && file.size > MAX_DIFF_FILE_BYTES;
+  const changedPaths = changedEntries(left, right).filter((filePath) => {
+    if (skipped.has(filePath)) return false;
+    if (oversized(left.get(filePath)) || oversized(right.get(filePath))) {
+      skipped.set(filePath, `超过 ${MAX_DIFF_FILE_BYTES / 1024 / 1024} MiB，未生成逐行差异`);
+      return false;
+    }
+    return true;
+  });
+  const skippedFiles = [...skipped].map(([filePath, reason]) => ({ path: filePath, reason }));
+  if (!changedPaths.length) return emptyComparison({ revision, mode, baseCommit: base, headCommit: head, skipped: skippedFiles });
   if (changedPaths.length > MAX_CHANGED_FILES) throw new Error(`变更文件共 ${changedPaths.length} 个，超过 ${MAX_CHANGED_FILES} 个的查看上限；请缩小比较范围。`);
 
   const oldBlobs = await readCommitBlobs(gitDir, changedPaths.map((filePath) => left.get(filePath)).filter(Boolean), signal);
@@ -361,11 +402,11 @@ export async function compareRepositoryRevisions({ root, gitDir = root, currentC
       const file = right.get(filePath);
       return file ? [[filePath, { ...file, content: newBlobs.get(file.oid) }]] : [];
     }));
-    return { ...await createRawComparison(root, leftChanged, rightChanged, changedPaths, signal), revision, mode, baseCommit: base, headCommit: head, limits: { maxFiles: MAX_CHANGED_FILES, maxDiffBytes: MAX_DIFF_BYTES } };
+    return { ...await createRawComparison(root, leftChanged, rightChanged, changedPaths, signal), revision, mode, baseCommit: base, headCommit: head, skipped: skippedFiles, limits: { maxFiles: MAX_CHANGED_FILES, maxDiffBytes: MAX_DIFF_BYTES } };
   }
   const rightChanged = new Map(changedPaths.flatMap((filePath) => {
     const file = right.get(filePath);
     return file ? [[filePath, file]] : [];
   }));
-  return { ...await createRawComparison(root, leftChanged, rightChanged, changedPaths, signal), revision, mode, baseCommit: base, headCommit: head, limits: { maxFiles: MAX_CHANGED_FILES, maxDiffBytes: MAX_DIFF_BYTES } };
+  return { ...await createRawComparison(root, leftChanged, rightChanged, changedPaths, signal), revision, mode, baseCommit: base, headCommit: head, skipped: skippedFiles, limits: { maxFiles: MAX_CHANGED_FILES, maxDiffBytes: MAX_DIFF_BYTES } };
 }

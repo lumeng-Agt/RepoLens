@@ -1,4 +1,4 @@
-import type { AiQuestionConversation, AiRouteRecord, AiSavedResult, ReadingNote, RepositoryOverview, RepositorySnapshot, RevisionComparison, SearchRequest, SearchResponse } from "./model";
+import type { Investigation, AiQuestionConversation, AiRouteRecord, AiSavedResult, ReadingNote, RepositoryOverview, RepositorySnapshot, RevisionComparison, SearchRequest, SearchResponse } from "./model";
 import type { z } from "zod";
 import type { UsageGuidePreferences } from "./usage-guide.mjs";
 import type { WorkspaceLayoutPreferences } from "./workspace-layout.mjs";
@@ -54,6 +54,7 @@ export type LocalWorkspaceState = {
   progress: Record<string, string>;
   nodePositions: Record<string, { x: number; y: number }>;
   conversations: AiQuestionConversation[];
+  investigations?: Investigation[];
   readingNotes?: ReadingNote[];
   savedTours?: AiRouteRecord[];
   guidePreferences?: UsageGuidePreferences | null;
@@ -75,6 +76,7 @@ export interface WorkspacePersistenceProvider {
   saveConversations(session: WorkspaceSession, conversations: AiQuestionConversation[]): Promise<void>;
   saveReadingNotes(session: WorkspaceSession, notes: ReadingNote[]): Promise<void>;
   saveTours(session: WorkspaceSession, tours: AiRouteRecord[]): Promise<void>;
+  saveInvestigations(session: WorkspaceSession, records: Investigation[]): Promise<void>;
   clearRepository(session: WorkspaceSession): Promise<void>;
   saveGuidePreferences(preferences: UsageGuidePreferences): Promise<void>;
   saveLayoutPreferences(preferences: WorkspaceLayoutPreferences): Promise<void>;
@@ -143,6 +145,7 @@ export const localWorkspaceProvider: WorkspacePersistenceProvider = {
   async saveAiRoute(session, record) { await persist(`${LOCAL_API_ORIGIN}/api/workspace`, { action: "ai-route", ...session, record }); },
   async saveConversations(session, conversations) { await persist(`${LOCAL_API_ORIGIN}/api/workspace`, { action: "conversations", ...session, conversations }); },
   async saveReadingNotes(session, notes) { await persist(`${LOCAL_API_ORIGIN}/api/workspace`, { action: "reading-notes", ...session, notes }); },
+  async saveInvestigations(session, records) { await persist(`${LOCAL_API_ORIGIN}/api/workspace`, { action: "investigations", ...session, records }); },
   async saveTours(session, tours) { await persist(`${LOCAL_API_ORIGIN}/api/workspace`, { action: "saved-tours", ...session, tours }); },
   async saveGuidePreferences(preferences) { await persist(`${LOCAL_API_ORIGIN}/api/workspace`, { action: "guide-preferences", preferences }); },
   async saveLayoutPreferences(preferences) { await persist(`${LOCAL_API_ORIGIN}/api/workspace`, { action: "layout-preferences", preferences }); },

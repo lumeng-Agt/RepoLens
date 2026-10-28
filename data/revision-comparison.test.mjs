@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtemp, rm, writeFile, mkdir, access } from "node:fs/promises";
+import { mkdtemp, rm, writeFile, mkdir, access, truncate } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { compareRepositoryRevisions } from "./revision-comparison.mjs";
@@ -185,3 +185,69 @@ for (const hookName of ["clean", "process", "fsmonitor", "external-diff", "textc
     assert.match(result.diff, /value = 2/);
   });
 }
+
+test("a large unchanged file does not fail the whole working-tree comparison", async (context) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "repolens-large-asset-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await run(root, "init", "-q"); await run(root, "config", "user.name", "RepoLens Test"); await run(root, "config", "user.email", "test@example.invalid");
+  await mkdir(path.join(root, "src"));
+  await writeFile(path.join(root, "src/a.ts"), "export const value = 1;\n");
+  await writeFile(path.join(root, "assets.bin"), Buffer.alloc(2 * 1024 * 1024, 7));
+  await run(root, "add", "."); await run(root, "commit", "-qm", "base");
+  await writeFile(path.join(root, "src/a.ts"), "export const value = 2;\n");
+  const result = await compareRepositoryRevisions({ root, mode: "working-tree", revision: "r1" });
+  assert.deepEqual(result.files, [{ status: "modified", path: "src/a.ts" }]);
+  assert.match(result.diff, /value = 2/);
+  assert.deepEqual(result.skipped, []);
+});
+
+test("a changed file above 1 MiB is reported as skipped instead of aborting the comparison", async (context) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "repolens-large-change-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await run(root, "init", "-q"); await run(root, "config", "user.name", "RepoLens Test"); await run(root, "config", "user.email", "test@example.invalid");
+  await mkdir(path.join(root, "src"));
+  await writeFile(path.join(root, "src/a.ts"), "export const value = 1;\n");
+  await writeFile(path.join(root, "assets.bin"), Buffer.alloc(2 * 1024 * 1024, 7));
+  await run(root, "add", "."); await run(root, "commit", "-qm", "base");
+  await writeFile(path.join(root, "assets.bin"), Buffer.alloc(2 * 1024 * 1024, 9));
+  await writeFile(path.join(root, "src/a.ts"), "export const value = 2;\n");
+  const result = await compareRepositoryRevisions({ root, mode: "working-tree", revision: "r1" });
+  assert.deepEqual(result.files, [{ status: "modified", path: "src/a.ts" }]);
+  assert.deepEqual(result.skipped.map((item) => item.path), ["assets.bin"]);
+  assert.match(result.skipped[0].reason, /1 MiB/);
+  await run(root, "add", "."); await run(root, "commit", "-qm", "large change");
+  const committed = await compareRepositoryRevisions({ root, mode: "commits", baseRef: "HEAD~1", headRef: "HEAD", revision: "r2" });
+  assert.deepEqual(committed.files, [{ status: "modified", path: "src/a.ts" }]);
+  assert.deepEqual(committed.skipped.map(item => item.path), ["assets.bin"]);
+});
+
+test("a large base blob that shrinks or is deleted does not abort other working changes", async (context) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "repolens-large-base-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await run(root, "init", "-q"); await run(root, "config", "user.name", "Test"); await run(root, "config", "user.email", "test@example.invalid");
+  await writeFile(path.join(root, "asset.bin"), Buffer.alloc(2 * 1024 * 1024, 7));
+  await writeFile(path.join(root, "main.ts"), "export const value = 1;\n");
+  await run(root, "add", "."); await run(root, "commit", "-qm", "base");
+  await writeFile(path.join(root, "main.ts"), "export const value = 2;\n");
+  for (const deleted of [false, true]) {
+    if (deleted) await rm(path.join(root, "asset.bin"));
+    else await writeFile(path.join(root, "asset.bin"), "small");
+    const result = await compareRepositoryRevisions({ root, mode: "working-tree", revision: "r" });
+    assert.deepEqual(result.files, [{ status: "modified", path: "main.ts" }]);
+    assert.deepEqual(result.skipped.map(item => item.path), ["asset.bin"]);
+    assert.match(result.diff, /value = 2/);
+  }
+});
+
+test("a working file above 64 MiB is explicitly unchecked while source changes remain available", async (context) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "repolens-unchecked-asset-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await run(root, "init", "-q"); await run(root, "config", "user.name", "Test"); await run(root, "config", "user.email", "test@example.invalid");
+  await writeFile(path.join(root, "main.ts"), "export const value = 1;\n");
+  await run(root, "add", "."); await run(root, "commit", "-qm", "base");
+  await writeFile(path.join(root, "main.ts"), "export const value = 2;\n");
+  await writeFile(path.join(root, "asset.bin"), ""); await truncate(path.join(root, "asset.bin"), 65 * 1024 * 1024);
+  const result = await compareRepositoryRevisions({ root, mode: "working-tree", revision: "r" });
+  assert.deepEqual(result.files, [{ status: "modified", path: "main.ts" }]);
+  assert.deepEqual(result.skipped, [{ path: "asset.bin", reason: "超过 64 MiB，未比较内容" }]);
+});

@@ -1,16 +1,13 @@
-import { lstat, readFile } from "node:fs/promises";
 import path from "node:path";
+import { createRepositoryFileAccess } from "./repository-files.mjs";
 
 const README_NAMES = ["README.md", "README.rst", "README.txt", "README"];
 const MANIFEST_NAMES = ["package.json", "pyproject.toml", "go.mod", "go.work", "Cargo.toml", "requirements.txt"];
 const isTestPath = (value) => /(^|[/_.-])(test|tests|spec|specs)([/_.-]|$)|\.(test|spec)\./i.test(value);
 
-async function safeReadKnownFile(root, name, maximumBytes) {
-  const target = path.join(root, name);
+async function safeReadKnownFile(access, name, maximumBytes) {
   try {
-    const info = await lstat(target);
-    if (!info.isFile() || info.isSymbolicLink() || info.size > maximumBytes) return null;
-    return await readFile(target, "utf8");
+    return (await access.readFile(name, { maximumBytes })).content;
   } catch { return null; }
 }
 
@@ -22,13 +19,14 @@ function readmeSummary(content) {
 }
 
 export async function buildRepositoryOverview(root, snapshot) {
+  const access = createRepositoryFileAccess(root);
   let readme = null;
   for (const name of README_NAMES) {
-    const content = await safeReadKnownFile(root, name, 256 * 1024);
+    const content = await safeReadKnownFile(access, name, 256 * 1024);
     if (content !== null) { readme = { path: name, summary: readmeSummary(content) }; break; }
   }
   const manifests = [];
-  for (const name of MANIFEST_NAMES) if (await safeReadKnownFile(root, name, 64 * 1024) !== null) manifests.push(name);
+  for (const name of MANIFEST_NAMES) if (await safeReadKnownFile(access, name, 64 * 1024) !== null) manifests.push(name);
   const incoming = new Set(snapshot.dependencies.map((edge) => edge.toId));
   const preferred = /^(index|main|app|cli|server|manage|wsgi|asgi)\./i;
   const candidates = snapshot.files.filter((file) => !incoming.has(file.id) || preferred.test(file.name)).map((file) => ({

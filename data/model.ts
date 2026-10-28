@@ -4,6 +4,16 @@ export type SourceReference = {
   endLine?: number;
 };
 
+export type InvestigationEvidenceKind = "static-dependency" | "retrieval-match" | "model-inference";
+export type InvestigationItem = { id: string; title: string; responsibility: string; reason: string; basis?: InvestigationEvidenceKind; contextFiles?: { fileId: string; contentHash: string; startLine: number; endLine: number }[]; references: { fileId: string; startLine: number; endLine?: number }[] };
+export type InvestigationResult = { summary: string; items: InvestigationItem[]; questions: { question: string; suggestedFileId?: string }[] };
+export type Investigation = InvestigationResult & {
+  id: string; title: string; question: string; workspaceId: string; repositoryName: string; ref?: string; commit?: string;
+  excludedFileIds: string[]; verifiedItemIds: string[]; checks?: Record<string, "pending" | "checked" | "irrelevant">;
+  contextFiles: { fileId: string; contentHash: string; startLine: number; endLine: number }[];
+  selectionReasons?: Record<string, string[]>; createdAt: number; updatedAt: number; [key: string]: unknown;
+};
+
 export type ImportRecord = {
   targetPath: string;
   specifier: string;
@@ -84,7 +94,7 @@ export type AiPreview = {
   repositoryId: string;
   revision: string;
   entryFileId: string;
-  mode: "explanation" | "route" | "question";
+  mode: "explanation" | "route" | "question" | "investigation";
   goal?: string;
   baseUrl: string;
   model: string;
@@ -94,7 +104,7 @@ export type AiPreview = {
   expiresAt: number;
   question?: string;
   history?: { role: "user" | "assistant"; content: string }[];
-  retrievalInsufficient?: boolean;
+  excludedFileIds?: string[]; retrievalInsufficient?: boolean;
 };
 
 export type AiRouteRecord = {
@@ -116,7 +126,7 @@ export type AiSavedResult = {
   __repositoryId?: string;
   __entryFileId?: string;
   __revision?: string;
-  __mode?: "explanation" | "route" | "question";
+  __mode?: "explanation" | "route" | "question" | "investigation";
   __contextFiles?: { fileId: string; contentHash: string }[];
   __routeSteps?: TourStep[];
   role?: string;
@@ -238,5 +248,6 @@ export type RevisionComparison = {
   headCommit: string;
   files: { status: "added" | "modified" | "deleted" | "renamed"; path: string; oldPath?: string }[];
   diff: string;
+  skipped?: { path: string; reason: string }[];
   limits: { maxFiles: number; maxDiffBytes: number };
 };

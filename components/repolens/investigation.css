@@ -1,0 +1,30 @@
+.investigation-entry{display:flex;align-items:center;gap:12px;padding:0;color:var(--muted-foreground,#647078);font-size:12px}
+.investigation-entry button{font:inherit;color:inherit;border:0;background:none;cursor:pointer;padding:5px 7px;border-radius:4px}
+.investigation-entry button:hover{background:#e9efec;color:#176c58}
+.investigation-entry>span{display:flex;align-items:center;gap:8px;color:#a43d36}
+.investigation-dialog{width:min(1060px,calc(100vw - 24px));max-height:90dvh;overflow:auto;margin:auto;border:1px solid #dbe2df;border-radius:10px;padding:20px;color:#263834;background:#fff;font-size:14px;line-height:1.65}
+.investigation-dialog::backdrop{background:#17282255}
+.investigation-dialog>header{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #e3e9e6;padding-bottom:12px;position:sticky;top:-20px;background:white;z-index:2}
+.investigation-dialog h2{margin:0;font-size:18px}.investigation-dialog h3,.investigation-card h4{margin:18px 0 8px;font-size:14px;font-weight:600}
+.investigation-dialog button,.investigation-card button,.change-checks button{background:none;border:1px solid #dce5e0;border-radius:5px;color:#236e5b;font:inherit;padding:4px 8px;cursor:pointer;max-width:100%;overflow-wrap:anywhere;text-align:left}
+.investigation-dialog button:disabled,.investigation-card button:disabled{opacity:.5;cursor:default}
+.investigation-dialog button:focus-visible,.investigation-card button:focus-visible,.change-checks select:focus-visible{outline:2px solid #25876e;outline-offset:2px}
+.investigation-dialog input:not([type=checkbox]),.investigation-dialog textarea{font:inherit;border:1px solid #d5dfd9;border-radius:5px;padding:6px 8px;width:100%;background:white;color:inherit}
+.investigation-dialog textarea{min-height:80px;resize:vertical}
+.investigation-workspace{display:grid;grid-template-columns:210px minmax(0,1fr);gap:24px;margin:16px 0}
+.investigation-workspace>nav{border-right:1px solid #e1e8e4;padding-right:12px}
+.investigation-workspace>nav>div{display:flex;align-items:flex-start;gap:6px;padding:5px 0}
+.investigation-workspace>nav button{border:0;color:#35483e;flex:1}.investigation-workspace>nav button[aria-current=true]{background:#eaf3ee;color:#176c58}
+.investigation-workspace>main{display:block;min-width:0;width:auto;margin:0;padding:0;max-width:none}
+.investigation-dialog footer{display:flex;gap:8px;align-items:center;flex-wrap:wrap;border-top:1px solid #e1e8e4;padding-top:12px}
+.investigation-dialog footer>small{flex-basis:100%}
+.investigation-dialog small,.investigation-card small,.change-checks small{display:block;font-size:12px;color:#607169;overflow-wrap:anywhere}
+.investigation-card{font-size:14px;line-height:1.65;min-width:0}.investigation-card p{margin:8px 0;white-space:pre-wrap;overflow-wrap:anywhere}
+.investigation-item{border-top:1px solid #e0e7e3;padding:12px 0}.investigation-item>strong{display:block;font-size:14px}
+.investigation-item-actions{display:flex;gap:8px;justify-content:space-between;align-items:center;flex-wrap:wrap;margin-top:8px;font-size:12px}
+.investigation-item-actions label{display:flex;align-items:center;gap:5px}.investigation-card details{font-size:12px;margin:8px 0}
+.investigation-card details>div{margin:8px 0;overflow-wrap:anywhere}.investigation-card details code{font-size:12px}
+.change-checks{margin-top:20px;border-top:1px solid #e1e8e4;padding-top:12px}.change-checks>ul{list-style:none;margin:10px 0;padding:0}
+.change-checks>ul>li{display:flex;gap:12px;justify-content:space-between;border-top:1px solid #edf0ee;padding:10px 0}.change-checks select{align-self:flex-start;font:inherit;padding:4px;border:1px solid #d5dfd9;border-radius:4px}
+.change-checks details ol{padding-left:20px}
+@media(max-width:860px){.investigation-entry{padding:0}.investigation-dialog{padding:12px;max-height:92dvh}.investigation-workspace{grid-template-columns:minmax(0,1fr);gap:12px}.investigation-workspace>nav{border-right:0;border-bottom:1px solid #e1e8e4;max-height:160px;overflow:auto}.investigation-dialog button,.investigation-card button,.investigation-entry button{min-height:44px}.investigation-item-actions{align-items:flex-start}.change-checks>ul>li{flex-wrap:wrap}}

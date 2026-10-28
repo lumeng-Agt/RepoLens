@@ -43,3 +43,41 @@ test("question retrieval suggests the matching symbol definition and includes it
   assert.ok(match.reasons.some((reason) => reason.includes("命中符号定义：formatTask")));
   assert.deepEqual(result.candidates.find((candidate) => candidate.id === "src/other.ts").suggestedRange, { startLine: 10, endLine: 12 });
 });
+
+test("a natural Chinese question still finds the file that implements it", () => {
+  const chineseFiles = [
+    { id: "src/main.ts", path: "src/main.ts", role: "应用入口", symbols: ["bootstrap"] },
+    { id: "src/store.ts", path: "src/store.ts", role: "任务状态存储", symbols: ["saveTasks"] },
+    { id: "src/view.tsx", path: "src/view.tsx", role: "任务视图", symbols: ["TaskList"] },
+  ];
+  const result = rankQuestionCandidates({
+    files: chineseFiles,
+    dependencies: [{ fromId: "src/main.ts", toId: "src/view.tsx" }],
+    sourceById: new Map([["src/store.ts", "// 本地保存任务\nfunction saveTasks(tasks) { return tasks; }\n"]]),
+    entryFileId: "src/main.ts",
+    question: "任务是怎么保存到本地的？",
+  });
+  assert.equal(result.retrievalInsufficient, false);
+  assert.equal(result.candidates[0].id, "src/store.ts");
+  assert.ok(result.candidates[0].reasons.includes("源码包含问题关键词"));
+});
+
+test("Chinese function words alone do not count as evidence", () => {
+  const result = rankQuestionCandidates({
+    files: [{ id: "src/main.ts", path: "src/main.ts", role: "应用入口", symbols: ["bootstrap"] }],
+    dependencies: [],
+    sourceById: new Map([["src/main.ts", "export const value = 1;\n"]]),
+    entryFileId: "src/main.ts",
+    question: "这个是怎么的呢？",
+  });
+  assert.equal(result.retrievalInsufficient, true);
+});
+
+test("Chinese exact phrases remain stronger than separated matching words", () => {
+  const candidates = ["exact.ts", "words.ts"].map(id => ({ id, path: id, symbols: [] }));
+  const ranked = rankQuestionCandidates({ files: candidates, dependencies: [], entryFileId: "", question: "任务保存机制",
+    sourceById: new Map([["exact.ts", "// 任务保存机制"], ["words.ts", "// 任务\n// 保存\n// 机制"]]) });
+  assert.equal(ranked.retrievalInsufficient, false);
+  assert.equal(ranked.candidates[0].id, "exact.ts");
+  assert.ok(ranked.candidates[0].score > ranked.candidates[1].score);
+});

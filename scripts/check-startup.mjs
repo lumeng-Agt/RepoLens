@@ -53,6 +53,7 @@ function startService(mode, uiPort, apiPort, logPath, persistPath) {
     ...process.env,
     REPOLENS_PORT: String(apiPort),
     REPOLENS_UI_PORT: String(uiPort),
+    REPOLENS_USER_DATA_PATH: `${persistPath}-user-data`,
     NEXT_PUBLIC_REPOLENS_API_ORIGIN: `http://127.0.0.1:${apiPort}`,
     REPOLENS_SERVER_LOG: logPath,
     VINEXT_NO_DEV_LOCK: '1',
@@ -116,6 +117,11 @@ async function browserProbe(browser, baseURL, { apiOrigin, repositoryPath, repos
       evidence.navigations.push(phase);
       if (phase === 'first navigation') await page.goto(baseURL, { waitUntil: 'domcontentloaded' });
       else await page.reload({ waitUntil: 'domcontentloaded' });
+      await page.getByRole('heading', { name: '打开仓库，开始阅读' }).waitFor({ timeout: 15_000 });
+      await page.getByRole('button', { name: '打开示例', exact: true }).click();
+      const guide = page.getByRole('dialog', { name: '使用指南' });
+      await guide.waitFor({ state: 'visible', timeout: 15_000 });
+      await guide.getByRole('button', { name: '关闭使用指南' }).click();
       await page.locator('.tour-current-copy > strong').filter({ hasText: '从入口开始' }).waitFor({ timeout: 15_000 });
       await page.locator('.graph-file-card.is-selected').waitFor({ timeout: 15_000 });
       evidence.runtimeErrors = await page.evaluate(() => window.__startupErrors ?? []);

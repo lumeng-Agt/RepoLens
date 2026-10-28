@@ -23,6 +23,8 @@ import {
   Settings2,
   MessageSquare,
 } from "lucide-react";
+import { InvestigationPanel } from "@/components/repolens/InvestigationPanel";
+import { clearInvestigationMemory, invalidateInvestigationTasks, knownInvestigationWorkspaces, registerInvestigationSession, restoreInvestigations, failInvestigationRead } from "@/data/investigation-state.mjs";
 import { WorkspaceOverview } from "@/components/repolens/WorkspaceOverview";
 import {
   useCallback,
@@ -249,8 +251,8 @@ const EMPTY_FILE: FileRecord = { id: "", path: "", name: "没有源码文件", k
 
 function AppShell() {
   const [chatOpen, setChatOpen] = useState(false);
-  const [chatIntent, setChatIntent] = useState<{ id: number; mode: AiMode }>({ id: 0, mode: "question" });
-  const openAiChat = useCallback((mode: AiMode = "question") => { setChatOpen(true); setChatIntent((previous) => ({ id: previous.id + 1, mode: mode === "explanation" || mode === "route" ? mode : "question" })); }, []);
+  const [chatIntent, setChatIntent] = useState<{ id: number; mode: AiMode; investigation?: import("@/data/model").Investigation }>({ id: 0, mode: "question" });
+  const openAiChat = useCallback((mode: AiMode = "question") => { setChatOpen(true); setChatIntent((previous) => ({ id: previous.id + 1, mode })); }, []);
   const [repository, setRepository] = useState<RepositorySnapshot>(BOOT_SNAPSHOT);
   const [recentRepositories, setRecentRepositories] = useState<LocalWorkspaceState["recentRepositories"]>([]);
   const repositoryCommandIssuer = useRef<{ clientId: string; intentSequence: number } | null>(null);
@@ -687,6 +689,10 @@ function AppShell() {
   }, []);
 
   const restoreWorkspaceState = useCallback((snapshot: RepositorySnapshot, saved: LocalWorkspaceState) => {
+    const investigationWorkspaceId = repositoryWorkspaceId(snapshot);
+    registerInvestigationSession(investigationWorkspaceId, `${investigationWorkspaceId}:${snapshot.persistenceSessionId ?? ""}`);
+    if (saved.persistenceReady === false) failInvestigationRead(investigationWorkspaceId, saved.warning ?? "调查记录读取失败。");
+    else restoreInvestigations(investigationWorkspaceId, saved.investigations ?? []);
     initializeGuidePreferences(saved.guidePreferences ?? null, saved.guidePreferences != null, hasExistingWorkspaceUse(saved), saved.persistenceReady !== false, saved.warning);
     const positionsKey = nodePositionSessionKey(snapshot);
     if (saved.persistenceReady === false) {
@@ -759,15 +765,16 @@ function AppShell() {
 
   const retryWorkspaceRestore = useCallback(async () => {
     const snapshot = repository;
+    const restoreGeneration = savedDataClearGenerationRef.current;
     const epoch = repositoryGate.current.current().epoch;
     try {
       const saved = await localWorkspaceProvider.get(repositoryWorkspaceId(snapshot));
-      if (!repositoryGate.current.isCurrent(epoch, snapshot.id)) return;
+      if (!repositoryGate.current.isCurrent(epoch, snapshot.id) || savedDataClearActiveRef.current || restoreGeneration !== savedDataClearGenerationRef.current) return;
       const warning = restoreWorkspaceState(snapshot, saved);
       if (saved.persistenceReady === false) throw new Error(warning ?? "本地保存数据尚未成功读取。");
       setRepoMessage(warning ? `保存数据已读取：${warning}` : "保存数据已恢复；本页待保存修改正在写入。");
     } catch (error) {
-      if (!repositoryGate.current.isCurrent(epoch, snapshot.id)) return;
+      if (!repositoryGate.current.isCurrent(epoch, snapshot.id) || savedDataClearActiveRef.current || restoreGeneration !== savedDataClearGenerationRef.current) return;
       const failedKey = nodePositionSessionKey(snapshot);
       setWorkspacePersistenceReadyKeys((current) => { const next = new Set(current); next.delete(failedKey); return next; });
       setWorkspaceReadFailures((current) => new Set(current).add(failedKey));
@@ -796,10 +803,14 @@ function AppShell() {
     const activeRepositoryId = repository.id;
     const activeWorkspaceId = workspaceId;
     const epoch = repositoryGate.current.current().epoch;
+    const restoreGeneration = savedDataClearGenerationRef.current;
     let cancelled = false;
     const controller = new AbortController();
     localWorkspaceProvider.get(activeWorkspaceId, controller.signal).then((saved) => {
-      if (cancelled || !repositoryGate.current.isCurrent(epoch, activeRepositoryId)) return;
+      if (cancelled || !repositoryGate.current.isCurrent(epoch, activeRepositoryId) || savedDataClearActiveRef.current || restoreGeneration !== savedDataClearGenerationRef.current) return;
+      registerInvestigationSession(activeWorkspaceId, `${activeWorkspaceId}:${repository.persistenceSessionId ?? ""}`);
+      if (saved.persistenceReady === false) failInvestigationRead(activeWorkspaceId, saved.warning ?? "调查记录读取失败。");
+      else restoreInvestigations(activeWorkspaceId, saved.investigations ?? []);
       if (saved.persistenceReady === false) {
         const failedKey = nodePositionSessionKey(repository);
         setWorkspacePersistenceReadyKeys((current) => { const next = new Set(current); next.delete(failedKey); return next; });
@@ -819,7 +830,8 @@ function AppShell() {
       if (saved.aiRoute && Array.isArray(saved.aiRoute.steps) && Array.isArray(saved.aiRoute.contextFiles)) setAiRoutesByRepository((current) => current.has(activeWorkspaceId) ? current : new Map(current).set(activeWorkspaceId, saved.aiRoute as unknown as AiRouteRecord));
       if (hasReadingArtifactOperations(journal)) void persistReadingArtifactJournal(repository, notes, tours).catch((error: Error) => setRepoMessage(`原有阅读记录已恢复，但本页改动尚未保存：${error.message}`));
     }).catch((error: Error) => {
-      if (cancelled || error.name === "AbortError") return;
+      if (cancelled || error.name === "AbortError" || savedDataClearActiveRef.current || restoreGeneration !== savedDataClearGenerationRef.current) return;
+      failInvestigationRead(activeWorkspaceId, error.message);
       const failedKey = nodePositionSessionKey(repository);
       setWorkspacePersistenceReadyKeys((current) => { const next = new Set(current); next.delete(failedKey); return next; });
       setWorkspaceReadFailures((current) => new Set(current).add(failedKey));
@@ -870,19 +882,20 @@ function AppShell() {
   useEffect(() => {
     let cancelled = false;
     const epoch = beginRepositorySession();
+    const restoreGeneration = savedDataClearGenerationRef.current;
     const storedGuide = desktopMode ? null : readBrowserUsageGuide();
     sampleRepositoryProvider.getSnapshot().then(async (snapshot) => {
       let warning: string | undefined;
-      if (cancelled || !repositoryGate.current.isCurrent(epoch)) return;
+      if (cancelled || !repositoryGate.current.isCurrent(epoch) || savedDataClearActiveRef.current || restoreGeneration !== savedDataClearGenerationRef.current) return;
       if (storedGuide) initializeGuidePreferences(storedGuide.stored, storedGuide.present, storedGuide.existingUse, storedGuide.available, storedGuide.message);
       try {
         const saved = await localWorkspaceProvider.get(repositoryWorkspaceId(snapshot));
-        if (cancelled || !repositoryGate.current.isCurrent(epoch)) return;
+        if (cancelled || !repositoryGate.current.isCurrent(epoch) || savedDataClearActiveRef.current || restoreGeneration !== savedDataClearGenerationRef.current) return;
         if (desktopMode) warning = restoreWorkspaceState(snapshot, saved);
         else if (saved.persistenceReady !== false) setRecentRepositories(saved.recentRepositories);
       }
       catch (error) {
-        if (cancelled || !repositoryGate.current.isCurrent(epoch)) return;
+        if (cancelled || !repositoryGate.current.isCurrent(epoch) || savedDataClearActiveRef.current || restoreGeneration !== savedDataClearGenerationRef.current) return;
         if (desktopMode) {
           const failedKey = nodePositionSessionKey(snapshot);
           setWorkspacePersistenceReadyKeys((current) => { const next = new Set(current); next.delete(failedKey); return next; });
@@ -1229,6 +1242,7 @@ function AppShell() {
           setWorkspaceReadFailures((current) => new Set(current).add(failedKey));
           setNodePositionsReadyKey((current) => current === failedKey ? null : current);
           workspaceWarning = error instanceof Error ? error.message : "无法读取桌面保存数据。";
+          failInvestigationRead(repositoryWorkspaceId(snapshot), workspaceWarning);
         }
       }
       if (!openRequestGate.current.isCurrent(requestId) || !isCurrentRepositoryCommand(command) || controller.signal.aborted) return;
@@ -1650,6 +1664,7 @@ function AppShell() {
     savedDataClearGenerationRef.current += 1;
     setSavedDataClearGeneration(savedDataClearGenerationRef.current);
     setSavedDataClearBusy(true);
+    invalidateInvestigationTasks(workspaceId);
     setChatClearingTarget(workspaceId);
     clearAiContext();
     try {
@@ -1658,6 +1673,7 @@ function AppShell() {
         try { await localWorkspaceProvider.clearRepository(workspaceSession(repository)); }
         catch (error) { restoreBrowserProgress(); throw error; }
       });
+      clearInvestigationMemory(workspaceId);
       setAiResultsByFile((previous) => new Map([...previous].filter(([key]) => !key.startsWith(`${workspaceId}:`))));
       setAiRoutesByRepository((previous) => { const next = new Map(previous); next.delete(workspaceId); return next; });
       setReadingNotesByWorkspace((previous) => { const next = new Map(previous); next.delete(workspaceId); readingNotesRef.current = next; return next; });
@@ -1680,6 +1696,7 @@ function AppShell() {
     savedDataClearGenerationRef.current += 1;
     setSavedDataClearGeneration(savedDataClearGenerationRef.current);
     setSavedDataClearBusy(true);
+    for (const id of knownInvestigationWorkspaces()) invalidateInvestigationTasks(id);
     setChatClearingTarget("*");
     guideSaveSequenceRef.current += 1;
     await guideWriteQueueRef.current;
@@ -1699,6 +1716,7 @@ function AppShell() {
         } catch (error) { guideClearWarning = `应用数据已清除，但浏览器未允许移除部分偏好设置：${error instanceof Error ? error.message : "存储不可用。"}`; }
       }
       setChatClearAllVersion((value) => value + 1);
+      for (const id of knownInvestigationWorkspaces()) clearInvestigationMemory(id);
       setRecentRepositories([]); setAiResultsByFile(new Map()); setAiRoutesByRepository(new Map()); setReadingNotesByWorkspace(new Map()); readingNotesRef.current = new Map(); setSavedToursByWorkspace(new Map()); savedToursRef.current = new Map(); setNodePositions(new Map());
       readingArtifactJournals.current.clear();
       progressMemory.clear();
@@ -2098,7 +2116,8 @@ function AppShell() {
         </button>
       </nav>
 
-      <WorkspaceOverview clearVersion={questionClearVersion} repository={repository} stepCount={activeTour.length} compact notes={currentReadingNotes} tours={currentSavedTours} results={[...aiResultsByFile.entries()].filter(([key, value]) => key.startsWith(`${workspaceId}:`) && value.__repositoryId === repository.id).map(([, value]) => value)} statusMessage={guideReady && showGuideWelcome ? "" : repoMessage} onDismissMessage={() => setRepoMessage("")} onSelectFile={(fileId) => selectFile(fileId, "details")} />
+
+      <WorkspaceOverview investigationEntry={repository.source === "local" && <InvestigationPanel key={workspaceId} repository={repository} busy={savedDataClearBusy} onOpen={openReference} onRelations={fileId => { setLayoutMode("structure"); selectFile(fileId, "graph"); }} onContinue={investigation => { setChatOpen(true); setChatIntent(previous => ({ id: previous.id + 1, mode: "investigation", investigation })); }} />} clearVersion={questionClearVersion} repository={repository} stepCount={activeTour.length} compact notes={currentReadingNotes} tours={currentSavedTours} results={[...aiResultsByFile.entries()].filter(([key, value]) => key.startsWith(`${workspaceId}:`) && value.__repositoryId === repository.id).map(([, value]) => value)} statusMessage={guideReady && showGuideWelcome ? "" : repoMessage} onDismissMessage={() => setRepoMessage("")} onSelectFile={(fileId) => selectFile(fileId, "details")} />
 
       <section id="repository-workspace" className={`workspace-grid${layoutMode === "reading" ? " is-reading-mode" : ""}${chatOpen ? " is-chat-open" : ""}`}>
         <div className="workspace-chat-columns" ref={chatContainerRef}>
@@ -2245,7 +2264,7 @@ function AppShell() {
         <ResizableHandle className="workspace-resize-handle chat-resize-handle" hidden={!chatOpen || !chatDocked} aria-label="调整 AI 栏宽度" title="拖动调整 AI 栏宽度；双击恢复默认" onDoubleClick={() => saveWorkspaceLayoutPreferences({ ...workspaceLayoutPreferences, chatWidth: 360 })} />
         <ResizablePanel id="assistant" minSize={chatOpen && chatDocked ? "320px" : 0} maxSize={chatOpen && chatDocked ? "45%" : 0}>
         <div className="ai-chat-drawer" hidden={!chatOpen}>
-          <AiChatSidebar open={chatOpen} repository={repository} currentFile={currentFile} intent={chatIntent} available={!desktopBackendError} clearingTarget={chatClearingTarget} clearVersions={chatClearVersions} clearAllVersion={chatClearAllVersion} extraFileIds={questionExtraFileIds} modelSettings={aiSettingsSaved} onClose={() => setChatOpen(false)} onSettings={openModelSettingsDialog} onOpenRepository={() => { void openRepositoryHome(); }} onOpenReference={openReference} onActivateTour={activateSavedTour} onCompleted={(id) => { if (id !== workspaceId) return; const completionSession = repositorySessionVersion; const completionGeneration = savedDataClearGenerationRef.current; void localWorkspaceProvider.get(id).then((saved) => { if (saved.persistenceReady === false || savedDataClearActiveRef.current || completionGeneration !== savedDataClearGenerationRef.current || completionSession !== settingsSessionRef.current.sessionVersion || repository.id !== settingsSessionRef.current.repositoryId) return; setAiResultsByFile((previous) => { const next = new Map(previous); for (const [fileId, result] of Object.entries(saved.aiResults)) next.set(`${id}:${fileId}`, result as AiResultRecord); return next; }); setSavedToursByWorkspace((previous) => { const next = new Map(previous); const journal = readingArtifactJournals.current.get(id) ?? createReadingArtifactJournal<ReadingNote, AiRouteRecord>(); const merged = applyReadingArtifactJournal(saved.savedTours ?? [], journal, "tours"); next.set(id, merged); savedToursRef.current = next; return next; }); }).catch(() => {}); }} />
+          <AiChatSidebar onRelations={fileId => { setLayoutMode("structure"); selectFile(fileId, "graph"); }} open={chatOpen} repository={repository} currentFile={currentFile} intent={chatIntent} available={!desktopBackendError} clearingTarget={chatClearingTarget} clearVersions={chatClearVersions} clearAllVersion={chatClearAllVersion} extraFileIds={questionExtraFileIds} modelSettings={aiSettingsSaved} onClose={() => setChatOpen(false)} onSettings={openModelSettingsDialog} onOpenRepository={() => { void openRepositoryHome(); }} onOpenReference={openReference} onActivateTour={activateSavedTour} onCompleted={(id) => { if (id !== workspaceId) return; const completionSession = repositorySessionVersion; const completionGeneration = savedDataClearGenerationRef.current; void localWorkspaceProvider.get(id).then((saved) => { if (saved.persistenceReady === false || savedDataClearActiveRef.current || completionGeneration !== savedDataClearGenerationRef.current || completionSession !== settingsSessionRef.current.sessionVersion || repository.id !== settingsSessionRef.current.repositoryId) return; setAiResultsByFile((previous) => { const next = new Map(previous); for (const [fileId, result] of Object.entries(saved.aiResults)) next.set(`${id}:${fileId}`, result as AiResultRecord); return next; }); setSavedToursByWorkspace((previous) => { const next = new Map(previous); const journal = readingArtifactJournals.current.get(id) ?? createReadingArtifactJournal<ReadingNote, AiRouteRecord>(); const merged = applyReadingArtifactJournal(saved.savedTours ?? [], journal, "tours"); next.set(id, merged); savedToursRef.current = next; return next; }); }).catch(() => {}); }} />
         </div>
         </ResizablePanel></ResizablePanelGroup></div>
       </section>

@@ -1,4 +1,7 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState, Fragment, type FormEvent } from "react";
+import { InvestigationCard } from "./InvestigationCard";
+import { createInvestigation, appendInvestigationResult } from "@/data/investigation.mjs";
+import { changeInvestigation, getInvestigationState, getInvestigationEpoch, subscribeInvestigations } from "@/data/investigation-state.mjs";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, useSyncExternalStore, useEffectEvent, Fragment, type FormEvent } from "react";
 import { localRepositoryProvider, localWorkspaceProvider } from "@/data/providers";
 import { generateChatStream, localExplanationProvider, type AiGenerationResult, type AiLineRange, type AiPreviewResponse, type AiQuestionHistoryItem, type AiScopeCandidate } from "@/data/explanation-provider";
 import { ChatMarkdown } from "./ChatMarkdown";
@@ -10,7 +13,7 @@ import { acknowledgeQuestionConversationSave, clearQuestionConversationSaveError
 
 import type { QaReference, QaMessage, QaConversation } from "./chat-types";
 import { ChatToolbar } from "./ChatToolbar";
-import { ChatMessage } from "./ChatMessage";
+import { ChatMessage, ChatEvidence } from "./ChatMessage";
 import { ChatComposer } from "./ChatComposer";
 import { ChatContextPicker } from "./ChatContextPicker";
 
@@ -23,14 +26,15 @@ function validConversation(value: unknown): value is QaConversation {
     message && typeof message.id === "string" && ["user", "assistant"].includes(message.role) && typeof message.content === "string" && Array.isArray(message.references) && Array.isArray(message.contextFiles));
 }
 
-export function QuestionPanel({ repository, currentFile, filesById, onOpenReference, backendAvailable = true, active = false, storageBusy = false, clearVersion = 0, additionalFileIds = [], onClearAdditionalFiles, unified = false, intent, onCompleted, onActivateTour, onOpenSettings, onCloseChat, modelSettings }: {
+export function QuestionPanel({ repository, currentFile, filesById, onOpenReference, backendAvailable = true, active = false, storageBusy = false, clearVersion = 0, additionalFileIds = [], onClearAdditionalFiles, unified = false, intent, onCompleted, onActivateTour, onOpenSettings, onCloseChat, modelSettings, onRelations }: {
   repository: RepositorySnapshot; currentFile: FileRecord; filesById: Map<string, FileRecord>; onOpenReference: (reference: SourceReference) => void; backendAvailable?: boolean;
   active?: boolean; storageBusy?: boolean; clearVersion?: number;
   additionalFileIds?: string[]; onClearAdditionalFiles?: () => void;
-  unified?: boolean; intent?: { id: number; mode: AiMode }; onCompleted?: () => void; onActivateTour?: (route: AiRouteRecord) => void; onOpenSettings?: () => void;
-  onCloseChat?: () => void; modelSettings?: { baseUrl: string; model: string; configured: boolean };
+  unified?: boolean; intent?: { id: number; mode: AiMode; investigation?: import("@/data/model").Investigation }; onCompleted?: () => void; onActivateTour?: (route: AiRouteRecord) => void; onOpenSettings?: () => void;
+  onRelations?: (fileId: string) => void; onCloseChat?: () => void; modelSettings?: { baseUrl: string; model: string; configured: boolean };
 }) {
   const workspaceId = repository.workspaceId ?? repository.id;
+  const investigationCollection = useSyncExternalStore(useCallback(listener => subscribeInvestigations(workspaceId, listener), [workspaceId]), useCallback(() => getInvestigationState(workspaceId), [workspaceId]), useCallback(() => getInvestigationState(workspaceId), [workspaceId]));
   const questionInputId = useId();
   const sessionKey = `${workspaceId}:${repository.persistenceSessionId ?? ""}`;
   const currentWorkspaceIdRef = useRef(sessionKey);
@@ -46,7 +50,17 @@ export function QuestionPanel({ repository, currentFile, filesById, onOpenRefere
     return error ? { sessionKey, message: error } : null;
   });
   const [question, setQuestion] = useState("");
+  const [investigationNotices, setInvestigationNotices] = useState<Record<string, string>>({});
+  const [investigationDrafts, setInvestigationDrafts] = useState<Record<string, import("@/data/model").Investigation>>({});
+  const [activeInvestigation, setActiveInvestigation] = useState<import("@/data/model").Investigation | null>(null);
+  const [excludedInvestigationFiles, setExcludedInvestigationFiles] = useState<string[]>([]);
   const [mode, setMode] = useState<AiMode>("question");
+  useEffect(() => {
+    if (!clearVersion) return;
+    // The parent increments only after a confirmed clear; remove associated in-memory investigation drafts.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setInvestigationNotices({}); setInvestigationDrafts({}); setActiveInvestigation(null); setExcludedInvestigationFiles([]);
+  }, [clearVersion]);
   const [excludedHistory, setExcludedHistory] = useState<string[]>([]);
   const generatingRef = useRef(false);
   const generationSessionRef = useRef("");
@@ -100,6 +114,7 @@ export function QuestionPanel({ repository, currentFile, filesById, onOpenRefere
   const filesSignature = repository.files.map((file) => `${file.id}:${file.contentHash ?? ""}`).join("\n");
   const visibleConversations = loadedSessionKey === sessionKey ? conversations : getQuestionConversationView(workspaceId);
   const currentConversation = visibleConversations.find((item) => item.id === activeId) ?? null;
+  const conversationSaveAttempt = useRef<{ key: string; status: "pending" | "failed" | "saved" } | null>(null);
   const persistConversations = useCallback((value: QaConversation[], afterRestore = false, force = false) => {
     if (isQuestionConversationClearPending(workspaceId)) return;
     // Keep the operation journal even when a warning pauses disk writes.
@@ -115,11 +130,17 @@ export function QuestionPanel({ repository, currentFile, filesById, onOpenRefere
     const operations = getQuestionConversationOperations(workspaceId);
     if (!operations.length) return;
     const throughSequence = operations[operations.length - 1].sequence;
+    const key = `${sessionKey}:${getQuestionConversationGeneration(workspaceId)}:${throughSequence}:${JSON.stringify(view)}`;
+    const previousAttempt = conversationSaveAttempt.current;
+    if (previousAttempt?.key === key && (previousAttempt.status === "pending" || !force && !afterRestore)) return;
+    const attempt = { key, status: "pending" as "pending" | "failed" | "saved" };
+    conversationSaveAttempt.current = attempt;
     clearQuestionConversationSaveError(workspaceId);
     setSaveError(null);
     const save = enqueueQuestionConversationSave(workspaceId, async () => {
       await localWorkspaceProvider.saveConversations({ repositoryId: repository.id, workspaceId, persistenceSessionId: repository.persistenceSessionId }, view);
       const latest = acknowledgeQuestionConversationSave(workspaceId, view, throughSequence);
+      attempt.status = "saved";
       if (currentWorkspaceIdRef.current === sessionKey) {
         setConversations(latest);
         setSaveError(null);
@@ -127,6 +148,7 @@ export function QuestionPanel({ repository, currentFile, filesById, onOpenRefere
       }
     });
     void save.catch((error: Error) => {
+      attempt.status = "failed";
       setQuestionConversationSaveError(workspaceId, error.message);
       if (currentWorkspaceIdRef.current === sessionKey) setSaveError({ sessionKey, message: error.message });
     });
@@ -181,9 +203,20 @@ export function QuestionPanel({ repository, currentFile, filesById, onOpenRefere
     /* eslint-enable react-hooks/set-state-in-effect */
   }, [active, currentFile.id, invalidateRequest, repository.id, repository.revision, repository.source, sessionKey, storageBusy, workspaceId, unified]);
   useEffect(() => () => invalidateRequest(), [invalidateRequest]);
+  const applyInvestigationIntent = useEffectEvent((record: import("@/data/model").Investigation) => {
+    setActiveInvestigation(record); setExcludedInvestigationFiles(record.excludedFileIds);
+    setQuestion(`${record.question}\n继续调查：${record.questions.map(item => item.question).join("；")}`.slice(0, 12000));
+    const ids = [...new Set([...record.contextFiles.map(file => file.fileId), ...record.questions.map(item => item.suggestedFileId).filter((id): id is string => Boolean(id))])].filter(id => filesById.has(id) && !record.excludedFileIds.includes(id));
+    setSelectedFiles(ids); setExplicitSelection(ids.length > 0); setRanges({});
+  });
+  const clearInvestigationIntent = useEffectEvent(() => { setActiveInvestigation(null); setExcludedInvestigationFiles([]); });
   useEffect(() => {
     if (!unified || !intent || generatingRef.current) return;
     invalidateRequest(); setMode(intent.mode); setPreviewState(null); setStage("idle");
+    // Parent navigation intents intentionally hydrate the composer once, like selecting a saved conversation.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (intent.investigation) applyInvestigationIntent(intent.investigation);
+    else clearInvestigationIntent();
   }, [intent, unified, invalidateRequest]);
   useEffect(() => {
     if (!unified || loadedSessionKey !== sessionKey) return;
@@ -214,6 +247,7 @@ export function QuestionPanel({ repository, currentFile, filesById, onOpenRefere
   useEffect(() => {
     if (clearVersionRef.current === clearVersion) return;
     clearVersionRef.current = clearVersion;
+    conversationSaveAttempt.current = null;
     invalidateRequest();
     const view = getQuestionConversationView(workspaceId);
     loadedSessionKeyRef.current = sessionKey;
@@ -287,17 +321,24 @@ export function QuestionPanel({ repository, currentFile, filesById, onOpenRefere
     return [...repository.files].filter((file) => !query || file.path.toLocaleLowerCase().includes(query)).sort((left, right) => left.path.localeCompare(right.path));
   }, [repository.files, supplementFilter]);
 
+  const persistStaleReferences = useEffectEvent(() => {
+    // A delayed effect must use the journal's latest view, never an older render's list.
+    let changed = false;
+    const current = getQuestionConversationView(workspaceId).map(conversation => ({
+      ...conversation,
+      messages: conversation.messages.map(entry => {
+        if (entry.stale || !isStale(entry)) return entry;
+        changed = true;
+        return { ...entry, stale: true };
+      }),
+    }));
+    if (changed) { setConversations(current); persistConversations(current); }
+  });
   useEffect(() => {
     if (loadedSessionKey !== sessionKey) return;
-    const timer = window.setTimeout(() => {
-      const current = conversations.map((conversation) => ({
-        ...conversation,
-        messages: conversation.messages.map((entry) => isStale(entry) ? { ...entry, stale: true } : entry),
-      }));
-      persistConversations(current);
-    }, 250);
+    const timer = window.setTimeout(() => { persistStaleReferences(); }, 250);
     return () => window.clearTimeout(timer);
-  }, [conversations, filesSignature, isStale, loadedSessionKey, persistConversations, sessionKey, workspaceId]);
+  }, [conversations, filesSignature, loadedSessionKey, sessionKey]);
 
   const startPreview = async (questionText = question, fileIds?: string[]) => {
     if (unified && explicitSelection && !fileIds?.length) { setPreviewState(null); setStage("error"); setMessage("请添加至少一个源码文件。"); return; }
@@ -313,14 +354,16 @@ export function QuestionPanel({ repository, currentFile, filesById, onOpenRefere
     if (!unified) setPreviewState(null); setStage("previewing"); setMessage(unified ? "" : "正在整理相关源码范围，尚未发送给模型。");
     try {
       const requestedFileIds = mode === "question" ? fileIds ?? (additionalFileIds.length ? additionalFileIds : undefined) : fileIds;
-      const value: AiPreviewResponse = mode === "question"
+      const value: AiPreviewResponse = mode === "investigation"
+        ? await localExplanationProvider.previewInvestigation(repository, currentFile.id, trimmed, fileIds, ranges, excludedInvestigationFiles, controller.signal)
+        : mode === "question"
         ? await localExplanationProvider.previewQuestion(repository, currentFile.id, trimmed, history, requestedFileIds, ranges, controller.signal)
         : await localExplanationProvider.preview(repository, currentFile.id, mode, requestedFileIds, undefined, ranges, controller.signal, mode === "route" ? questionText.trim() : undefined);
       if (requestSequence.current !== id) return;
       if (value.scopeRequired) {
         const preferred = new Set([...(fileIds ?? []), ...(fileIds === undefined ? additionalFileIds : [])]);
         const chosen = [...new Set([...selectedFiles, ...preferred])].filter((fileId) => value.candidates.some((candidate) => candidate.fileId === fileId));
-        const defaultSelection = mode === "question"
+        const defaultSelection = (mode === "question" || mode === "investigation")
           ? chosen.length ? chosen : value.candidates.slice(0, Math.min(12, value.candidates.length)).map((candidate) => candidate.fileId)
           : [currentFile.id, ...chosen.filter((fileId) => fileId !== currentFile.id)].slice(0, 12);
         const nextRanges = Object.fromEntries(value.candidates.map((candidate) => [candidate.fileId, ranges[candidate.fileId] ?? { startLine: 1, endLine: candidate.lineCount }]));
@@ -372,6 +415,9 @@ export function QuestionPanel({ repository, currentFile, filesById, onOpenRefere
       setPartialTurns((turns) => [...turns, { id: completionIds.answerMessageId, conversationId: completionIds.conversationId, question: state.question, answer: "", status: "generating", afterMessageCount: displayMessages.length, startedAt: Date.now() }]);
     }
     const generation = getQuestionConversationGeneration(workspaceId);
+    const investigationEpoch = getInvestigationEpoch(workspaceId);
+    const investigationAtSend = activeInvestigation;
+    const investigationExclusions = [...excludedInvestigationFiles];
     try {
       const response: AiGenerationResult = unified ? await generateChatStream(state.preview, controller.signal, completionIds, (event) => {
         if (requestSequence.current !== id || generation !== getQuestionConversationGeneration(workspaceId)) return;
@@ -387,7 +433,7 @@ export function QuestionPanel({ repository, currentFile, filesById, onOpenRefere
         claims: Array.isArray(result.claims) ? result.claims as { text: string; referenceIndices: number[] }[] : undefined,
         insufficientEvidence: result.insufficientEvidence === true,
       };
-      const completion = unified ? buildAiChatCompletion({ ...state.preview, sources: state.preview.files, question: state.question }, result, completionIds) : null;
+      const completion = unified ? buildAiChatCompletion({ ...state.preview, sources: state.preview.files, question: state.question, excludedFileIds: state.preview.excludedFileIds ?? investigationExclusions }, result, completionIds) : null;
       const messages: QaMessage[] = completion ? completion.messages as QaMessage[] : [userMessage, answerMessage];
       const titleSource = completion ? messages[0]?.content ?? state.question : state.question;
       const nextId = completionIds.conversationId;
@@ -403,6 +449,18 @@ export function QuestionPanel({ repository, currentFile, filesById, onOpenRefere
       if (unified && response.chatPersisted) restoreQuestionConversations(workspaceId, updatedConversations);
       else persistConversations(updatedConversations);
       if (response.warning) setSaveError({ sessionKey, message: response.warning });
+      if (state.preview.mode === "investigation" && investigationAtSend && investigationEpoch === getInvestigationEpoch(workspaceId)) {
+        const latest = getInvestigationState(workspaceId).records.find(item => item.id === investigationAtSend.id);
+        if (latest) {
+          const nextResult = result as unknown as import("@/data/model").InvestigationResult;
+          try {
+          const updated = appendInvestigationResult(latest, nextResult, contextFiles, investigationExclusions, Object.fromEntries(state.preview.files.map(file => [file.fileId, file.reasons ?? []])));
+          changeInvestigation(workspaceId, updated); setActiveInvestigation(updated);
+          } catch {
+            setInvestigationNotices(previous => ({ ...previous, [completionIds.answerMessageId]: "本次结果已保留在聊天中；原调查的内容已达上限，请将本次结果另存调查。" }));
+          }
+        }
+      }
       onCompleted?.();
       setActiveId(nextId); if (!unified) setQuestion(""); setPreviewState(null); setStage("idle");
       if (unified) setMode("question");
@@ -418,14 +476,14 @@ export function QuestionPanel({ repository, currentFile, filesById, onOpenRefere
   };
 
   const createConversation = () => {
-    cancel();
+    cancel(); setActiveInvestigation(null); setExcludedInvestigationFiles([]); setExplicitSelection(false); setSelectedFiles([]); setRanges({});
     const next = { id: crypto.randomUUID(), title: "新对话", messages: [], updatedAt: Date.now() };
     const updatedConversations = [next, ...visibleConversations].slice(0, 100);
     setConversations(updatedConversations); persistConversations(updatedConversations); setActiveId(next.id); setMessage("");
   };
   const deleteConversation = () => {
     if (!currentConversation) return;
-    cancel();
+    cancel(); setActiveInvestigation(null); setExcludedInvestigationFiles([]);
     const remaining = visibleConversations.filter((item) => item.id !== currentConversation.id);
     setConversations(remaining); persistConversations(remaining); setActiveId(remaining[0]?.id ?? ""); setMessage("已删除此问答会话。");
   };
@@ -436,8 +494,8 @@ export function QuestionPanel({ repository, currentFile, filesById, onOpenRefere
 
   const chooseTask = (next: AiMode) => {
     if (generatingRef.current) return;
-    invalidateRequest(); setMode(next); setPreviewState(null); setStage("idle"); setMessage("");
-    if (next !== "question" && explicitSelection && !selectedFiles.includes(currentFile.id)) setSelectedFiles([currentFile.id, ...selectedFiles]);
+    invalidateRequest(); setMode(next); setActiveInvestigation(null); setExcludedInvestigationFiles([]); setPreviewState(null); setStage("idle"); setMessage("");
+    if (next !== "question" && next !== "investigation" && explicitSelection && !selectedFiles.includes(currentFile.id)) setSelectedFiles([currentFile.id, ...selectedFiles]);
   };
   const editAsQuestion = (text: string) => {
     if (generatingRef.current || storageBusy) return;
@@ -452,13 +510,28 @@ export function QuestionPanel({ repository, currentFile, filesById, onOpenRefere
     if (!ids.length) { setStage("error"); setMessage("请添加至少一个源码文件。"); }
     else { if (stage !== "scope") setStage("idle"); setMessage(""); }
   };
-  const renderMessage = (entry: QaMessage) => <ChatMessage key={entry.id} entry={entry} stale={isStale(entry)} busy={stage === "generating" || storageBusy} evidence={evidence} onEvidence={(item, reference, index) => { void showEvidence(item, reference, index); }} onCloseEvidence={() => { evidenceSequence.current++; evidenceController.current?.abort(); setEvidence(null); evidenceTrigger.current?.focus(); }} onOpen={onOpenReference} onEdit={editAsQuestion} onSupplement={beginSupplement} onTour={onActivateTour}/>;
+  const continueInvestigation = (record: import("@/data/model").Investigation) => {
+    chooseTask("investigation"); setActiveInvestigation(record); setExcludedInvestigationFiles(record.excludedFileIds);
+    setQuestion(`${record.question}\n继续调查：${record.questions.map(item => item.question).join("；")}`.slice(0, 12000));
+    const ids = [...new Set([...record.contextFiles.map(file => file.fileId), ...record.questions.map(item => item.suggestedFileId).filter((id): id is string => Boolean(id))])].filter(id => filesById.has(id) && !record.excludedFileIds.includes(id));
+    setSelectedFiles(ids); setExplicitSelection(ids.length > 0); setRanges({}); setScopeOpen(true);
+  };
+  const renderMessage = (entry: QaMessage) => {
+    if (entry.investigation) {
+      const saved = investigationCollection.records.find(item => item.id === (investigationDrafts[entry.id]?.id ?? entry.id));
+      const record = saved ?? investigationDrafts[entry.id] ?? { ...createInvestigation({ result: entry.investigation, question: entry.investigationQuestion ?? priorQuestionByMessage.get(entry.id) ?? "调查代码", repository, contextFiles: entry.contextFiles.map(item => ({ ...item, startLine: item.startLine ?? 1, endLine: item.endLine ?? 1 })), excludedFileIds: entry.excludedFileIds ?? [], id: entry.id }), selectionReasons: entry.selectionReasons };
+      return <article className="question-message is-assistant" key={entry.id}><strong>调查结果</strong>{investigationNotices[entry.id] && <p role="status">{investigationNotices[entry.id]}</p>}<InvestigationCard record={record} repository={repository} busy={storageBusy || stage === "generating"} onChange={next => { setInvestigationDrafts(previous => ({ ...previous, [entry.id]: next })); if (saved) changeInvestigation(workspaceId, next); }} onOpen={onOpenReference} onEvidence={(fileId, line) => { const index = entry.references.findIndex(ref => ref.fileId === fileId && ref.startLine === line); if (index >= 0) void showEvidence(entry, entry.references[index], index); }} onRelations={onRelations} onContinue={continueInvestigation}/>
+      {evidence?.messageId === entry.id && <ChatEvidence evidence={evidence} onClose={() => setEvidence(null)} onOpen={onOpenReference}/>}
+      <button type="button" disabled={storageBusy || Boolean(saved)} onClick={() => { if (getInvestigationState(workspaceId).records.length >= 100) { setMessage("每个工作区最多保存 100 条调查。"); return; } setInvestigationDrafts(previous => ({ ...previous, [entry.id]: record })); changeInvestigation(workspaceId, record); }}>{saved ? "已加入调查记录" : "保存调查"}</button><small>保存后，修改会自动写入；保存结果请查看全局状态。</small></article>;
+    }
+    return <ChatMessage key={entry.id} entry={entry} stale={isStale(entry)} busy={stage === "generating" || storageBusy} evidence={evidence} onEvidence={(item, reference, index) => { void showEvidence(item, reference, index); }} onCloseEvidence={() => { evidenceSequence.current++; evidenceController.current?.abort(); setEvidence(null); evidenceTrigger.current?.focus(); }} onOpen={onOpenReference} onEdit={editAsQuestion} onSupplement={beginSupplement} onTour={onActivateTour}/>;
+  };
   const renderPartial = (turn: (typeof partialTurns)[number]) => (<div className="chat-pending-turn" key={turn.id}><article className="question-message is-user"><div className="question-message-heading"><strong>你</strong></div><ChatMarkdown text={turn.question}/></article><article className="question-message is-assistant" aria-busy={turn.status!=="incomplete"}><div className="question-message-heading"><strong>RepoLens</strong><span>{turn.status==="incomplete"?"未完成":turn.status==="repairing"?"正在修正回答格式…":turn.status==="validating"?"正在核对引用…":"正在回答…"}</span></div>{turn.answer ? <ChatMarkdown text={turn.answer}/> : <span className="chat-typing" aria-label="正在生成">···</span>}{turn.status==="incomplete"&&<button className="question-retry" type="button" onClick={()=>{setQuestion(turn.question);setMode("question");setMessage("");}}>重新提问</button>}</article></div>);
 
   if (unified) return <section className="copilot-chat question-panel" aria-label="源码问答">
-    <ChatToolbar conversations={[...partialTurns.filter(turn => turn.status !== "incomplete" && !visibleConversations.some(item => item.id === turn.conversationId)).map(turn => ({ id: turn.conversationId, title: turn.question.slice(0, 48), messages: [], updatedAt: turn.startedAt })), ...visibleConversations]} activeId={activeId} generatingId={partialTurns.find(turn => turn.status !== "incomplete")?.conversationId} busy={storageBusy} onNew={createConversation} onSelect={id => { cancel(); setActiveId(id); setMessage(""); }} onDelete={deleteConversation} onClose={onCloseChat}/>
+    <ChatToolbar conversations={[...partialTurns.filter(turn => turn.status !== "incomplete" && !visibleConversations.some(item => item.id === turn.conversationId)).map(turn => ({ id: turn.conversationId, title: turn.question.slice(0, 48), messages: [], updatedAt: turn.startedAt })), ...visibleConversations]} activeId={activeId} generatingId={partialTurns.find(turn => turn.status !== "incomplete")?.conversationId} busy={storageBusy} onNew={createConversation} onSelect={id => { cancel(); setActiveInvestigation(null); setExcludedInvestigationFiles([]); setExplicitSelection(false); setSelectedFiles([]); setRanges({}); setActiveId(id); setMessage(""); }} onDelete={deleteConversation} onClose={onCloseChat}/>
     <div className="chat-persistence-status" aria-live="polite">
-      {saveError?.sessionKey === sessionKey && <div role="alert">对话尚未保存：{saveError.message}<button type="button" onClick={() => persistConversations(conversations)}>重试保存</button></div>}
+      {saveError?.sessionKey === sessionKey && <div role="alert">对话尚未保存：{saveError.message}<button type="button" onClick={() => persistConversations(conversations, false, true)}>重试保存</button></div>}
       {failedRepositoryId === workspaceId && <div role="alert">无法读取已保存的问答记录。本页修改尚未保存，原记录不会被覆盖。<button type="button" onClick={() => { void loadWorkspace(); }}>重试读取问答记录</button></div>}
       {readWarning && <div role="status">本地保存提示：{readWarning}<button type="button" onClick={() => { void loadWorkspace(); }}>重试读取</button><button type="button" onClick={() => { readWarningRef.current = ""; setReadWarning(""); persistConversations(conversations, false, true); }}>仍然保存</button></div>}
       {storageBusy && <div role="status">正在清除数据，聊天操作已暂停。</div>}
@@ -474,7 +547,7 @@ export function QuestionPanel({ repository, currentFile, filesById, onOpenRefere
       onLatest={() => { followLatest.current = true; setAwayFromBottom(false); if (transcriptRef.current) transcriptRef.current.scrollTop = transcriptRef.current.scrollHeight; }}
       onChange={changeQuestion} onMode={chooseTask} onSettings={onOpenSettings} onSend={() => { void confirmAndGenerate(); }} onStop={cancel}
       status={stage === "previewing" ? "正在整理上下文…" : stage === "scope" ? "请调整发送范围" : !modelSettings?.configured ? "设置模型后即可提问" : undefined}
-      context={<ChatContextPicker open={scopeOpen} onOpenChange={setScopeOpen} files={repository.files} currentId={currentFile.id} required={mode !== "question"} selected={attachmentIds} manualIds={[...manualFileIds, ...additionalFileIds]} preview={visiblePreviewState?.preview} candidates={candidates} ranges={ranges} busy={stage === "generating" || storageBusy}
+      context={<ChatContextPicker open={scopeOpen} onOpenChange={setScopeOpen} files={repository.files} currentId={currentFile.id} required={mode !== "question" && mode !== "investigation"} selected={attachmentIds} manualIds={[...manualFileIds, ...additionalFileIds]} preview={visiblePreviewState?.preview} candidates={candidates} ranges={ranges} busy={stage === "generating" || storageBusy}
         history={mode === "question" ? displayMessages.filter(entry => !isStale(entry)).slice(-6).map(entry => ({ ...entry, selected: !excludedHistory.includes(entry.id) })) : []}
         characters={visiblePreviewState?.preview.characters} endpoint={visiblePreviewState?.preview.baseUrl || modelSettings?.baseUrl}
         onSelect={changeAttachments} onRange={(id, range) => { invalidateRequest(); setSelectedFiles(attachmentIds); setExplicitSelection(true); setPreviewState(null); setRanges(previous => ({ ...previous, [id]: range })); if (stage !== "scope") setStage("idle"); }}
@@ -486,7 +559,7 @@ export function QuestionPanel({ repository, currentFile, filesById, onOpenRefere
     {!backendAvailable && <p role="alert" className="question-feedback">本地服务已停止，问答请求已取消。请重新启动 RepoLens 后再试。</p>}
     {readWarning && <div className="question-feedback" role="status">本地保存提示：{readWarning}。问答仍可查看，但在确认前不会自动覆盖已有记录。<button type="button" className="question-retry" onClick={() => { void loadWorkspace(); }}>重试读取</button><button type="button" className="question-retry" onClick={() => { readWarningRef.current = ""; setReadWarning(""); persistConversations(conversations, false, true); }}>仍然保存</button></div>}
     {failedRepositoryId === workspaceId && <div className="question-feedback" role="alert">无法读取已保存的问答记录。本页修改尚未保存，原记录不会被覆盖。<button type="button" className="question-retry" onClick={() => { void loadWorkspace(); }}>重试读取问答记录</button></div>}
-    {saveError?.sessionKey === sessionKey && <div className="question-feedback" role="alert">问答仍可继续，但会话未保存：{saveError.message}<button type="button" className="question-retry" onClick={() => persistConversations(conversations)}>重试保存</button></div>}
+    {saveError?.sessionKey === sessionKey && <div className="question-feedback" role="alert">问答仍可继续，但会话未保存：{saveError.message}<button type="button" className="question-retry" onClick={() => persistConversations(conversations, false, true)}>重试保存</button></div>}
     {storageBusy && <p className="question-feedback" role="status">正在清除本地保存数据，问答操作已暂停。</p>}
     <fieldset disabled={!backendAvailable || storageBusy} style={{ border: 0, margin: 0, minWidth: 0, padding: 0 }}>
     <section ref={panelRef} onScroll={(event) => { if (!unified) return; scrollPosition.current = event.currentTarget.scrollTop; try { localStorage.setItem(uiKey, JSON.stringify({ activeId, draft: question, scrollTop: scrollPosition.current })); } catch { /* Keep the position in memory. */ } }} className="question-panel" aria-label="源码问答">

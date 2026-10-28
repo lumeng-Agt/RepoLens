@@ -34,6 +34,12 @@ export function getWorkspacePersistenceStatus(workspaceId) {
   return stateByWorkspace.get(workspaceId)?.status ?? idleStatus;
 }
 
+export function markWorkspacePersistencePending(workspaceId, key, message) {
+  const state = stateFor(workspaceId);
+  state.failures.set(key, message);
+  publish(workspaceId, state);
+}
+
 export function subscribeWorkspacePersistence(workspaceId, listener) {
   let listeners = listenersByWorkspace.get(workspaceId);
   if (!listeners) { listeners = new Set(); listenersByWorkspace.set(workspaceId, listeners); }

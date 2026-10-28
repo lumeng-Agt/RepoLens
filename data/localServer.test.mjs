@@ -41,6 +41,7 @@ test("local API protects source paths, streams file updates, and gates AI genera
   const commandClientId = `local-server-test-${process.pid}`; let intentSequence = 0;
   const command = () => ({ clientId: commandClientId, intentSequence: ++intentSequence });
   const repoPath = await mkdtemp(path.join(os.tmpdir(), "repolens-api-"));
+  const userDataPath = await mkdtemp(path.join(os.tmpdir(), "repolens-api-state-"));
   await mkdir(path.join(repoPath, "src"));
   await writeFile(path.join(repoPath, "README.md"), "# Local Sample\n\nA safe text overview.");
   await writeFile(path.join(repoPath, "package.json"), JSON.stringify({ name: "local-sample" }));
@@ -96,11 +97,12 @@ test("local API protects source paths, streams file updates, and gates AI genera
     response.end();
   });
   redirectServer.listen(redirectPort, "127.0.0.1"); await once(redirectServer, "listening");
-  const child = spawn(process.execPath, [path.join(projectRoot, "scripts/local-server.mjs")], { cwd: projectRoot, env: { ...process.env, REPOLENS_PORT: String(apiPort), REPOLENS_AI_TIMEOUT_MS: "300" }, stdio: "ignore" });
+  const child = spawn(process.execPath, [path.join(projectRoot, "scripts/local-server.mjs")], { cwd: projectRoot, env: { ...process.env, REPOLENS_PORT: String(apiPort), REPOLENS_USER_DATA_PATH: userDataPath, REPOLENS_AI_TIMEOUT_MS: "300" }, stdio: "ignore" });
   context.after(async () => {
-    child.kill("SIGTERM");
+    if (child.exitCode === null) { const exited = once(child, "exit"); child.kill("SIGTERM"); await exited; }
     await Promise.all([modelServer, redirectServer].map((server) => new Promise((resolve) => { server.closeAllConnections(); server.close(resolve); })));
     await rm(repoPath, { recursive: true, force: true });
+    await rm(userDataPath, { recursive: true, force: true });
   });
   await waitForService(origin, child);
 
@@ -120,8 +122,10 @@ test("local API protects source paths, streams file updates, and gates AI genera
   assert.deepEqual(overview.manifests, ["package.json"]);
   const recentTouch = await apiFetch(`${origin}/api/workspace`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "recent-touch", repositoryId: snapshot.id, workspaceId: snapshot.workspaceId ?? snapshot.id, persistenceSessionId: snapshot.persistenceSessionId }) });
   assert.equal(recentTouch.status, 200);
+  assert.equal((await recentTouch.json()).ok, true, "recent creation must be confirmed on disk");
   const recentRemove = await apiFetch(`${origin}/api/workspace`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "recent-remove", targetId: snapshot.workspaceId ?? snapshot.id }) });
   assert.equal(recentRemove.status, 200, "removing a recent repository does not require an active repository session");
+  assert.equal((await recentRemove.json()).ok, true, "recent removal must be confirmed on disk");
   const workspaceAfterRemove = await (await apiFetch(`${origin}/api/workspace?repositoryId=${encodeURIComponent(snapshot.workspaceId ?? snapshot.id)}`)).json();
   assert.equal(workspaceAfterRemove.recentRepositories.some((item) => item.id === (snapshot.workspaceId ?? snapshot.id)), false);
   const searchResponse = await apiFetch(`${origin}/api/search`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repositoryId: snapshot.id, revision: snapshot.revision, query: "calculateMainValue" }) });

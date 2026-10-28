@@ -6,4 +6,5 @@ export function clearWorkspacePersistence<T>(workspaceIds: string[], operation: 
 export function getKnownWorkspacePersistenceIds(): string[];
 export function isWorkspacePersistenceClearing(workspaceId: string): boolean;
 export function getWorkspacePersistenceStatus(workspaceId: string): WorkspacePersistenceStatus;
+export function markWorkspacePersistencePending(workspaceId: string, key: string, message: string): void;
 export function subscribeWorkspacePersistence(workspaceId: string, listener: () => void): () => void;

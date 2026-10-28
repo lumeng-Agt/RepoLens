@@ -1,14 +1,13 @@
 import { createHash } from "node:crypto";
-import { lstat, readFile, readdir, realpath } from "node:fs/promises";
-import { statSync } from "node:fs";
+import { lstat, realpath } from "node:fs/promises";
 import path from "node:path";
 import ts from "typescript";
 import ignore from "ignore";
 import { parsePolyglot } from "./polyglot-parser.mjs";
+import { createRepositoryFileAccess, repositoryPathIsBlocked } from "./repository-files.mjs";
 
 const SOURCE_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs", ".css", ".scss", ".sass", ".less", ".py", ".pyi", ".go"]);
 const TS_RESOLUTION_EXTENSIONS = [".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs", ".css", ".scss", ".sass", ".less"];
-const BASE_IGNORES = [".git", "node_modules", ".next", "dist", "build", "coverage", ".wrangler", ".vinext", ".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", "vendor"];
 const MAX_FILES = 5000;
 const MAX_BYTES = 1024 * 1024;
 const PYTHON_STDLIB = new Set("abc argparse array asyncio base64 bisect builtins calendar cmath collections concurrent contextlib copy csv ctypes dataclasses datetime decimal difflib dis email enum errno faulthandler fnmatch fractions functools gc getpass glob hashlib heapq hmac html http importlib inspect io itertools json logging math multiprocessing numbers operator os pathlib pdb pickle platform pprint queue random re shutil signal socket sqlite3 statistics string subprocess sys tempfile threading time tkinter traceback typing unittest urllib uuid warnings weakref xml zipfile zoneinfo".split(" "));
@@ -16,13 +15,21 @@ const GO_STDLIB = new Set("archive bufio bytes cmp compress container context cr
 const DEFAULT_COMPILER_OPTIONS = Object.freeze({ allowJs: true, jsx: ts.JsxEmit.Preserve, moduleResolution: ts.ModuleResolutionKind.Bundler, target: ts.ScriptTarget.Latest });
 
 function digest(text) { return createHash("sha256").update(text).digest("hex"); }
+function decodeConfigContent(buffer) {
+  if (buffer[0] === 0xff && buffer[1] === 0xfe) return buffer.subarray(2).toString("utf16le");
+  if (buffer[0] === 0xfe && buffer[1] === 0xff) {
+    const text = Buffer.from(buffer.subarray(2, buffer.length - (buffer.length % 2)));
+    text.swap16(); return text.toString("utf16le");
+  }
+  return (buffer[0] === 0xef && buffer[1] === 0xbb && buffer[2] === 0xbf ? buffer.subarray(3) : buffer).toString("utf8");
+}
 function normalizeTsPath(fileName) { return path.resolve(fileName).replaceAll("\\", "/"); }
 function fingerprintPath(root, fileName) {
   const absolute = path.resolve(fileName);
   const relative = path.relative(root, absolute);
   if (relative === "") return ".";
   if (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)) return relative.split(path.sep).join("/");
-  return absolute.replaceAll("\\", "/");
+  return "<outside>";
 }
 function rootIndependentValue(value, root) {
   if (typeof value === "string") {
@@ -48,10 +55,9 @@ function stableValue(value, seen = new WeakSet()) {
   return result;
 }
 function isHardIgnored(relative) {
-  const parts = relative.split("/");
-  return parts.some((part) => BASE_IGNORES.includes(part) || part.startsWith(".env"));
+  return repositoryPathIsBlocked(relative);
 }
-function findNearestConfigs(root, filePath, directoryCache) {
+function findNearestConfigs(root, filePath, directoryCache, access, diagnostics) {
   let directory = path.dirname(path.join(root, ...filePath.split("/")));
   const visited = [];
   let found = null;
@@ -60,7 +66,8 @@ function findNearestConfigs(root, filePath, directoryCache) {
     visited.push(directory);
     for (const name of ["tsconfig.json", "jsconfig.json"]) {
       const candidate = path.join(directory, name);
-      if (ts.sys.fileExists(candidate)) { found = candidate; break; }
+      try { if (access.inspectSync(candidate).info.isFile()) { found = candidate; break; } }
+      catch (error) { if (String(error.code).startsWith("REPOSITORY_")) diagnostics.push({ path: fingerprintPath(root, candidate), message: error.message }); }
     }
     if (found) break;
     if (directory === root) break;
@@ -69,38 +76,50 @@ function findNearestConfigs(root, filePath, directoryCache) {
   for (const visitedDirectory of visited) directoryCache.set(visitedDirectory, found);
   return found;
 }
-function compilerOptions(configPath, configHashes, stats) {
+function compilerOptions(configPath, configHashes, stats, access) {
   if (!configPath) return { options: DEFAULT_COMPILER_OPTIONS, configFiles: new Map(), missingConfigFiles: new Set(), diagnostics: [] };
   const configFiles = new Map();
   const missingConfigFiles = new Set();
   const syntaxDiagnostics = new Map();
   const unrecoverableDiagnostics = [];
+  const blockedPaths = new Set();
+  function rejected(fileName, error) {
+    const absolute = normalizeTsPath(fileName);
+    if (String(error.code).startsWith("REPOSITORY_")) blockedPaths.add(absolute);
+    if (fingerprintPath(access.root, absolute) !== "<outside>") missingConfigFiles.add(absolute);
+  }
+  const directoryEntries = directory => {
+    try {
+      const entries = access.entriesSync(directory);
+      return { files: entries.filter(item => item.isFile()).map(item => item.name), directories: entries.filter(item => item.isDirectory()).map(item => item.name) };
+    } catch (error) { rejected(directory, error); return { files: [], directories: [] }; }
+  };
   const host = {
-    ...ts.sys,
+    useCaseSensitiveFileNames: ts.sys.useCaseSensitiveFileNames,
+    getCurrentDirectory: () => access.root,
+    directoryExists: fileName => access.directoryExistsSync(fileName),
+    getDirectories: directory => directoryEntries(directory).directories,
+    readDirectory: (directory, extensions, excludes, includes, depth) => ts.matchFiles(directory, extensions, excludes, includes, ts.sys.useCaseSensitiveFileNames, access.root, depth, directoryEntries, fileName => fileName),
     onUnRecoverableConfigFileDiagnostic(diagnostic) { unrecoverableDiagnostics.push(diagnostic); },
     fileExists(fileName) {
       const normalized = normalizeTsPath(fileName);
-      const exists = ts.sys.fileExists(normalized);
+      let exists = false;
+      try { exists = access.inspectSync(normalized).info.isFile(); }
+      catch (error) { rejected(normalized, error); return false; }
       if (exists) missingConfigFiles.delete(normalized);
       else missingConfigFiles.add(normalized);
       return exists;
     },
     readFile(fileName) {
       const absolute = normalizeTsPath(fileName);
-      const content = ts.sys.readFile(absolute);
-      if (content === undefined) {
-        missingConfigFiles.add(absolute);
-        configHashes.set(absolute, "missing");
-        return content;
-      }
+      let content; let info;
+      try { const read = access.readFileSync(absolute, { encoding: null }); content = decodeConfigContent(read.content); info = read.info; }
+      catch (error) { rejected(absolute, error); return undefined; }
       const contentHash = digest(content);
       missingConfigFiles.delete(absolute);
       configHashes.set(absolute, contentHash);
       stats.configReadCount += 1;
-      try {
-        const info = statSync(absolute);
-        configFiles.set(absolute, { size: info.size, mtimeMs: info.mtimeMs, ctimeMs: info.ctimeMs, contentHash });
-      } catch {}
+      configFiles.set(absolute, { size: info.size, mtimeMs: info.mtimeMs, ctimeMs: info.ctimeMs, contentHash });
       // TypeScript accepts extensionless config files in `extends`; track and
       // validate every file it actually reads instead of assuming `.json`.
       const jsonResult = ts.parseConfigFileTextToJson(absolute, content);
@@ -119,28 +138,33 @@ function compilerOptions(configPath, configHashes, stats) {
     unrecoverableDiagnostics.push({ code: "PARSE", messageText: error instanceof Error ? error.message : String(error) });
   }
   for (const fileName of missingConfigFiles) {
-    if (!ts.sys.fileExists(fileName)) configHashes.set(fileName, "missing");
+    if (!access.fileExistsSync(fileName)) configHashes.set(fileName, "missing");
   }
   const rawDiagnostics = [...(parsed?.errors ?? []), ...unrecoverableDiagnostics];
   const diagnostics = [...syntaxDiagnostics.values()];
+  if (blockedPaths.size) diagnostics.push({ path: normalizeTsPath(configPath), message: "配置继承或解析目标超出仓库、使用符号链接或不符合安全读取限制，已阻止访问。" });
   for (const diagnostic of rawDiagnostics) {
-    const message = ts.flattenDiagnosticMessageText(diagnostic.messageText, " ");
+    let message = ts.flattenDiagnosticMessageText(diagnostic.messageText, " ");
+    for (const blocked of [...blockedPaths].sort((a, b) => b.length - a.length)) {
+      for (const variant of [blocked, blocked.replaceAll("/", "\\")]) message = message.replaceAll(variant, "<已阻止的路径>");
+    }
     const fileName = diagnostic.file?.fileName ? normalizeTsPath(diagnostic.file.fileName) : normalizeTsPath(configPath);
     diagnostics.push({ path: fileName, message: `TypeScript 配置诊断 TS${diagnostic.code}: ${message}` });
   }
   const uniqueDiagnostics = [...new Map(diagnostics.map((diagnostic) => [`${diagnostic.path}:${diagnostic.message}`, diagnostic])).values()];
   return {
-    options: syntaxDiagnostics.size > 0 || !parsed ? DEFAULT_COMPILER_OPTIONS : parsed.options,
+    options: syntaxDiagnostics.size > 0 || blockedPaths.size > 0 || !parsed ? DEFAULT_COMPILER_OPTIONS : parsed.options,
     configFiles,
     missingConfigFiles,
     diagnostics: uniqueDiagnostics,
-    parseState: syntaxDiagnostics.size > 0 ? "syntax-error" : parsed ? "parsed" : "unrecoverable",
+    parseState: blockedPaths.size > 0 ? "blocked" : syntaxDiagnostics.size > 0 ? "syntax-error" : parsed ? "parsed" : "unrecoverable",
   };
 }
-async function configCacheIsValid(cached, configHashes, stats) {
+async function configCacheIsValid(cached, configHashes, stats, access) {
   for (const [fileName, previous] of cached.configFiles) {
     try {
-      const content = await readFile(fileName, "utf8");
+      const read = await access.readFile(fileName, { encoding: null });
+      const content = decodeConfigContent(read.content);
       stats.configReadCount += 1;
       const contentHash = digest(content);
       if (contentHash !== previous.contentHash) return false;
@@ -148,7 +172,7 @@ async function configCacheIsValid(cached, configHashes, stats) {
     } catch { return false; }
   }
   for (const fileName of cached.missingConfigFiles ?? []) {
-    if (ts.sys.fileExists(fileName)) return false;
+    if (access.fileExistsSync(fileName)) return false;
     configHashes.set(fileName, "missing");
   }
   return cached.configFiles.size > 0;
@@ -162,9 +186,17 @@ export async function scanRepository(inputPath, previous = null, { mode = "verif
   const requestedRoot = path.resolve(inputPath);
   const requestedInfo = await lstat(requestedRoot);
   if (requestedInfo.isSymbolicLink()) throw new Error("为安全起见，不能以符号链接作为仓库根目录。");
-  const root = await realpath(requestedRoot);
-  const rootInfo = await lstat(root);
+  let root; let rootInfo; let requestedAfter;
+  try {
+    root = await realpath(requestedRoot);
+    rootInfo = await lstat(root);
+    requestedAfter = await lstat(requestedRoot);
+  } catch { throw new Error("仓库目录在打开期间发生变化或无法读取，请重新选择文件夹。"); }
   if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) throw new Error("请选择一个真实的本地文件夹。");
+  if (requestedAfter.isSymbolicLink() || requestedInfo.dev !== rootInfo.dev || requestedInfo.ino !== rootInfo.ino || requestedAfter.dev !== rootInfo.dev || requestedAfter.ino !== rootInfo.ino) throw new Error("仓库目录在打开期间发生变化，请重新选择文件夹。");
+  let access;
+  try { access = createRepositoryFileAccess(root, { expectedIdentity: requestedInfo }); }
+  catch { throw new Error("仓库目录在打开期间发生变化或无法读取，请重新选择文件夹。"); }
   const ignoreContents = {};
   const paths = [];
   const languageConfigPaths = new Set();
@@ -177,16 +209,21 @@ export async function scanRepository(inputPath, previous = null, { mode = "verif
     for (const name of [".gitignore", ".repolensignore"]) {
       const absolute = path.join(directory, name);
       try {
-        const contents = await readFile(absolute, "utf8");
+        const { content: contents } = await access.readFile(absolute);
         const relative = path.relative(root, absolute).split(path.sep).join("/");
         ignoreContents[relative] = contents;
         localMatcher.add(contents);
         hasLocalRules = true;
-      } catch {}
+      } catch (error) {
+        if (error.code !== "ENOENT" && error.code !== "ENOTDIR") {
+          diagnostics.push({ path: fingerprintPath(root, absolute), message: `${error.message} 此目录未继续扫描，以免忽略规则失效后扩大读取范围。` });
+          return;
+        }
+      }
     }
     if (hasLocalRules) localRules.push({ base: path.relative(root, directory).split(path.sep).join("/"), matcher: localMatcher });
     let entries;
-    try { entries = await readdir(directory, { withFileTypes: true }); } catch (error) { diagnostics.push({ path: path.relative(root, directory), message: error.message }); return; }
+    try { entries = access.entriesSync(directory); } catch (error) { diagnostics.push({ path: path.relative(root, directory), message: error.message }); return; }
     entries.sort((a, b) => a.name.localeCompare(b.name));
     for (const entry of entries) {
       const absolute = path.join(directory, entry.name);
@@ -213,7 +250,7 @@ export async function scanRepository(inputPath, previous = null, { mode = "verif
   await walk(root);
   const languageConfigContents = new Map();
   for (const relative of [...languageConfigPaths].sort()) {
-    try { languageConfigContents.set(relative, await readFile(path.join(root, ...relative.split("/")), "utf8")); }
+    try { languageConfigContents.set(relative, (await access.readFile(relative)).content); }
     catch (error) { diagnostics.push({ path: relative, message: `语言配置读取失败：${error.message}` }); }
   }
   const languageConfigHashes = new Map([...languageConfigContents].map(([relative, contents]) => [relative, digest(contents)]));
@@ -223,17 +260,17 @@ export async function scanRepository(inputPath, previous = null, { mode = "verif
   diagnostics.push(...(goModules.diagnostics ?? []));
   const configHashes = new Map();
   const directoryConfigCache = new Map();
-  const configsByFile = new Map(paths.map((filePath) => [filePath, findNearestConfigs(root, filePath, directoryConfigCache)]));
+  const configsByFile = new Map(paths.map((filePath) => [filePath, findNearestConfigs(root, filePath, directoryConfigCache, access, diagnostics)]));
   const configCache = new Map();
   const previousConfigCache = previous?.configCache ?? new Map();
   let configParseCount = 0;
   for (const configPath of new Set(configsByFile.values())) {
     if (!configPath) { configCache.set(null, { options: DEFAULT_COMPILER_OPTIONS, configFiles: new Map(), missingConfigFiles: new Set(), parseState: "no-config", diagnostics: [] }); continue; }
     const cached = previousConfigCache.get(configPath);
-    if (cached && await configCacheIsValid(cached, configHashes, scanStats)) {
+    if (cached && await configCacheIsValid(cached, configHashes, scanStats, access)) {
       configCache.set(configPath, cached);
     } else {
-      const parsed = compilerOptions(configPath, configHashes, scanStats);
+      const parsed = compilerOptions(configPath, configHashes, scanStats, access);
       configCache.set(configPath, parsed);
       configParseCount += 1;
     }
@@ -252,7 +289,9 @@ export async function scanRepository(inputPath, previous = null, { mode = "verif
   let sourceReadCount = 0;
   for (const relative of paths) {
     const absolute = path.join(root, ...relative.split("/"));
-    const info = await lstat(absolute);
+    let info; let inspected;
+    try { inspected = access.inspectSync(absolute); info = inspected.info; }
+    catch (error) { diagnostics.push({ path: relative, message: error.message }); continue; }
     if (!info.isFile() || info.isSymbolicLink()) continue;
     if (info.size > MAX_BYTES) { diagnostics.push({ path: relative, message: "文件超过 1 MiB，已跳过。" }); continue; }
     const old = previous?.files.get(relative);
@@ -261,7 +300,9 @@ export async function scanRepository(inputPath, previous = null, { mode = "verif
     const metadataMatches = old && oldMetadata && previous.sourceCache.has(relative) && Object.keys(currentMetadata).every((key) => oldMetadata[key] === currentMetadata[key]);
     const explicitlyDirty = explicitlyChanged.has(relative);
     const canReuseWithoutRead = scanMode === "incremental" && metadataMatches && !explicitlyDirty;
-    const source = canReuseWithoutRead ? previous.sourceCache.get(relative) : await readFile(absolute, "utf8");
+    let source;
+    try { source = canReuseWithoutRead ? previous.sourceCache.get(relative) : (await inspected.readFile()).content; }
+    catch (error) { diagnostics.push({ path: relative, message: error.message }); continue; }
     if (!canReuseWithoutRead) sourceReadCount += 1;
     const contentHash = canReuseWithoutRead ? old.contentHash : digest(source);
     const contentChanged = !old || old.contentHash !== contentHash;
@@ -338,7 +379,14 @@ export async function scanRepository(inputPath, previous = null, { mode = "verif
     }
     const configPath = configsByFile.get(file.path);
     const options = optionsByConfig.get(configPath);
-    if (!compilerHostsByConfig.has(configPath)) compilerHostsByConfig.set(configPath, ts.createCompilerHost(options));
+    if (!compilerHostsByConfig.has(configPath)) compilerHostsByConfig.set(configPath, {
+      fileExists: fileName => access.fileExistsSync(fileName),
+      readFile: fileName => { try { return access.readFileSync(fileName).content; } catch { return undefined; } },
+      directoryExists: directory => access.directoryExistsSync(directory),
+      getDirectories: directory => { try { return access.entriesSync(directory).filter(item => item.isDirectory()).map(item => item.name); } catch { return []; } },
+      realpath: fileName => { try { return access.inspectSync(fileName).realPath; } catch { return fileName; } },
+      getCurrentDirectory: () => root,
+    });
     const compilerHost = compilerHostsByConfig.get(configPath);
     for (const imported of file.imports) {
       const fromAbsolute = path.join(root, ...file.path.split("/"));

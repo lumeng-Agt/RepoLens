@@ -8,7 +8,7 @@ import { cleanupGitHubRepository, cleanupPendingGitHubContent, fetchGitHubRevisi
 import { AiGenerationEnvelopeSchema, AiPreviewResponseSchema, AiStreamEventSchema, createAiGenerationEnvelope } from "../data/ai-contract.mjs";
 import { AI_PROMPT_VERSION, ModelRedirectError, requestChatCompletion, validateAiResult } from "../data/ai-generation.mjs";
 import { collectAiCandidates, questionCandidateIds, rankGoalCandidates, selectAiContext } from "../data/ai-context.mjs";
-import { rankQuestionCandidates } from "../data/question-retrieval.mjs";
+import { rankQuestionCandidates, rankInvestigationCandidates } from "../data/question-retrieval.mjs";
 import { estimateTokens } from "../data/token-estimate.mjs";
 import { searchRepositoryContent } from "../data/repository-search.mjs";
 import { buildRepositoryOverview } from "../data/repository-overview.mjs";
@@ -283,36 +283,42 @@ function collectQuestionCandidates(fileId, question) {
   return rankQuestionCandidates({ files: session.snapshot.files, dependencies: session.snapshot.dependencies, sourceById: session.sourceCache, entryFileId: fileId, question });
 }
 function buildPreview(input) {
-  if (!session || input.repositoryId !== session.snapshot.id || !["explanation", "route", "question"].includes(input.mode)) throw new Error("仓库或生成类型无效。");
+  const questionLike = input.mode === "question" || input.mode === "investigation";
+  if (!session || input.repositoryId !== session.snapshot.id || !["explanation", "route", "question", "investigation"].includes(input.mode)) throw new Error("仓库或生成类型无效。");
   if (!settings.baseUrl || !settings.model || !settings.apiKey) throw new Error("请先填写模型服务地址、模型名称和 API 密钥。预览不会发送源码。");
-  if (input.mode === "question" && (!String(input.question ?? "").trim() || String(input.question).length > 12_000)) throw new Error("请输入不超过 12,000 字符的问题。");
+  if (questionLike && (!String(input.question ?? "").trim() || String(input.question).length > 12_000)) throw new Error("请输入不超过 12,000 字符的问题。");
   if (input.mode === "route" && String(input.goal ?? "").length > 300) throw new Error("导览目标不能超过 300 个字符。");
-  const retrieval = input.mode === "question" ? collectQuestionCandidates(input.fileId, input.question) : null;
+  const retrieval = input.mode === "investigation" ? rankInvestigationCandidates({ files: session.snapshot.files, dependencies: session.snapshot.dependencies, sourceById: session.sourceCache, question: input.question }) : questionLike ? collectQuestionCandidates(input.fileId, input.question) : null;
+  if (input.mode === "investigation") {
+    const excluded = new Set(input.excludedFileIds ?? []);
+    retrieval.candidates = retrieval.candidates.filter(candidate => !excluded.has(candidate.id));
+    if (input.fileIds?.some(id => excluded.has(id))) throw new Error("发送范围包含已排除的文件，请重新选择。");
+  }
   const goalRetrieval = input.mode === "route" && String(input.goal ?? "").trim()
     ? rankGoalCandidates(session.snapshot, input.fileId, String(input.goal).trim(), session.sourceCache)
     : null;
-  const questionCandidates = retrieval && input.fileIds ? questionCandidateIds(session.snapshot, input.fileId, input.question, session.sourceCache, input.fileIds) : null;
+  const questionCandidates = retrieval && input.fileIds ? questionCandidateIds(session.snapshot, input.mode === "investigation" ? "" : input.fileId, input.question, session.sourceCache, input.fileIds) : null;
   const rankedContextCandidates = retrieval?.candidates ?? goalRetrieval?.candidates ?? null;
-  const candidates = (questionCandidates?.candidates ?? rankedContextCandidates?.map((candidate) => candidate.id) ?? collectAiCandidates(session.snapshot, input.fileId, input.mode)).filter((fileId) => !input.scopePrefix || fileId.startsWith(`${input.scopePrefix}/`));
-  if (input.mode !== "question" && !candidates.includes(input.fileId)) throw new Error("所选目录不包含当前入口文件，请调整图谱目录范围。");
-  if (input.mode === "question" && candidates.length === 0) throw new Error("仓库中没有可用于回答的源码文件。");
+  const candidates = (questionCandidates?.candidates ?? rankedContextCandidates?.map((candidate) => candidate.id) ?? collectAiCandidates(session.snapshot, input.fileId, input.mode)).filter((fileId) => (!input.scopePrefix || fileId.startsWith(`${input.scopePrefix}/`)) && !(input.excludedFileIds ?? []).includes(fileId));
+  if (!questionLike && !candidates.includes(input.fileId)) throw new Error("所选目录不包含当前入口文件，请调整图谱目录范围。");
+  if (questionLike && candidates.length === 0) throw new Error("仓库中没有可用于回答的源码文件。");
   const questionHistory = input.mode === "question" ? input.history ?? [] : [];
   if (!Array.isArray(questionHistory) || questionHistory.length > 6 || questionHistory.some((item) => !item || !["user", "assistant"].includes(item.role) || typeof item.content !== "string" || item.content.length > 12_000)) throw new Error("问答历史格式无效，请重新选择对话内容。");
-  const requested = input.fileIds ?? (input.mode === "question" ? candidates.slice(0, 12) : goalRetrieval ? goalRetrieval.selectedFileIds.filter((fileId) => candidates.includes(fileId)) : candidates);
+  const requested = input.fileIds ?? (questionLike ? candidates.slice(0, 12) : goalRetrieval ? goalRetrieval.selectedFileIds.filter((fileId) => candidates.includes(fileId)) : candidates);
   const effectiveRanges = { ...(input.ranges ?? {}) };
-  if (input.mode === "question" || input.mode === "route") for (const candidate of rankedContextCandidates ?? []) {
+  if (questionLike || input.mode === "route") for (const candidate of rankedContextCandidates ?? []) {
     if (!effectiveRanges[candidate.id] && candidate.suggestedRange) effectiveRanges[candidate.id] = candidate.suggestedRange;
   }
-  const selected = selectAiContext({ fileIds: requested, candidateIds: candidates, entryFileId: input.fileId, ranges: effectiveRanges, sourceById: session.sourceCache, requireEntry: input.mode !== "question" });
+  const selected = selectAiContext({ fileIds: requested, candidateIds: candidates, entryFileId: input.fileId, ranges: effectiveRanges, sourceById: session.sourceCache, requireEntry: !questionLike });
   const context = { ...selected, sources: selected.sources.map((source) => ({ ...source, contentHash: digest(session.sourceCache.get(source.fileId) ?? "") })) };
   const historyCharacters = questionHistory.reduce((sum, item) => sum + item.content.length, 0);
-  const totalCharacters = context.characters + (input.mode === "question" ? String(input.question).length + historyCharacters : 0);
-  const tooMany = context.sources.length > 12 || totalCharacters > 60_000 || (input.mode === "question" && !input.fileIds && candidates.length > 12) || (input.mode === "question" && retrieval.retrievalInsufficient && !input.fileIds);
+  const totalCharacters = context.characters + (questionLike ? String(input.question).length + historyCharacters : 0);
+  const tooMany = context.sources.length > 12 || totalCharacters > 60_000 || (questionLike && !input.fileIds && candidates.length > 12) || (questionLike && retrieval.retrievalInsufficient && !input.fileIds);
   if (tooMany) {
     return { scopeRequired: true, candidates: candidates.map((fileId) => { const lines = (session.sourceCache.get(fileId) ?? "").split("\n"); const candidate = rankedContextCandidates?.find((item) => item.id === fileId); return { fileId, characters: lines.join("\n").length, lineCount: lines.length, oversizedLines: lines.flatMap((line, index) => line.length > 60_000 ? [index + 1] : []), ...(candidate?.reasons.length ? { reasons: candidate.reasons } : {}), ...(candidate?.suggestedRange ? { suggestedRange: candidate.suggestedRange } : {}) }; }), maxFiles: 12, maxCharacters: 60_000, ...(retrieval ? { retrievalInsufficient: retrieval.retrievalInsufficient } : {}) };
   }
-  const preview = { id: randomUUID(), repositoryId: session.snapshot.id, revision: session.snapshot.revision, sequence: session.snapshot.sequence, entryFileId: input.fileId, mode: input.mode, ...(input.mode === "route" ? { goal: String(input.goal ?? "").trim() } : {}), baseUrl: settings.baseUrl, model: settings.model, apiKeyHash: digest(settings.apiKey), sources: context.sources, characters: totalCharacters, expiresAt: Date.now() + 10 * 60_000, used: false, ...(input.mode === "question" ? { question: String(input.question).trim(), history: questionHistory, retrievalInsufficient: retrieval.retrievalInsufficient } : {}) };
-  const tokenEstimate = estimateTokens(`${context.sources.map((item) => item.source).join("\n")}\n${input.mode === "question" ? `${String(input.question)}\n${questionHistory.map((item) => item.content).join("\n")}` : ""}`);
+  const preview = { excludedFileIds: input.excludedFileIds ?? [], id: randomUUID(), repositoryId: session.snapshot.id, revision: session.snapshot.revision, sequence: session.snapshot.sequence, entryFileId: input.fileId, mode: input.mode, ...(input.mode === "route" ? { goal: String(input.goal ?? "").trim() } : {}), baseUrl: settings.baseUrl, model: settings.model, apiKeyHash: digest(settings.apiKey), sources: context.sources, characters: totalCharacters, expiresAt: Date.now() + 10 * 60_000, used: false, ...(questionLike ? { question: String(input.question).trim(), history: questionHistory, retrievalInsufficient: retrieval.retrievalInsufficient } : {}) };
+  const tokenEstimate = estimateTokens(`${context.sources.map((item) => item.source).join("\n")}\n${questionLike ? `${String(input.question)}\n${questionHistory.map((item) => item.content).join("\n")}` : ""}`);
   const previewFiles = preview.sources.map(({ fileId, startLine, endLine, contentHash }) => {
     const candidateReasons = rankedContextCandidates?.find((candidate) => candidate.id === fileId)?.reasons;
     const reasons = candidateReasons?.length ? candidateReasons : fileId === input.fileId
@@ -322,9 +328,10 @@ function buildPreview(input) {
         : input.mode === "route" ? ["从入口沿静态导入关系展开"] : ["经用户确认纳入"];
     return { fileId, startLine, endLine, contentHash, reasons };
   });
+  preview.selectionReasons = Object.fromEntries(previewFiles.map(file => [file.fileId, file.reasons]));
   previews.set(preview.id, preview);
   while (previews.size > 50) previews.delete(previews.keys().next().value);
-  return { scopeRequired: false, preview: { id: preview.id, repositoryId: preview.repositoryId, revision: preview.revision, entryFileId: preview.entryFileId, mode: preview.mode, ...(preview.mode === "route" ? { goal: preview.goal } : {}), baseUrl: preview.baseUrl, model: preview.model, files: previewFiles, characters: preview.characters, tokenEstimate, expiresAt: preview.expiresAt, ...(preview.mode === "question" ? { question: preview.question, history: preview.history, retrievalInsufficient: preview.retrievalInsufficient } : {}) } };
+  return { scopeRequired: false, preview: { id: preview.id, repositoryId: preview.repositoryId, revision: preview.revision, entryFileId: preview.entryFileId, mode: preview.mode, ...(preview.mode === "investigation" ? { excludedFileIds: preview.excludedFileIds } : {}), ...(preview.mode === "route" ? { goal: preview.goal } : {}), baseUrl: preview.baseUrl, model: preview.model, files: previewFiles, characters: preview.characters, tokenEstimate, expiresAt: preview.expiresAt, ...(questionLike ? { question: preview.question, history: preview.history, retrievalInsufficient: preview.retrievalInsufficient } : {}) } };
 }
 function contextFromPreview(preview) {
   if (!session || preview.expiresAt < Date.now() || preview.repositoryId !== session.snapshot.id || preview.revision !== session.snapshot.revision || preview.baseUrl !== settings.baseUrl || preview.model !== settings.model || preview.apiKeyHash !== digest(settings.apiKey)) throw new Error("仓库或模型配置已变化，必须重新确认发送范围。");
@@ -402,7 +409,7 @@ const server = createServer(async (request, response) => {
         const sampleWorkspace = repositoryId === "taskflow-sample";
         if (!sampleWorkspace && !matchesPersistenceSession(input)) return json(response, 409, { error: "仓库会话已变化，阅读进度未保存。" });
         result = await workspaceStore.saveProgress(sampleWorkspace ? repositoryId : session.snapshot.workspaceId ?? repositoryId, input.key, input.value);
-      } else if (input.action === "node-positions" || input.action === "ai-result" || input.action === "ai-route" || input.action === "conversations" || input.action === "reading-notes" || input.action === "saved-tours") {
+      } else if (input.action === "node-positions" || input.action === "ai-result" || input.action === "ai-route" || input.action === "conversations" || input.action === "reading-notes" || input.action === "saved-tours" || input.action === "investigations") {
         const sampleWorkspace = repositoryId === "taskflow-sample";
         if (!sampleWorkspace && !matchesPersistenceSession(input)) return json(response, 409, { error: "当前仓库会话已变化，保存请求已丢弃。" });
         const workspaceId = sampleWorkspace ? repositoryId : session.snapshot.workspaceId ?? repositoryId;
@@ -410,6 +417,7 @@ const server = createServer(async (request, response) => {
         else if (input.action === "ai-result") result = await workspaceStore.saveAiResult(workspaceId, input.fileId, input.record);
         else if (input.action === "ai-route") result = await workspaceStore.saveAiRoute(workspaceId, input.record);
         else if (input.action === "conversations") result = await workspaceStore.saveConversations(workspaceId, input.conversations);
+        else if (input.action === "investigations") result = await workspaceStore.saveInvestigations(workspaceId, input.records);
         else if (input.action === "reading-notes") result = await workspaceStore.saveReadingNotes(workspaceId, input.notes);
         else result = await workspaceStore.saveTours(workspaceId, input.tours);
       } else if (input.action === "clear-all") {
