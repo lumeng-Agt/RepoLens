@@ -36,12 +36,16 @@ let previousMoved = false;
 try {
   const provenance = getGitProvenance(root);
   const initialInputs = await hashBuildInputs(root);
+  // Current Electron packages expose an explicit installer; npm ci alone may
+  // leave dist absent. The installer is a no-op when the pinned runtime exists.
+  await run(process.execPath, [path.join(root, "node_modules", "electron", "install.js")]);
   await runNpm(["run", "build:desktop"]);
   const builderCli = path.join(root, "node_modules", "electron-builder", "out", "cli", "cli.js");
   await access(builderCli);
   await run(process.execPath, [
     builderCli,
     "--win", "--x64",
+    "--publish", "never",
     `--config.electronDist=${path.join(root, "node_modules", "electron", "dist")}`,
     `--config.directories.output=${candidateDirectory}`,
   ]);

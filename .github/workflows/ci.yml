@@ -41,6 +41,9 @@ jobs:
           '@ | node
       - name: Install locked dependencies
         run: npm ci
+      - name: Install Electron runtime for desktop verification
+        if: matrix.profile == 'full'
+        run: node node_modules/electron/install.js
       - name: Install browser for browser-backed regression tests
         run: npx playwright install chromium
       - name: Run full local verification
