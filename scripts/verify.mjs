@@ -62,7 +62,8 @@ try {
     if (name === "startup-matrix") await releaseApiPortReservation();
     const startedAt = new Date().toISOString();
     console.log(`\n[${name}] 开始`);
-    const environment = name === "browser-build" || name === "startup-matrix" ? productionBuildEnvironment : process.env;
+    const environment = name === "browser-build" || name === "startup-matrix" ? productionBuildEnvironment
+      : name === "desktop-candidate-package-and-smoke" ? { ...process.env, REPOLENS_CANDIDATE_ONLY: "1" } : process.env;
     const result = await runStep(args, path.join(evidenceDirectory, `${name}.log`), environment);
     const record = { name, command: `npm ${args.join(" ")}`, startedAt, finishedAt: new Date().toISOString(), exitCode: result.code, ...(result.signal ? { signal: result.signal } : {}) };
     results.push(record);

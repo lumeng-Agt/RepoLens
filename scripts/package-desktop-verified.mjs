@@ -34,7 +34,7 @@ function runNpm(args, env = process.env) {
 
 let previousMoved = false;
 try {
-  const provenance = getGitProvenance(root);
+  const provenance = { ...getGitProvenance(root), candidateOnly: process.env.REPOLENS_CANDIDATE_ONLY === "1" };
   const initialInputs = await hashBuildInputs(root);
   // Current Electron packages expose an explicit installer; npm ci alone may
   // leave dist absent. The installer is a no-op when the pinned runtime exists.
@@ -55,14 +55,14 @@ try {
   await run(process.execPath, [path.join(root, "scripts", "write-desktop-checksums.mjs")], env);
   await run(process.execPath, [path.join(root, "scripts", "desktop-smoke.mjs")], env);
 
-  const finalProvenance = getGitProvenance(root);
+  const finalProvenance = { ...getGitProvenance(root), candidateOnly: provenance.candidateOnly };
   const finalInputs = await hashBuildInputs(root);
   const manifest = JSON.parse(await readFile(path.join(candidateDirectory, "BUILD-MANIFEST.json"), "utf8"));
   const inputsStayedStable = initialInputs.sourceInputsSha256 === finalInputs.sourceInputsSha256
     && manifest.sourceInputsSha256 === initialInputs.sourceInputsSha256
     && provenance.sourceCommit === finalProvenance.sourceCommit;
   if (!canPromoteRelease(provenance) || !canPromoteRelease(finalProvenance) || !inputsStayedStable) {
-    const reasons = [!canPromoteRelease(provenance) || !canPromoteRelease(finalProvenance) ? "构建使用了未提交源码" : null, !inputsStayedStable ? "构建期间源码输入发生变化" : null].filter(Boolean);
+    const reasons = [provenance.candidateOnly ? "本次只验证候选包" : null, provenance.workingTreeDirty || finalProvenance.workingTreeDirty ? "构建使用了未提交源码" : null, !inputsStayedStable ? "构建期间源码输入发生变化" : null].filter(Boolean);
     await writeFile(path.join(workRoot, "CANDIDATE-ONLY.txt"), `此包仅作为候选，不会替换 release。\n提交：${provenance.sourceCommit}\n原因：${reasons.join("；")}\n参与文件哈希见 package/BUILD-MANIFEST.json。\n`, "utf8");
     process.stdout.write(`开发候选包已通过烟测并保留在 ${candidateDirectory}；${reasons.join("；")}，正式 release 未改变。\n`);
   } else {

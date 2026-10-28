@@ -39,6 +39,7 @@ test("only a clean committed source may replace the release directory", () => {
   assert.equal(canPromoteRelease({ workingTreeDirty: false }), true);
   assert.equal(canPromoteRelease({ workingTreeDirty: true }), false);
   assert.equal(canPromoteRelease({ workingTreeDirty: undefined }), false);
+  assert.equal(canPromoteRelease({ workingTreeDirty: false, candidateOnly: true }), false, "verification candidates cannot replace an existing release even from clean source");
 });
 
 test("build input provenance includes source, lockfile, and build configuration content", async () => {

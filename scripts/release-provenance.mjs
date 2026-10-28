@@ -82,6 +82,6 @@ export function getGitProvenance(root) {
   return { sourceCommit, workingTreeDirty: status.length > 0 };
 }
 
-export function canPromoteRelease({ workingTreeDirty }) {
-  return workingTreeDirty === false;
+export function canPromoteRelease({ workingTreeDirty, candidateOnly = false }) {
+  return workingTreeDirty === false && candidateOnly === false;
 }
