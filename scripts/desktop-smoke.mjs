@@ -190,6 +190,8 @@ async function launch({ gitExecutable, expectFirstUseGuide = false, expectTourHi
   page.on("request", (request) => {
     if (/github\.com|\/api\/ai\/(?:preview|generate|question)(?:[/?]|$)/i.test(request.url())) record.guideRequests.push(request.url());
   });
+  // Keep column/restore measurements independent of the runner's display bounds.
+  await page.setViewportSize({ width: 1440, height: 900 });
   await page.getByRole("heading", { name: "打开仓库，开始阅读" }).waitFor({ state: "visible", timeout: 20_000 });
   if (expectFirstUseGuide) {
     await page.getByRole("heading", { name: "打开仓库，开始阅读" }).waitFor({ state: "visible", timeout: 20_000 });
@@ -462,6 +464,8 @@ try {
   const stateContract = LocalWorkspaceStateSchema.safeParse(stateBeforeQuestions);
   assert.ok(stateContract.success, `saved workspace must remain readable before opening Q&A: ${stateContract.success ? "" : JSON.stringify(stateContract.error.issues)}`);
 
+  // Exercise the overlay layout even on machines with a large desktop display.
+  await first.page.setViewportSize({ width: 1024, height: 768 });
   await first.page.getByRole("tab", { name: "讲解", exact: true }).click();
   await first.page.getByRole("button", { name: "打开 AI 侧栏", exact: true }).click();
   await first.page.locator(".question-panel").waitFor({ state: "visible" });
@@ -491,11 +495,12 @@ try {
   await first.page.locator(".question-message.is-assistant .question-references button").first().click();
   await first.page.getByRole("complementary", { name: "回答证据", exact: true }).waitFor({ state: "visible" });
   await first.page.getByRole("button", { name: "在源码中打开", exact: true }).click();
+  const chatBeforeSource = first.page.getByRole("button", { name: "关闭 AI 聊天", exact: true });
+  if (await chatBeforeSource.isVisible()) await chatBeforeSource.click();
   await first.page.getByRole("tab", { name: "源码", exact: true }).click();
   await first.page.locator("#source-line-1.is-focused").waitFor({ state: "visible" });
 
-  const chatBeforeGraph = first.page.getByRole("button", { name: "关闭 AI 聊天", exact: true });
-  if (await chatBeforeGraph.isVisible()) await chatBeforeGraph.click();
+  await first.page.setViewportSize({ width: 1440, height: 900 });
   await first.page.getByRole("button", { name: "结构", exact: true }).click();
   const mobileGraphTab = first.page.getByRole("button", { name: "依赖图", exact: true });
   if (await mobileGraphTab.isVisible()) await mobileGraphTab.click();

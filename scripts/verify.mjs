@@ -13,11 +13,11 @@ const steps = [
   ["typecheck", ["run", "typecheck"]],
   ["lint", ["run", "lint"]],
   ["node", ["test"]],
+  ["desktop-candidate-package-and-smoke", ["run", "package:desktop"]],
   ["browser-and-service", ["run", "test:e2e"]],
   ["browser-build", ["run", "build"]],
   ["desktop-renderer-build", ["run", "build:desktop"]],
   ["startup-matrix", ["run", "check:startup"]],
-  ["desktop-candidate-package-and-smoke", ["run", "package:desktop"]],
   ["restore-default-browser-build", ["run", "build"]],
 ];
 const results = [];
