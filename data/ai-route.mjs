@@ -22,8 +22,7 @@ export function aiRouteSignature(title, steps, goal) {
 }
 
 export function createAiRouteRecord(input, fileNameFor = (fileId) => fileId) {
-  const normalizedContent = routeContent(input.title, input.steps, input.goal);
-  const sourceSteps = normalizedContent.steps;
+  const sourceSteps = input.steps.map(step => ({ ...step, references: step.references.map(reference => ({ ...reference, endLine: reference.endLine ?? null })) }));
   const signature = aiRouteSignature(input.title, sourceSteps, input.goal);
   const steps = sourceSteps.map((step, index) => {
     const reference = step.references.find((item) => item.fileId === step.fileId);

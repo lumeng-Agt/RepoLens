@@ -59,7 +59,7 @@ const questionMessageSchema = z.object({
   insufficientEvidence: z.boolean().optional(), stale: z.boolean().optional(),
 }).passthrough();
 const conversationSchema = z.object({ id: z.string(), title: z.string(), messages: z.array(questionMessageSchema), updatedAt: z.number() }).passthrough();
-const readingNoteSchema = z.object({ id: z.string(), fileId: z.string(), path: z.string(), startLine: z.number().int().positive(), endLine: z.number().int().positive().optional(), text: z.string().max(20_000), contentHash: z.string(), commit: z.string().optional(), createdAt: z.number(), stale: z.boolean().optional(), kind: z.enum(["note", "bookmark", "question"]) }).passthrough();
+export const readingNoteSchema = z.object({ id: z.string(), fileId: z.string(), path: z.string(), startLine: z.number().int().positive(), endLine: z.number().int().positive().optional(), text: z.string().max(20_000), contentHash: z.string(), commit: z.string().optional(), createdAt: z.number(), stale: z.boolean().optional(), kind: z.enum(["note", "bookmark", "question"]) }).passthrough();
 const savedAiResultSchema = z.object({
   __repositoryId: z.string().optional(), __entryFileId: z.string().optional(), __revision: z.string().optional(),
   __mode: z.enum(["explanation", "route", "question"]).optional(),

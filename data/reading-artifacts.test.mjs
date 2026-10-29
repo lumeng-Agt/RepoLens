@@ -50,3 +50,9 @@ test("reading line ranges must fit within the current source", () => {
   assert.equal(isReadingRangeValid(10, 4, 3), false);
   assert.equal(isReadingRangeValid(10, 11), false);
 });
+
+ test("a conflicted tour preserves compatible unknown metadata", () => {
+  const incoming = { ...route("another"), futureMetadata: { reviewer: "human" } };
+  const merged = mergeSavedTours([route()], [incoming]);
+  assert.deepEqual(merged.records[1].futureMetadata, incoming.futureMetadata);
+});

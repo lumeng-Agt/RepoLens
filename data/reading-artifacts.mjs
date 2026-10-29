@@ -78,6 +78,7 @@ export function mergeSavedTours(existing, incoming) {
       while (result.some((item) => item.signature === copy.signature)) {
         copy = createAiRouteRecord({ ...copy, title: `${title} ${suffix++}` , steps: routeSteps(route) });
       }
+      copy = { ...route, ...copy, steps: copy.steps.map((step, index) => ({ ...route.steps?.[index], ...step, reference: { ...route.steps?.[index]?.reference, ...step.reference } })) };
       if (route.stale) copy.stale = true;
     }
     if (result.some((item) => item.signature === copy.signature && sameRouteContent(item, copy))) { skipped += 1; continue; }

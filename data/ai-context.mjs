@@ -64,3 +64,14 @@ export function selectAiContext({ fileIds, candidateIds, entryFileId, ranges = {
   });
   return { sources, characters: sources.reduce((sum, item) => sum + item.source.length, 0) };
 }
+/** Shared production/evaluation preview preparation; never calls a model. */
+export function prepareAiContext({ candidates, rankedCandidates = [], fileIds, ranges = {}, sourceById, entryFileId, requireEntry = false, question = '', history = [], retrievalInsufficient = false, questionLike = true }) {
+  const requested = fileIds ?? (questionLike ? candidates.slice(0, 12) : candidates);
+  const effectiveRanges = { ...ranges };
+  for (const candidate of rankedCandidates) if (!effectiveRanges[candidate.id] && candidate.suggestedRange) effectiveRanges[candidate.id] = candidate.suggestedRange;
+  const selected = selectAiContext({fileIds: requested, candidateIds: candidates, entryFileId, ranges: effectiveRanges, sourceById, requireEntry});
+  const totalCharacters = selected.characters + (questionLike ? String(question).length + history.reduce((sum, item) => sum + item.content.length, 0) : 0);
+  const unresolvedRange = requested.some(id => rankedCandidates.find(c => c.id === id)?.rangeRequired && !ranges[id]);
+  const scopeRequired = selected.sources.length > 12 || totalCharacters > 60_000 || unresolvedRange || (questionLike && !fileIds && (candidates.length > 12 || retrievalInsufficient));
+  return { ...selected, totalCharacters, scopeRequired };
+}

@@ -279,3 +279,14 @@ test("clear-current scrubs only its workspace from owned copies and preserves ot
   }
   assert.deepEqual((await createWorkspaceStore(directory).getRepository("other")).conversations, other);
 });
+
+ test("unknown compatible store fields survive unrelated writes and are removed by clear all", async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "repolens-compatible-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  await writeFile(path.join(directory, "workspace-v1.json"), JSON.stringify({ version: 1, futureMetadata: { note: "private" } }));
+  const store = createWorkspaceStore(directory);
+  await store.saveNodePositions("other", { x: { x: 1, y: 2 } });
+  assert.deepEqual(JSON.parse(await readFile(path.join(directory, "workspace-v1.json"), "utf8")).futureMetadata, { note: "private" });
+  await store.clearAll();
+  assert.equal(JSON.parse(await readFile(path.join(directory, "workspace-v1.json"), "utf8")).futureMetadata, undefined);
+});

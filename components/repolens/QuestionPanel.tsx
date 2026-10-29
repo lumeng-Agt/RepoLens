@@ -88,6 +88,10 @@ export function QuestionPanel({ repository, currentFile, filesById, onOpenRefere
   const [readWarning, setReadWarning] = useState("");
   const readWarningRef = useRef("");
   const [previewState, setPreviewState] = useState<PreviewState | null>(null);
+  const [searchSuggestions, setSearchSuggestions] = useState<string[]>([]);
+  const [supplementalResults, setSupplementalResults] = useState<{ fileId: string; line: number; text: string }[]>([]);
+  const supplementalRequest = useRef<AbortController | null>(null);
+  useEffect(() => () => supplementalRequest.current?.abort(), [repository.id, repository.revision]);
   const [candidates, setCandidates] = useState<AiScopeCandidate[]>([]);
   const [selectedFiles, setSelectedFiles] = useState<string[]>([]);
   const [ranges, setRanges] = useState<Record<string, AiLineRange>>({});
@@ -366,8 +370,8 @@ export function QuestionPanel({ repository, currentFile, filesById, onOpenRefere
         const defaultSelection = (mode === "question" || mode === "investigation")
           ? chosen.length ? chosen : value.candidates.slice(0, Math.min(12, value.candidates.length)).map((candidate) => candidate.fileId)
           : [currentFile.id, ...chosen.filter((fileId) => fileId !== currentFile.id)].slice(0, 12);
-        const nextRanges = Object.fromEntries(value.candidates.map((candidate) => [candidate.fileId, ranges[candidate.fileId] ?? { startLine: 1, endLine: candidate.lineCount }]));
-        setExplicitSelection(true); setCandidates(value.candidates); setSelectedFiles(defaultSelection); setRanges(nextRanges); setScopeContextKey(contextKey); setStage("scope"); setScopeOpen(true);
+        const nextRanges = Object.fromEntries(value.candidates.map((candidate) => [candidate.fileId, ranges[candidate.fileId] ?? candidate.suggestedRange ?? { startLine: 1, endLine: candidate.lineCount }]));
+        setSearchSuggestions(value.searchSuggestions ?? []); setSupplementalResults([]); setExplicitSelection(true); setCandidates(value.candidates); setSelectedFiles(defaultSelection); setRanges(nextRanges); setScopeContextKey(contextKey); setStage("scope"); setScopeOpen(true);
         setMessage(value.retrievalInsufficient ? "自动检索没有找到足够依据。请手动选择与问题相关的文件；最多 12 个文件、总发送内容 60,000 字符。" : "候选源码超出发送范围上限，请选择文件并调整行范围。未发送任何源码。");
       } else if (value.preview.retrievalInsufficient && !fileIds?.length) {
         setStage("error"); setMessage("没有找到足够的源码依据，请添加相关文件后再发送。");
@@ -608,12 +612,16 @@ export function QuestionPanel({ repository, currentFile, filesById, onOpenRefere
     {unified && mode === "question" && <details className="chat-history"><summary>携带的历史消息 · {displayMessages.filter((entry) => !isStale(entry)).slice(-6).filter((entry) => !excludedHistory.includes(entry.id)).length} 条</summary>{displayMessages.filter((entry) => !isStale(entry)).slice(-6).map((entry) => <label key={entry.id}><input type="checkbox" checked={!excludedHistory.includes(entry.id)} disabled={stage === "generating"} onChange={(event) => { setExcludedHistory((previous) => event.target.checked ? previous.filter((id) => id !== entry.id) : [...previous, entry.id]); setPreviewState(null); if (stage === "ready") setStage("idle"); }} /><span title={entry.content.slice(0, 500)}>{entry.role === "user" ? "你" : "AI"} · {entry.content.length.toLocaleString()} 字符</span></label>)}<small>问题 {question.length.toLocaleString()} 字符 · 已选历史 {displayMessages.filter((entry) => !isStale(entry)).slice(-6).filter((entry) => !excludedHistory.includes(entry.id)).reduce((sum, entry) => sum + entry.content.length, 0).toLocaleString()} 字符。源码计入预览总数，上限 60,000；可取消历史或缩小源码范围。</small></details>}
     {visibleScope && candidates.length > 0 && <section className="question-scope" aria-label="调整问答发送范围">
       <strong>选择相关源码（最多 12 个文件）</strong>
-      <div className="question-candidate-list">{candidates.map((candidate) => {
+      <div className="question-candidate-list">{!!searchSuggestions.length && <details><summary>补充搜索</summary>{searchSuggestions.map(term => <button type="button" key={term} onClick={() => {
+        supplementalRequest.current?.abort(); const controller = new AbortController(); supplementalRequest.current = controller;
+        void localRepositoryProvider.searchContent({ repositoryId: repository.id, revision: repository.revision ?? "", query: term }, controller.signal).then(value => { if (!controller.signal.aborted) setSupplementalResults(value.results.map(match => ({ fileId: match.fileId, line: match.line, text: match.text }))); }).catch(error => { if (!controller.signal.aborted) setMessage(error.message); });
+      }}>{term}</button>)}{supplementalResults.map((result, index) => <button type="button" key={index} onClick={() => onOpenReference({ fileId: result.fileId, line: result.line })}>{result.fileId}:{result.line} · {result.text}</button>)}</details>}
+      {candidates.map((candidate) => {
         const selected = selectedFiles.includes(candidate.fileId);
-        const range = ranges[candidate.fileId] ?? { startLine: 1, endLine: candidate.lineCount };
+        const range = ranges[candidate.fileId] ?? candidate.suggestedRange ?? { startLine: 1, endLine: candidate.lineCount };
         return <label key={candidate.fileId}>
           <input type="checkbox" checked={selected} disabled={(!selected && selectedFiles.length >= 12) || (mode !== "question" && candidate.fileId === currentFile.id)} onChange={(event) => updateScope(event.target.checked ? [...selectedFiles, candidate.fileId] : selectedFiles.filter((item) => item !== candidate.fileId))} />
-          <span>{candidate.fileId}</span><small>{candidate.lineCount} 行 · {candidate.characters.toLocaleString()} 字符{candidate.reasons?.length ? ` · ${candidate.reasons.join("、")}` : ""}</small>
+          <span>{candidate.fileId}</span>{!!candidate.alternativeRanges?.length && <select aria-label={`${candidate.fileId} 候选片段`} value="" onChange={event => { const chosen = candidate.alternativeRanges?.[Number(event.target.value)]; if (chosen) updateScope(selectedFiles, { ...ranges, [candidate.fileId]: { startLine: chosen.startLine, endLine: chosen.endLine } }); }}><option value="">选择命中片段或调整下方行范围</option>{candidate.alternativeRanges.map((r, index) => <option key={index} value={index}>{r.name} · {r.startLine}–{r.endLine}</option>)}</select>}<small>{candidate.lineCount} 行 · {candidate.characters.toLocaleString()} 字符{candidate.reasons?.length ? ` · ${candidate.reasons.join("、")}` : ""}</small>
           {selected && <span className="ai-range-fields"><input aria-label={`${candidate.fileId} 起始行`} type="number" min={1} max={candidate.lineCount} value={range.startLine} onChange={(event) => updateScope(selectedFiles, { ...ranges, [candidate.fileId]: { ...range, startLine: Number(event.target.value) } })} />至<input aria-label={`${candidate.fileId} 结束行`} type="number" min={range.startLine} max={candidate.lineCount} value={range.endLine} onChange={(event) => updateScope(selectedFiles, { ...ranges, [candidate.fileId]: { ...range, endLine: Number(event.target.value) } })} /></span>}
           {selected && candidate.oversizedLines.some((line) => line >= range.startLine && line <= range.endLine) && <small role="alert">范围包含不能发送的超长行，请缩小范围。</small>}
         </label>;

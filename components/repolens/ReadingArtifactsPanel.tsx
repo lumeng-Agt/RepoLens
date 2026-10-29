@@ -1,3 +1,4 @@
+import { readingNoteSchema } from "@/data/local-contracts.mjs";
 import { WorkspaceDialog } from "./WorkspaceDialog";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import { Download, FileDown, Plus, Trash2 } from "lucide-react";
@@ -22,9 +23,7 @@ function isRoute(value: unknown): value is AiRouteRecord {
   return typeof route.title === "string" && typeof route.signature === "string" && typeof route.repositoryId === "string" && typeof route.entryFileId === "string" && typeof route.revision === "string" && validContext && validSteps && validSourceSteps;
 }
 function isNote(value: unknown): value is ReadingNote {
-  if (!value || typeof value !== "object") return false;
-  const note = value as ReadingNote;
-  return typeof note.id === "string" && typeof note.fileId === "string" && typeof note.path === "string" && typeof note.text === "string" && Number.isInteger(note.startLine) && note.startLine > 0;
+  return readingNoteSchema.safeParse(value).success;
 }
 type ArtifactOperation = { repositoryId: string; workspaceId: string; revision: string; sessionVersion: number; clearGeneration: number };
 function sameTarget(left: ArtifactOperation, right: ArtifactOperation) {

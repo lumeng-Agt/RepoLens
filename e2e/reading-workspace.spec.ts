@@ -398,3 +398,26 @@ test("a successful notes save does not clear a failed route save indicator", asy
     await rm(repositoryPath, { recursive: true, force: true });
   }
 });
+
+test("invalid reading import is rejected before it can block subsequent normal notes", async ({ page }) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "repolens-invalid-note-"));
+  await writeFile(path.join(root, "main.ts"), "export const value = 1;\n");
+  try {
+    await page.goto("/"); await enterRepositoryLocation(page, root);
+    await page.getByRole("button", { name: "打开仓库", exact: true }).click();
+    await expect(page.locator(".detail-file-title strong")).toHaveText("main.ts");
+    await page.getByRole("tab", { name: "讲解", exact: true }).click();
+    await page.locator(".reading-import-button input[type=file]").setInputFiles({ name: "invalid.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify({ format: "repolens-reading", version: 1, workspaceId: "invalid", notes: [{ id: "bad", fileId: "main.ts", path: "main.ts", startLine: 1, text: "invalid" }], tours: [] })) });
+    await expect(page.getByText("文件格式无效，只支持 RepoLens 阅读记录 JSON v1。", { exact: true })).toBeVisible();
+    await expect(page.getByRole("dialog", { name: "导入预览" })).toHaveCount(0);
+    await page.getByLabel("阅读笔记内容").fill("有效的新笔记");
+    const saved = page.waitForResponse(response => { try { return response.request().postDataJSON()?.action === "reading-notes"; } catch { return false; } });
+    await page.getByRole("button", { name: "保存记录", exact: true }).click();
+    expect((await saved).status()).toBe(200);
+    await expect(page.locator(".reading-note-list")).toContainText("有效的新笔记");
+    await page.reload();
+    await enterRepositoryLocation(page, root); await page.getByRole("button", { name: "打开仓库", exact: true }).click();
+    await page.getByRole("tab", { name: "讲解", exact: true }).click();
+    await expect(page.locator(".reading-note-list")).toContainText("有效的新笔记");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

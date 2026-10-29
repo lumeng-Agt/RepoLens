@@ -81,3 +81,15 @@ test("Chinese exact phrases remain stronger than separated matching words", () =
   assert.equal(ranked.candidates[0].id, "exact.ts");
   assert.ok(ranked.candidates[0].score > ranked.candidates[1].score);
 });
+
+ test("identifier splitting, low-weight expansions and separate ranges retain explainable evidence", async () => {
+  const { splitIdentifier, rankInvestigationCandidates } = await import("./question-retrieval.mjs");
+  assert.deepEqual(splitIdentifier("HTTPClient request_timeout cancelTask"), ["http", "client", "request", "timeout", "cancel", "task"]);
+  const files = [{ id: "a", path: "a.ts", symbols: ["abortTask", "disposeTask"], symbolDetails: [{ name: "abortTask", startLine: 1, endLine: 3 }, { name: "disposeTask", startLine: 90, endLine: 95 }] }, { id: "b", path: "b.ts" }];
+  const sourceById = new Map([["a", "function abortTask() { /* cancel */ }"], ["b", "unrelated"]]);
+  const ranked = rankInvestigationCandidates({ files, dependencies: [{ id: "edge", fromId: "a", toId: "b" }], sourceById, question: "取消 abortTask" });
+  assert.equal(ranked.candidates[0].id, "a");
+  assert.deepEqual(ranked.candidates[0].suggestedRange, { startLine: 1, endLine: 3 });
+  assert.ok(ranked.candidates[0].reasons.some(r => r.includes("相关术语匹配")));
+  assert.equal(rankInvestigationCandidates({ files, dependencies: [{ fromId: "a", toId: "b" }], sourceById, question: "abortTask", excludedFileIds: ["b"] }).candidates.some(c => c.id === "b"), false);
+});

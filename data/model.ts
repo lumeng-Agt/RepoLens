@@ -98,7 +98,7 @@ export type AiPreview = {
   goal?: string;
   baseUrl: string;
   model: string;
-  files: { fileId: string; startLine: number; endLine: number; contentHash: string; reasons?: string[] }[];
+  files: { fileId: string; startLine: number; endLine: number; contentHash: string; reasons?: string[]; alternativeRanges?: { startLine: number; endLine: number; name: string }[] }[];
   characters: number;
   tokenEstimate?: number;
   expiresAt: number;

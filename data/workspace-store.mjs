@@ -13,7 +13,7 @@ class UnsupportedStoreVersionError extends Error {}
 
 function validateState(value) {
   if (!value || typeof value !== "object" || value.version !== VERSION) throw new UnsupportedStoreVersionError("工作区存储版本不受支持。");
-  const state = emptyState();
+  const state = { ...value, ...emptyState() };
   state.recentRepositories = Array.isArray(value.recentRepositories) ? value.recentRepositories.filter((item) => item && typeof item.id === "string" && typeof item.name === "string" && typeof item.location === "string").slice(0, 20) : [];
   for (const key of ["aiResults", "aiRoutes", "progress", "nodePositions", "conversations", "readingNotes", "savedTours", "investigations"]) {
     if (value[key] && typeof value[key] === "object" && !Array.isArray(value[key])) state[key] = value[key];
@@ -274,6 +274,6 @@ export function createWorkspaceStore(directory) {
     async clearRepository(repositoryId) {
       return mutate((current) => removeRepositoryFromState(current, repositoryId), () => cleanManagedCopies(repositoryId));
     },
-    async clearAll() { return mutate((current) => Object.assign(current, emptyState()), () => cleanManagedCopies()); },
+    async clearAll() { return mutate((current) => (Object.keys(current).forEach(key => delete current[key]), Object.assign(current, emptyState())), () => cleanManagedCopies()); },
   };
 }

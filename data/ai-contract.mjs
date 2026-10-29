@@ -38,14 +38,14 @@ export const AiScopeCandidateSchema = z.object({
   lineCount: z.number().int().positive(),
   oversizedLines: z.array(z.number().int().positive()),
   reasons: z.array(z.string().min(1)).optional(),
-  suggestedRange: z.object({ startLine: z.number().int().positive(), endLine: z.number().int().positive() }).strict().optional(),
+  rangeRequired: z.boolean().optional(), alternativeRanges: z.array(z.object({ startLine: z.number().int().positive(), endLine: z.number().int().positive(), name: z.string() })).optional(), suggestedRange: z.object({ startLine: z.number().int().positive(), endLine: z.number().int().positive() }).strict().optional(),
 }).strict().superRefine((candidate, context) => {
   if (candidate.oversizedLines.some((line) => line > candidate.lineCount)) context.addIssue({ code: "custom", message: "oversized line exceeds candidate line count" });
   if (candidate.suggestedRange && (candidate.suggestedRange.startLine > candidate.suggestedRange.endLine || candidate.suggestedRange.endLine > candidate.lineCount)) context.addIssue({ code: "custom", message: "suggested range exceeds candidate line count" });
 });
 
 export const AiPreviewScopeRequiredSchema = z.object({
-  scopeRequired: z.literal(true),
+  scopeRequired: z.literal(true), searchSuggestions: z.array(z.string()).optional(),
   candidates: z.array(AiScopeCandidateSchema),
   maxFiles: z.number().int().positive(),
   maxCharacters: z.number().int().positive(),
@@ -59,7 +59,7 @@ export const AiPreviewSuccessSchema = z.object({
     entryFileId: z.string().min(1), mode: z.enum(["explanation", "route", "question", "investigation"]),
     goal: z.string().max(300).optional(),
     baseUrl: z.string().min(1), model: z.string().min(1),
-    files: z.array(z.object({ fileId: z.string().min(1), startLine: z.number().int().positive(), endLine: z.number().int().positive(), contentHash: z.string().min(1), reasons: z.array(z.string().min(1)).optional() }).strict()),
+    files: z.array(z.object({ fileId: z.string().min(1), startLine: z.number().int().positive(), endLine: z.number().int().positive(), contentHash: z.string().min(1), reasons: z.array(z.string().min(1)).optional(), alternativeRanges: z.array(z.object({ startLine: z.number().int().positive(), endLine: z.number().int().positive(), name: z.string() })).optional() }).strict()),
     characters: z.number().int().nonnegative(), tokenEstimate: z.number().int().nonnegative().optional(), expiresAt: z.number().int().positive(),
     excludedFileIds: z.array(z.string()).optional(), question: z.string().optional(),
     history: z.array(z.object({ role: z.enum(["user", "assistant"]), content: z.string() }).strict()).max(6).optional(),

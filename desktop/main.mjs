@@ -1,8 +1,8 @@
 import { createModelSettingsStore } from "./model-settings.mjs";
 import { app, BrowserWindow, dialog, ipcMain, shell, safeStorage } from "electron";
-import { fork } from "node:child_process";
+import { fork, spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { access, readFile } from "node:fs/promises";
+import { access, readFile, writeFile, lstat } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import net from "node:net";
 import path from "node:path";
@@ -186,6 +186,48 @@ async function start() {
     if (!isTrustedDesktopSender(event, mainWindow?.webContents, uiOrigin)) throw new Error("未授权的桌面目录选择请求。");
     const result = await dialog.showOpenDialog(mainWindow, { title: "打开本地仓库", properties: ["openDirectory"] });
     return result.canceled ? null : result.filePaths[0] ?? null;
+  });
+  let editorBusy = false;
+  ipcMain.handle("editor:open", async (event, input) => {
+    if (!isTrustedDesktopSender(event, mainWindow?.webContents, uiOrigin)) throw new Error("未授权的编辑器请求。");
+    if (editorBusy) throw new Error("正在打开源码，请稍候。");
+    editorBusy = true;
+    try {
+      if (!input || typeof input !== "object" || Object.keys(input).some(key => !["repositoryId", "revision", "persistenceSessionId", "fileId", "contentHash", "line"].includes(key))) throw new Error("源码位置无效。");
+      const preferencePath = path.join(app.getPath("userData"), "editor-v1.json");
+      let executable;
+      try { executable = JSON.parse(await readFile(preferencePath, "utf8")).executable; } catch { /* Ask for an executable if none was saved. */ }
+      const valid = async value => {
+        if (typeof value !== "string" || !path.isAbsolute(value) || path.basename(value).toLowerCase() !== "code.exe") return false;
+        try { const info = await lstat(value); return info.isFile() && !info.isSymbolicLink(); } catch { return false; }
+      };
+      if (!await valid(executable)) {
+        const candidates = [path.join(process.env.LOCALAPPDATA ?? "", "Programs", "Microsoft VS Code", "Code.exe"), path.join(process.env.ProgramFiles ?? "", "Microsoft VS Code", "Code.exe")];
+        executable = null;
+        for (const candidate of candidates) if (await valid(candidate)) { executable = candidate; break; }
+        if (!executable) {
+          const selected = await dialog.showOpenDialog(mainWindow, { title: "选择 VS Code 程序 Code.exe", filters: [{ name: "VS Code", extensions: ["exe"] }], properties: ["openFile"] });
+          if (selected.canceled) return false;
+          executable = selected.filePaths[0];
+          if (!await valid(executable)) throw new Error("请选择 VS Code 的 Code.exe 程序。");
+        }
+        await writeFile(preferencePath, JSON.stringify({ version: 1, executable }), "utf8");
+      }
+      const target = await new Promise((resolve, reject) => {
+        const id = randomBytes(16).toString("hex"); const child = backend;
+        const cleanup = () => { clearTimeout(timer); child?.off("message", onMessage); child?.off("exit", onExit); };
+        const onExit = () => { cleanup(); reject(new Error("本地服务已停止。")); };
+        const onMessage = message => { if (message?.type !== "editor:resolved" || message.id !== id) return; cleanup(); if (message.error) reject(new Error(message.error)); else resolve(message.target); };
+        const timer = setTimeout(() => { cleanup(); reject(new Error("源码核验超时，请重试。")); }, 5000);
+        child?.on("message", onMessage); child?.once("exit", onExit);
+        if (!child?.connected) { cleanup(); reject(new Error("本地服务已停止。")); } else child.send({ type: "editor:resolve", id, input });
+      });
+      await new Promise((resolve, reject) => {
+        const child = spawn(executable, ["--reuse-window", "--goto", `${target.path}:${target.line}:1`], { shell: false, windowsHide: true, detached: true, stdio: "ignore", cwd: app.getPath("userData") });
+        child.once("error", reject); child.once("spawn", () => { child.unref(); resolve(); });
+      });
+      return true;
+    } finally { editorBusy = false; }
   });
   const modelSettingsStore = createModelSettingsStore(app.getPath("userData"), safeStorage);
   let restoredModelSettings = null;

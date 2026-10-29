@@ -6,9 +6,9 @@ import { localApiOrigin } from "./runtime-config";
 const LOCAL_API_ORIGIN = localApiOrigin();
 
 export type AiMode = "explanation" | "route" | "question" | "investigation";
-export type AiScopeCandidate = { fileId: string; characters: number; lineCount: number; oversizedLines: number[]; reasons?: string[]; suggestedRange?: { startLine: number; endLine: number } };
+export type AiScopeCandidate = { fileId: string; characters: number; lineCount: number; oversizedLines: number[]; reasons?: string[]; alternativeRanges?: { startLine: number; endLine: number; name: string }[]; suggestedRange?: { startLine: number; endLine: number } };
 export type AiLineRange = { startLine: number; endLine: number };
-export type AiPreviewResponse = { scopeRequired: false; preview: AiPreview } | { scopeRequired: true; candidates: AiScopeCandidate[]; maxFiles: number; maxCharacters: number; retrievalInsufficient?: boolean };
+export type AiPreviewResponse = { scopeRequired: false; preview: AiPreview } | { scopeRequired: true; candidates: AiScopeCandidate[]; maxFiles: number; maxCharacters: number; retrievalInsufficient?: boolean; searchSuggestions?: string[] };
 export type AiGenerationResult = { result: Record<string, unknown>; cached: boolean; revision: string; repositoryId: string; entryFileId: string; mode: AiMode; chatPersisted?: boolean; warning?: string };
 export type AiChatCompletion = { conversationId: string; userMessageId: string; answerMessageId: string };
 export type AiQuestionHistoryItem = { role: "user" | "assistant"; content: string };

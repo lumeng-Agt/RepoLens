@@ -29,3 +29,5 @@ export type RepositoryEventParseResult =
   | { success: true; value: { repositoryId: string; revision: string; sequence: number } | { message: string } }
   | { success: false; message: string };
 export function parseRepositoryEvent(type: string, data: string): RepositoryEventParseResult;
+
+export const readingNoteSchema: import("zod").ZodType<import("./model").ReadingNote>;

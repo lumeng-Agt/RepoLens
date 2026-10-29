@@ -1,3 +1,4 @@
+import { resolveEditorTarget } from "../data/editor-target.mjs";
 import { createServer } from "node:http";
 import { createHash, randomUUID } from "node:crypto";
 import { watch } from "node:fs";
@@ -7,7 +8,7 @@ import { scanRepository } from "../data/localRepository.mjs";
 import { cleanupGitHubRepository, cleanupPendingGitHubContent, fetchGitHubRevision, parseGitHubRepositoryUrl, prepareGitHubRepository } from "../data/githubRepository.mjs";
 import { AiGenerationEnvelopeSchema, AiPreviewResponseSchema, AiStreamEventSchema, createAiGenerationEnvelope } from "../data/ai-contract.mjs";
 import { AI_PROMPT_VERSION, ModelRedirectError, requestChatCompletion, validateAiResult } from "../data/ai-generation.mjs";
-import { collectAiCandidates, questionCandidateIds, rankGoalCandidates, selectAiContext } from "../data/ai-context.mjs";
+import { collectAiCandidates, questionCandidateIds, rankGoalCandidates, prepareAiContext } from "../data/ai-context.mjs";
 import { rankQuestionCandidates, rankInvestigationCandidates } from "../data/question-retrieval.mjs";
 import { estimateTokens } from "../data/token-estimate.mjs";
 import { searchRepositoryContent } from "../data/repository-search.mjs";
@@ -96,6 +97,15 @@ async function persistModelSettings(value) {
     process.send({ type: "model-settings:save", id, settings: value });
   });
 }
+process.on("message", async (message) => {
+  if (message?.type !== "editor:resolve" || !process.connected) return;
+  const current = session;
+  try {
+    const target = await resolveEditorTarget(current, message.input);
+    if (session !== current) throw new Error("仓库会话已变化，请重新打开源码。");
+    process.send({ type: "editor:resolved", id: message.id, target });
+  } catch (error) { process.send({ type: "editor:resolved", id: message.id, error: error.message }); }
+});
 process.on("message", (message) => {
   if (message?.type !== "model-settings:saved") return;
   const pending = settingsSaveWaiters.get(message.id);
@@ -288,7 +298,7 @@ function buildPreview(input) {
   if (!settings.baseUrl || !settings.model || !settings.apiKey) throw new Error("请先填写模型服务地址、模型名称和 API 密钥。预览不会发送源码。");
   if (questionLike && (!String(input.question ?? "").trim() || String(input.question).length > 12_000)) throw new Error("请输入不超过 12,000 字符的问题。");
   if (input.mode === "route" && String(input.goal ?? "").length > 300) throw new Error("导览目标不能超过 300 个字符。");
-  const retrieval = input.mode === "investigation" ? rankInvestigationCandidates({ files: session.snapshot.files, dependencies: session.snapshot.dependencies, sourceById: session.sourceCache, question: input.question }) : questionLike ? collectQuestionCandidates(input.fileId, input.question) : null;
+  const retrieval = input.mode === "investigation" ? rankInvestigationCandidates({ files: session.snapshot.files, dependencies: session.snapshot.dependencies, sourceById: session.sourceCache, question: input.question, excludedFileIds: input.excludedFileIds }) : questionLike ? collectQuestionCandidates(input.fileId, input.question) : null;
   if (input.mode === "investigation") {
     const excluded = new Set(input.excludedFileIds ?? []);
     retrieval.candidates = retrieval.candidates.filter(candidate => !excluded.has(candidate.id));
@@ -305,17 +315,12 @@ function buildPreview(input) {
   const questionHistory = input.mode === "question" ? input.history ?? [] : [];
   if (!Array.isArray(questionHistory) || questionHistory.length > 6 || questionHistory.some((item) => !item || !["user", "assistant"].includes(item.role) || typeof item.content !== "string" || item.content.length > 12_000)) throw new Error("问答历史格式无效，请重新选择对话内容。");
   const requested = input.fileIds ?? (questionLike ? candidates.slice(0, 12) : goalRetrieval ? goalRetrieval.selectedFileIds.filter((fileId) => candidates.includes(fileId)) : candidates);
-  const effectiveRanges = { ...(input.ranges ?? {}) };
-  if (questionLike || input.mode === "route") for (const candidate of rankedContextCandidates ?? []) {
-    if (!effectiveRanges[candidate.id] && candidate.suggestedRange) effectiveRanges[candidate.id] = candidate.suggestedRange;
-  }
-  const selected = selectAiContext({ fileIds: requested, candidateIds: candidates, entryFileId: input.fileId, ranges: effectiveRanges, sourceById: session.sourceCache, requireEntry: !questionLike });
+  const selected = prepareAiContext({ candidates, rankedCandidates: rankedContextCandidates ?? [], fileIds: input.fileIds ?? (questionLike ? undefined : requested), ranges: input.ranges, sourceById: session.sourceCache, entryFileId: input.fileId, requireEntry: !questionLike, question: input.question, history: questionHistory, retrievalInsufficient: retrieval?.retrievalInsufficient, questionLike });
   const context = { ...selected, sources: selected.sources.map((source) => ({ ...source, contentHash: digest(session.sourceCache.get(source.fileId) ?? "") })) };
-  const historyCharacters = questionHistory.reduce((sum, item) => sum + item.content.length, 0);
-  const totalCharacters = context.characters + (questionLike ? String(input.question).length + historyCharacters : 0);
-  const tooMany = context.sources.length > 12 || totalCharacters > 60_000 || (questionLike && !input.fileIds && candidates.length > 12) || (questionLike && retrieval.retrievalInsufficient && !input.fileIds);
+  const totalCharacters = selected.totalCharacters;
+  const tooMany = selected.scopeRequired;
   if (tooMany) {
-    return { scopeRequired: true, candidates: candidates.map((fileId) => { const lines = (session.sourceCache.get(fileId) ?? "").split("\n"); const candidate = rankedContextCandidates?.find((item) => item.id === fileId); return { fileId, characters: lines.join("\n").length, lineCount: lines.length, oversizedLines: lines.flatMap((line, index) => line.length > 60_000 ? [index + 1] : []), ...(candidate?.reasons.length ? { reasons: candidate.reasons } : {}), ...(candidate?.suggestedRange ? { suggestedRange: candidate.suggestedRange } : {}) }; }), maxFiles: 12, maxCharacters: 60_000, ...(retrieval ? { retrievalInsufficient: retrieval.retrievalInsufficient } : {}) };
+    return { scopeRequired: true, searchSuggestions: retrieval?.searchSuggestions ?? [], candidates: candidates.map((fileId) => { const lines = (session.sourceCache.get(fileId) ?? "").split("\n"); const candidate = rankedContextCandidates?.find((item) => item.id === fileId); return { fileId, characters: lines.join("\n").length, lineCount: lines.length, oversizedLines: lines.flatMap((line, index) => line.length > 60_000 ? [index + 1] : []), ...(candidate?.reasons.length ? { reasons: candidate.reasons } : {}), ...(candidate?.suggestedRange ? { suggestedRange: candidate.suggestedRange } : {}), alternativeRanges: candidate?.alternativeRanges ?? [], ...(candidate?.rangeRequired ? { rangeRequired: true } : {}) }; }), maxFiles: 12, maxCharacters: 60_000, ...(retrieval ? { retrievalInsufficient: retrieval.retrievalInsufficient } : {}) };
   }
   const preview = { excludedFileIds: input.excludedFileIds ?? [], id: randomUUID(), repositoryId: session.snapshot.id, revision: session.snapshot.revision, sequence: session.snapshot.sequence, entryFileId: input.fileId, mode: input.mode, ...(input.mode === "route" ? { goal: String(input.goal ?? "").trim() } : {}), baseUrl: settings.baseUrl, model: settings.model, apiKeyHash: digest(settings.apiKey), sources: context.sources, characters: totalCharacters, expiresAt: Date.now() + 10 * 60_000, used: false, ...(questionLike ? { question: String(input.question).trim(), history: questionHistory, retrievalInsufficient: retrieval.retrievalInsufficient } : {}) };
   const tokenEstimate = estimateTokens(`${context.sources.map((item) => item.source).join("\n")}\n${questionLike ? `${String(input.question)}\n${questionHistory.map((item) => item.content).join("\n")}` : ""}`);
@@ -326,7 +331,7 @@ function buildPreview(input) {
       : session.snapshot.dependencies.some((edge) => edge.fromId === input.fileId && edge.toId === fileId)
         ? ["当前文件的直接导入"]
         : input.mode === "route" ? ["从入口沿静态导入关系展开"] : ["经用户确认纳入"];
-    return { fileId, startLine, endLine, contentHash, reasons };
+    return { fileId, startLine, endLine, contentHash, reasons, alternativeRanges: rankedContextCandidates?.find(candidate => candidate.id === fileId)?.alternativeRanges ?? [] };
   });
   preview.selectionReasons = Object.fromEntries(previewFiles.map(file => [file.fileId, file.reasons]));
   previews.set(preview.id, preview);

@@ -131,7 +131,11 @@ export function FileDetailsPanel({ repository, currentFile, filesById, mobileVie
   const sourceLines = useMemo(() => detailTab === "source" && sourceStatus === "loaded" ? cachedHighlightedLines(sourceText, currentFile.language ?? "") : [], [detailTab, sourceStatus, sourceText, currentFile.language]);
 
   return <aside className={`details-pane${mobileView !== "details" ? " mobile-hidden" : ""}`} aria-label="文件详情">
-    <div className="detail-file-heading"><span className={`detail-file-icon${currentFile.kind === "style" ? " is-style" : ""}`}>{currentFile.kind === "style" ? <FileText size={18} /> : <FileCode2 size={18} />}</span><div className="detail-file-title"><span>{currentFile.path}</span><strong>{currentFile.name}</strong></div></div>
+    <div className="detail-file-heading">{repository.source === "local" && !repository.origin && <button type="button" title={(typeof window !== "undefined" && window.repoLens) ? "在 VS Code 中打开" : "复制源码位置"} onClick={() => {
+      const line = focusedLine?.fileId === currentFile.id ? focusedLine.line : 1;
+      if (window.repoLens) void window.repoLens.openInEditor({ repositoryId: repository.id, revision: repository.revision ?? repository.version, persistenceSessionId: repository.persistenceSessionId, fileId: currentFile.id, contentHash: currentFile.contentHash ?? "", line }).catch((error: Error) => window.alert(error.message));
+      else void Promise.resolve().then(() => navigator.clipboard.writeText(`${repository.name} / ${currentFile.path}:${line} · ${repository.revision ?? repository.version}`)).catch(() => window.alert("未能复制源码位置，请检查剪贴板权限后重试。"));
+    }}>{(typeof window !== "undefined" && window.repoLens) ? "VS Code" : "复制位置"}</button>}<span className={`detail-file-icon${currentFile.kind === "style" ? " is-style" : ""}`}>{currentFile.kind === "style" ? <FileText size={18} /> : <FileCode2 size={18} />}</span><div className="detail-file-title"><span>{currentFile.path}</span><strong>{currentFile.name}</strong></div></div>
     <Tabs value={detailTab} onValueChange={onDetailTabChange} className="detail-tabs">
       <TabsList variant="line" aria-label="文件详情视图" className="detail-tab-list"><TabsTrigger value="guide"><BookOpenText size={14} />讲解</TabsTrigger><TabsTrigger value="source"><Code2 size={14} />源码</TabsTrigger>{repository.source === "local" && <TabsTrigger value="questions">问答</TabsTrigger>}</TabsList>
       <TabsContent value="guide" className="detail-scroll guide-scroll">

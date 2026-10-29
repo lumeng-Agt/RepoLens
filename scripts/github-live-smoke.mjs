@@ -182,7 +182,7 @@ try {
   await page.getByText("GitHub 远端", { exact: true }).waitFor({ state: "visible" });
   await page.locator(".workspace-context-label").filter({ hasText: snapshot.origin.commit.slice(0, 12) }).waitFor({ state: "visible" });
   const file = [...snapshot.files].sort((left, right) => left.path.localeCompare(right.path))[0];
-  await page.getByRole("treeitem", { name: file.name, exact: true }).click();
+  await page.locator(`[id="tree-file-${file.id}"]`).click();
   await page.getByRole("tab", { name: "源码", exact: true }).click();
   await page.locator(".source-code").waitFor({ state: "visible", timeout: 30_000 });
   const sourceText = await page.locator(".source-code").innerText();

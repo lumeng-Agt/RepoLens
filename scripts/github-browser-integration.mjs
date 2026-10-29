@@ -64,10 +64,11 @@ async function freePort(used) {
   }
 }
 
+const startupEvents = [{ stage: "script-start", at: Date.now() }];
 async function waitForHealth(url, child) {
   for (let attempt = 0; attempt < 120; attempt += 1) {
     if (child.exitCode !== null) throw new Error("RepoLens local service exited before becoming ready.");
-    try { if ((await fetch(url + "/api/health")).ok) return; } catch {}
+    try { if ((await fetch(url + "/api/health")).ok) { startupEvents.push({ stage: "backend-ready", at: Date.now() }); return; } } catch {}
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   throw new Error("RepoLens local service did not become ready.");
@@ -81,7 +82,7 @@ async function waitForTcp(port, child) {
       socket.once("connect", () => { socket.destroy(); resolve(true); });
       socket.once("error", () => resolve(false));
     });
-    if (connected) return;
+    if (connected) { startupEvents.push({ stage: "ui-listening", at: Date.now() }); return; }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   throw new Error("RepoLens UI did not start listening.");
@@ -379,7 +380,7 @@ try {
   const directory = path.join(projectRoot, ".artifacts", "github-browser-integration");
   await mkdir(directory, { recursive: true });
   const logPath = path.join(directory, `${Date.now()}-service.log`);
-  await writeFile(logPath, `${error.stack ?? error.message}\n\n${applicationOutput}`, "utf8");
+  await writeFile(logPath, `${error.stack ?? error.message}\n${JSON.stringify(startupEvents)}\n\n${applicationOutput}`, "utf8");
   process.stderr.write(`服务联动失败日志：${logPath}\n`);
   throw error;
 } finally {
