@@ -8,6 +8,7 @@ declare global {
       selectDirectory(): Promise<string | null>;
       openInEditor(input: { repositoryId: string; revision: string; persistenceSessionId?: string; fileId: string; contentHash: string; line: number }): Promise<boolean>;
       quit(): Promise<void>;
+      onBeforeClose(listener: () => Promise<void>): () => void;
       onBackendStatus(listener: (status: { available: boolean; message: string }) => void): () => void;
     };
   }

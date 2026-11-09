@@ -66,12 +66,39 @@ export function selectAiContext({ fileIds, candidateIds, entryFileId, ranges = {
 }
 /** Shared production/evaluation preview preparation; never calls a model. */
 export function prepareAiContext({ candidates, rankedCandidates = [], fileIds, ranges = {}, sourceById, entryFileId, requireEntry = false, question = '', history = [], retrievalInsufficient = false, questionLike = true }) {
-  const requested = fileIds ?? (questionLike ? candidates.slice(0, 12) : candidates);
+  // The candidate pool is a picker, not a request to send every match.
+  const positive = rankedCandidates.filter(c => c.score > 0);
+  const strongest = positive[0]?.score ?? 0;
+  const defaults = positive.filter(c => c.score >= strongest * 0.5).slice(0, 5).map(c => c.id);
+  if (requireEntry && !defaults.includes(entryFileId)) defaults.unshift(entryFileId);
+  const requested = fileIds ?? (questionLike ? (defaults.length ? defaults : candidates.slice(0, 12)) : candidates);
   const effectiveRanges = { ...ranges };
   for (const candidate of rankedCandidates) if (!effectiveRanges[candidate.id] && candidate.suggestedRange) effectiveRanges[candidate.id] = candidate.suggestedRange;
   const selected = selectAiContext({fileIds: requested, candidateIds: candidates, entryFileId, ranges: effectiveRanges, sourceById, requireEntry});
   const totalCharacters = selected.characters + (questionLike ? String(question).length + history.reduce((sum, item) => sum + item.content.length, 0) : 0);
   const unresolvedRange = requested.some(id => rankedCandidates.find(c => c.id === id)?.rangeRequired && !ranges[id]);
-  const scopeRequired = selected.sources.length > 12 || totalCharacters > 60_000 || unresolvedRange || (questionLike && !fileIds && (candidates.length > 12 || retrievalInsufficient));
-  return { ...selected, totalCharacters, scopeRequired };
+  const blockers = [];
+  if (!selected.sources.length || (questionLike && !fileIds && retrievalInsufficient)) blockers.push("insufficient_evidence");
+  if (selected.sources.length > 12 || (questionLike && !fileIds && !rankedCandidates.length && candidates.length > 12)) blockers.push("file_limit");
+  if (totalCharacters > 60_000) blockers.push("character_limit");
+  if (unresolvedRange) blockers.push("ambiguous_definition");
+  return { ...selected, totalCharacters, scopeRequired: blockers.length > 0, blockers };
+}
+
+/** Automatic context is helpful, not a prerequisite for having a conversation. */
+export function prepareConversationContext(options) {
+  const withoutSource = (contextNotice) => {
+    const totalCharacters = String(options.question ?? "").length + (options.history ?? []).reduce((sum, item) => sum + item.content.length, 0);
+    const blockers = totalCharacters > 60_000 ? ["character_limit"] : [];
+    return { sources: [], characters: 0, totalCharacters, blockers, scopeRequired: blockers.length > 0, contextNotice };
+  };
+  if (options.fileIds?.length === 0) return withoutSource("本次仅发送问题和所选历史，不附带源码。");
+  const currentFileQuestion = /当前(?:文件|代码)|这个文件|这(?:段|份|个)(?:的)?代码|解释(?:一下)?代码|\b(?:explain|describe)\s+(?:this|the current)\s+(?:code|file)\b/i.test(String(options.question ?? ""));
+  const selected = options.fileIds === undefined && currentFileQuestion && options.candidates.includes(options.entryFileId)
+    ? prepareAiContext({ ...options, fileIds: [options.entryFileId], rankedCandidates: [] })
+    : prepareAiContext(options);
+  if (options.fileIds === undefined && selected.scopeRequired) {
+    return withoutSource(options.retrievalInsufficient ? "未找到直接相关的代码，本次不附带源码。可以继续聊天，或按需补充文件。" : "相关代码的范围需要进一步确认，本次不附带源码。可以先讨论，再按需补充文件。");
+  }
+  return selected;
 }

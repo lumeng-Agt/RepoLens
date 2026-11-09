@@ -95,6 +95,25 @@ export async function returnToSample(page: Page) {
 
 export const test = base.extend({
   page: async ({ page }, use) => {
+    await page.addInitScript(() => {
+      const original = window.fetch.bind(window);
+      const state = window as unknown as { __chatGenerationResults: Record<string, unknown> };
+      state.__chatGenerationResults = {};
+      window.fetch = async (input, init) => {
+        const response = await original(input, init);
+        if (String(input).endsWith('/api/ai/generate') && typeof init?.body === 'string') {
+          const id = JSON.parse(init.body).previewId;
+          void response.clone().text().then(text => {
+            if (response.headers.get('content-type')?.includes('text/event-stream')) {
+              const events = text.split(/\r?\n/).filter(line => line.startsWith('data:')).map(line => JSON.parse(line.slice(5)));
+              const completed = events.find(event => event.type === 'complete');
+              state.__chatGenerationResults[id] = completed?.result ?? { error: events.find(event => event.type === 'error')?.error ?? 'missing complete event' };
+            } else state.__chatGenerationResults[id] = JSON.parse(text);
+          }).catch(() => {});
+        }
+        return response;
+      };
+    });
     await markReturningUser(page);
     configureSampleWorkspaceNavigation(page);
     // Playwright's fixture callback is named `use`; it is not a React hook.

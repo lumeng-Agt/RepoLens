@@ -1,3 +1,4 @@
+import { startGeneratedRoute } from "./helpers/chat-generation";
 import { test, expect, createReturningPage, enterRepositoryLocation, openModelSettings, openRepositoryHome, openTourSteps, returnToSample } from "./fixtures";
 import { createServer, type Server } from "node:http";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -54,7 +55,9 @@ test.beforeAll(async () => {
     const currentCall = modelCalls;
     const userMessage = input.messages?.find((message) => message.content?.includes("FILE "))?.content ?? "";
     const files = [...userMessage.matchAll(/^FILE ([^\r\n]+) LINES (\d+)-(\d+)/gm)];
-    const file = files[0];
+    const metadata = userMessage.match(/任务信息：(.*)/)?.[1];
+    const entry = metadata ? JSON.parse(metadata).entryFileId : undefined;
+    const file = files.find(item => item[1] === entry) ?? files[0];
     const content = userMessage.includes("steps 需 3 到 7 个")
       ? JSON.stringify({ title: "模拟路线", steps: [0, 1, 2].map((index) => { const stepFile = files[index % files.length]; return { fileId: stepFile[1], purpose: `阅读步骤 ${index + 1}`, relationship: index === 0 ? "选定入口" : "沿静态依赖继续阅读", question: `第 ${index + 1} 步需要理解什么？`, references: [{ fileId: stepFile[1], startLine: Number(stepFile[2]) }] }; }) })
       : JSON.stringify({ role: "当前文件说明", keyPoints: ["mock response"], references: [{ fileId: file?.[1] ?? "main.ts", startLine: Number(file?.[2] ?? 1) }] });
@@ -354,25 +357,29 @@ test("AI preview sends nothing before confirmation and stale generation cannot l
   await settings.getByRole("button", { name: "应用设置" }).click();
   await expect(settings.getByText("模型设置已应用；桌面版会加密保存模型配置，浏览器版密钥仅在本次服务中保留。")).toBeVisible();
   await settings.getByRole("button", { name: "关闭", exact: true }).click();
+  await page.getByRole("treeitem", { name: "main.ts", exact: true }).click();
+  await expect(page.locator(".detail-file-title strong")).toHaveText("main.ts");
   await page.getByRole("button", { name: "生成当前文件讲解" }).click();
-  await expect(page.getByText("发送前确认")).toBeVisible();
+  await expect(page.getByRole("form", { name: "聊天输入" })).toBeVisible();
   expect(modelCalls).toBe(0);
 
-  await page.getByRole("button", { name: "确认发送并生成" }).click();
+  await page.getByRole("button", { name: "发送", exact: true }).click();
   await expect.poll(() => modelCalls).toBe(1);
   await page.getByRole("treeitem", { name: "lib.ts" }).click();
+  await expect(page.locator('.chat-send[aria-label="停止"]')).toHaveCount(0);
   const generate = page.getByRole("button", { name: "生成当前文件讲解" });
   await expect(generate).toBeEnabled();
   await generate.click();
-  await expect(page.getByText("发送前确认")).toBeVisible();
-  await page.getByRole("button", { name: "确认发送并生成" }).click();
-  await expect(page.getByText("mock response")).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByRole("form", { name: "聊天输入" })).toBeVisible();
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  await expect(page.locator(".details-pane").getByText("mock response")).toBeVisible({ timeout: 10_000 });
   await expect(page.getByText("lib.ts", { exact: true }).first()).toBeVisible();
   expect(modelCalls).toBe(2);
 
   await page.getByRole("button", { name: "生成阅读路线" }).click();
-  await expect(page.getByText("发送前确认")).toBeVisible();
-  await page.getByRole("button", { name: "确认发送并生成" }).click();
+  await expect(page.getByRole("form", { name: "聊天输入" })).toBeVisible();
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  await startGeneratedRoute(page);
   await expect(await openTourSteps(page)).toHaveAttribute("aria-label", "第 1 步：lib.ts");
   await page.getByRole("tab", { name: "讲解" }).click();
   await writeFile(path.join(temporaryRepository, "unrelated.ts"), "export const unrelated = true;\n");

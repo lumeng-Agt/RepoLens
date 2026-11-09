@@ -24,7 +24,7 @@ function publish(workspaceId, state, phase = state.status.phase, error = state.s
 function stateFor(workspaceId) {
   let state = stateByWorkspace.get(workspaceId);
   if (!state) {
-    state = { generation: 0, clearCount: 0, clearing: false, pending: 0, stablePhase: "idle", failures: new Map(), status: idleStatus };
+    state = { generation: 0, blocked: false, clearCount: 0, clearing: false, pending: 0, stablePhase: "idle", failures: new Map(), status: idleStatus };
     stateByWorkspace.set(workspaceId, state);
   }
   return state;
@@ -38,6 +38,20 @@ export function markWorkspacePersistencePending(workspaceId, key, message) {
   const state = stateFor(workspaceId);
   state.failures.set(key, message);
   publish(workspaceId, state);
+}
+export function acknowledgeWorkspacePersistenceKey(workspaceId, key) {
+  const state = stateFor(workspaceId);
+  state.failures.delete(key);
+  publish(workspaceId, state);
+}
+
+export function acknowledgeWorkspaceCopyCleanup(workspaceIds, warning = "") {
+  for (const id of workspaceIds) {
+    const state = stateFor(id);
+    if (warning) state.failures.set("clear-copies", warning);
+    else state.failures.delete("clear-copies");
+    publish(id, state);
+  }
 }
 
 export function subscribeWorkspacePersistence(workspaceId, listener) {
@@ -59,13 +73,13 @@ function failedResult(result) {
 /** Serialize a persistence mutation and invalidate queued work when a clear starts. */
 export function enqueueWorkspacePersistence(workspaceId, operation, { key = "default" } = {}) {
   const state = stateFor(workspaceId);
-  if (state.clearing) return Promise.resolve({ skipped: true });
+  if (state.clearing || state.blocked) return Promise.resolve({ skipped: true });
   const generation = state.generation;
   const previous = queueByWorkspace.get(workspaceId) ?? Promise.resolve();
   state.pending += 1;
   publish(workspaceId, state, "saving", "");
   const next = previous.catch(() => {}).then(async () => {
-    if (state.clearing || state.generation !== generation) return { skipped: true };
+    if (state.clearing || state.blocked || state.generation !== generation) return { skipped: true };
     publish(workspaceId, state, "saving", "");
     try {
       const result = await operation();
@@ -112,11 +126,11 @@ export function clearWorkspacePersistence(workspaceIds, operation) {
       const result = await operation();
       const failure = failedResult(result);
       if (failure) throw failure;
-      for (const id of ids) { const state = stateFor(id); state.failures.clear(); state.stablePhase = "saved"; publish(id, state, "saved", ""); }
+      for (const id of ids) { const state = stateFor(id); state.blocked = false; if (result?.preserveMemory) { state.failures.delete("clear"); state.failures.delete("clear-copies"); } else state.failures.clear(); state.stablePhase = "saved"; publish(id, state, "saved", ""); }
       return result;
     })
     .catch((error) => {
-      for (const id of ids) { const state = stateFor(id); state.failures.set("clear", error instanceof Error ? error.message : String(error)); publish(id, state, "memory", error instanceof Error ? error.message : String(error)); }
+      for (const id of ids) { const state = stateFor(id); state.blocked = Boolean(error?.clearUnknown); state.failures.set("clear", error instanceof Error ? error.message : String(error)); publish(id, state, "memory", error instanceof Error ? error.message : String(error)); }
       throw error;
     })
     .finally(() => {

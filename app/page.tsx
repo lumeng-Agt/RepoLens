@@ -1,4 +1,6 @@
 "use client";
+import { flushChatPreferences, retryChatPreferences } from "@/data/chat-preference-lifecycle.mjs";
+import type { ChatIntent } from "@/components/repolens/chat-intent";
 
 import {
   MarkerType,
@@ -9,6 +11,7 @@ import {
 } from "@xyflow/react";
 import dagre from "@dagrejs/dagre";
 import { separateOverlappingGraphNodes } from "@/data/graph-layout.mjs";
+import { getReadingTourStatus } from "@/data/reading-route-state.mjs";
 import {
   BookOpenText,
   ArrowLeft,
@@ -60,8 +63,10 @@ import { QuickOpenDialog } from "@/components/repolens/QuickOpenDialog";
 import { UsageGuideNotice, UsageGuidePanel } from "@/components/repolens/UsageGuide";
 import { RepositoryHome } from "@/components/repolens/RepositoryHome";
 import { ModelSettingsDialog } from "@/components/repolens/ModelSettingsDialog";
+import { useModelSettings } from "@/hooks/useModelSettings";
+import { useWorkspacePersistence } from "@/hooks/useWorkspacePersistence";
 import { completeUsageGuideTask, createDefaultUsageGuidePreferences, hasExistingBrowserUse, hasExistingWorkspaceUse, normalizeUsageGuidePreferences, type UsageGuidePreferences, type UsageGuideTaskId } from "@/data/usage-guide.mjs";
-import { DEFAULT_WORKSPACE_LAYOUT, normalizeWorkspaceLayout, updateWorkspaceLayout, workspaceInnerLayout, workspaceOuterLayout } from "@/data/workspace-layout.mjs";
+import { afterLayoutMeasurements, DEFAULT_WORKSPACE_LAYOUT, normalizeWorkspaceLayout, updateWorkspaceLayout, workspaceInnerLayout, workspaceOuterLayout } from "@/data/workspace-layout.mjs";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import type { GroupImperativeHandle } from "react-resizable-panels";
 import type {
@@ -73,36 +78,28 @@ import type {
   AiRouteRecord,
   TourStep,
 } from "@/data/model";
+import {
+  useRepositorySession,
+  BOOT_SNAPSHOT,
+  repositoryWorkspaceId,
+  repositoryOpenErrorMessage,
+  nodePositionSessionKey,
+  nodePositionSignature,
+  workspaceSession,
+} from "@/hooks/useRepositorySession";
+import { useGraphCoordinates, layoutGraph } from "@/hooks/useGraphCoordinates";
+import { useWorkspaceLayout, WORKSPACE_LAYOUT_STORAGE_KEY, WORKSPACE_LAYOUT_PERSISTENCE_ID } from "@/hooks/useWorkspaceLayout";
 import "@xyflow/react/dist/style.css";
 
 type MobileView = "files" | "graph" | "details";
 const progressMemory = new Map<string, string>();
 const USAGE_GUIDE_STORAGE_KEY = "repolens:usage-guide:v1";
-const WORKSPACE_LAYOUT_STORAGE_KEY = "repolens:layout-preferences:v1";
-const WORKSPACE_LAYOUT_PERSISTENCE_ID = "repolens:global-layout-preferences";
-
-const BOOT_SNAPSHOT: RepositorySnapshot = { id: "sample-loading", version: "loading", name: "RepoLens", description: "正在加载示例仓库…", files: [], dependencies: [], tour: [], source: "sample" };
 
 function routeSignature(tour: TourStep[]) {
   const value = JSON.stringify(tour.map((step) => [step.title, step.focusFileId, step.description, step.reference.fileId, step.reference.line, step.reference.endLine ?? null]));
   let hash = 2166136261;
   for (let index = 0; index < value.length; index++) hash = Math.imul(hash ^ value.charCodeAt(index), 16777619);
   return (hash >>> 0).toString(36);
-}
-function repositoryWorkspaceId(repository: RepositorySnapshot) { return repository.workspaceId ?? repository.id; }
-function repositoryOpenErrorMessage(error: unknown) {
-  const message = error instanceof Error ? error.message : String(error ?? "");
-  if (/\bENOENT\b|no such file or directory/i.test(message)) return "找不到这个目录，请检查路径后重试。";
-  if (/\bENOTDIR\b|not a directory/i.test(message)) return "这个路径不是文件夹，请选择一个仓库目录。";
-  if (/\bEACCES\b|\bEPERM\b|permission denied/i.test(message)) return "没有权限读取这个目录，请检查访问权限。";
-  return message || "无法打开仓库。";
-}
-function nodePositionSessionKey(repository: RepositorySnapshot) { return repositoryWorkspaceId(repository) + ":" + (repository.persistenceSessionId ?? repository.id); }
-function nodePositionSignature(positions: Record<string, { x: number; y: number }>) {
-  return JSON.stringify(Object.fromEntries(Object.entries(positions).sort(([left], [right]) => left.localeCompare(right))));
-}
-function workspaceSession(repository: RepositorySnapshot): WorkspaceSession {
-  return { repositoryId: repository.id, workspaceId: repositoryWorkspaceId(repository), persistenceSessionId: repository.persistenceSessionId };
 }
 function progressKey(repository: RepositorySnapshot, tour: TourStep[], stableRouteSignature?: string) { return `repolens:${repositoryWorkspaceId(repository)}:${repository.source === "sample" ? repository.version : stableRouteSignature ?? routeSignature(tour)}`; }
 
@@ -149,132 +146,24 @@ function writeTourProgress(key: string, value: string) {
   } catch { return false; }
 }
 
-function stageBrowserProgressClear(workspaceId?: string) {
-  const localPrefix = workspaceId ? `repolens:${workspaceId}:` : "repolens:";
-  const cookiePrefix = workspaceId ? `repolens_${workspaceId.replaceAll(/[^a-zA-Z0-9_-]/g, "_")}_` : "repolens_";
-  const localEntries: [string, string][] = [];
-  const cookieEntries: [string, string][] = [];
-  for (const key of Object.keys(window.localStorage)) {
-    if (!key.startsWith(localPrefix) && key !== `repolens:reading-baseline:${workspaceId}` && key !== `repolens:chat-ui:${workspaceId}`) continue;
-    const value = window.localStorage.getItem(key);
-    if (value !== null) localEntries.push([key, value]);
-  }
-  for (const part of document.cookie.split(";")) {
-    const [name, ...value] = part.trim().split("=");
-    if (name.startsWith(cookiePrefix)) cookieEntries.push([name, value.join("=")]);
-  }
-  const restore = () => {
-    for (const [key, value] of localEntries) window.localStorage.setItem(key, value);
-    for (const [name, value] of cookieEntries) document.cookie = `${name}=${value}; Path=/; Max-Age=31536000; SameSite=Lax`;
-  };
-  try {
-    for (const [key] of localEntries) window.localStorage.removeItem(key);
-    for (const [name] of cookieEntries) document.cookie = `${name}=; Path=/; Max-Age=0; SameSite=Lax`;
-    const remainingLocal = localEntries.some(([key]) => window.localStorage.getItem(key) !== null);
-    const remainingCookies = cookieEntries.some(([name]) => document.cookie.split(";").some((part) => part.trim().startsWith(`${name}=`)));
-    if (remainingLocal || remainingCookies) throw new Error("浏览器中的阅读进度未能清除。");
-  } catch (error) {
-    try { restore(); } catch { /* Keep the original clearing error and report it to the user. */ }
-    throw new Error(`无法清除浏览器中的阅读进度：${error instanceof Error ? error.message : String(error)}`);
-  }
-  return restore;
-}
-
 function traceProgress(event: string, key: string, generation: number, details: Record<string, string | number | null> = {}) {
   if (typeof window === "undefined" || new URLSearchParams(window.location.search).get("repolensDebugProgress") !== "1") return;
   window.dispatchEvent(new CustomEvent("repolens:progress-trace", { detail: { event, key, generation, ...details, at: performance.now() } }));
 }
 
-function layoutGraph(
-  snapshot: RepositorySnapshot,
-  selectedId: string,
-  showAll = false,
-  compact = false,
-  directory = "",
-  nodePositions: Map<string, { x: number; y: number }> = new Map(),
-): { nodes: GraphNode[]; edges: Edge[] } {
-  const inDirectory = (id: string) => !directory || id.startsWith(`${directory}/`);
-  const scopedFiles = snapshot.files.filter((file) => inDirectory(file.id));
-  const scopedIds = new Set(scopedFiles.map((file) => file.id));
-  const neighborhood = [...new Set(snapshot.dependencies.filter((edge) => scopedIds.has(edge.fromId) && scopedIds.has(edge.toId) && (edge.fromId === selectedId || edge.toId === selectedId)).flatMap((edge) => [edge.fromId, edge.toId]))].filter((id) => id !== selectedId).sort((a, b) => a.localeCompare(b));
-  const visibleIds = showAll ? scopedIds : new Set([selectedId, ...neighborhood].slice(0, 100));
-  const visibleFiles = snapshot.files.filter((file) => visibleIds.has(file.id));
-  const visibleDependencies = snapshot.dependencies.filter((edge) => visibleIds.has(edge.fromId) && visibleIds.has(edge.toId));
-  const graph = new dagre.graphlib.Graph();
-  graph.setDefaultEdgeLabel(() => ({}));
-  graph.setGraph({ rankdir: compact ? "TB" : "LR", nodesep: compact ? 8 : 38, ranksep: compact ? 28 : 74, marginx: compact ? 10 : 34, marginy: compact ? 12 : 32 });
-
-  for (const file of visibleFiles) {
-    graph.setNode(file.id, { width: compact ? 140 : 160, height: compact ? 60 : 68 });
-  }
-  for (const dependency of visibleDependencies) {
-    graph.setEdge(dependency.fromId, dependency.toId);
-  }
-  dagre.layout(graph);
-
-  const nodes: GraphNode[] = visibleFiles.map((file) => {
-    const position = graph.node(file.id);
-    return {
-      id: file.id,
-      type: "fileCard",
-      deletable: false,
-      measured: { width: compact ? 140 : 160, height: compact ? 60 : 68 },
-      position: nodePositions.get(`${repositoryWorkspaceId(snapshot)}:${file.id}`) ?? { x: position.x - (compact ? 70 : 80), y: position.y - (compact ? 30 : 34) },
-      data: { file, selected: file.id === selectedId, compact },
-      selected: file.id === selectedId,
-    };
-  });
-
-  const edges: Edge[] = visibleDependencies.map((dependency) => {
-    const importsFromCurrent = dependency.fromId === selectedId;
-    const importsCurrent = dependency.toId === selectedId;
-    const connected = importsFromCurrent || importsCurrent;
-    return {
-      id: dependency.id,
-      deletable: false,
-      source: dependency.fromId,
-      target: dependency.toId,
-      type: "smoothstep",
-      animated: false,
-      markerEnd: { type: MarkerType.ArrowClosed, width: 14, height: 14, color: importsFromCurrent ? "var(--thread-outgoing)" : importsCurrent ? "var(--thread-incoming)" : "var(--border-strong)" },
-      style: {
-        stroke: importsFromCurrent ? "var(--thread-outgoing)" : importsCurrent ? "var(--thread-incoming)" : "var(--border-strong)",
-        strokeWidth: connected ? 1.8 : 1.15,
-        opacity: connected ? 1 : 0.2,
-      },
-    };
-  });
-  return { nodes, edges };
-}
-
 const EMPTY_FILE: FileRecord = { id: "", path: "", name: "没有源码文件", kind: "typescript", role: "空仓库", summary: "添加 JS/TS 源码后重新扫描。", imports: [] };
 
 function AppShell() {
+  useEffect(() => window.repoLens?.onBeforeClose?.(() => flushChatPreferences()), []);
   const [chatOpen, setChatOpen] = useState(false);
-  const [chatIntent, setChatIntent] = useState<{ id: number; mode: AiMode; investigation?: import("@/data/model").Investigation }>({ id: 0, mode: "question" });
+  const [chatGraphTarget, setChatGraphTarget] = useState("");
+  const [chatGraphIds, setChatGraphIds] = useState<string[]>([]);
+  const [chatIntent, setChatIntent] = useState<ChatIntent>({ id: 0, mode: "question" });
   const openAiChat = useCallback((mode: AiMode = "question") => { setChatOpen(true); setChatIntent((previous) => ({ id: previous.id + 1, mode })); }, []);
-  const [repository, setRepository] = useState<RepositorySnapshot>(BOOT_SNAPSHOT);
-  const [recentRepositories, setRecentRepositories] = useState<LocalWorkspaceState["recentRepositories"]>([]);
-  const repositoryCommandIssuer = useRef<{ clientId: string; intentSequence: number } | null>(null);
-  if (repositoryCommandIssuer.current == null) repositoryCommandIssuer.current = { clientId: globalThis.crypto.randomUUID(), intentSequence: 0 };
-  const nextRepositoryCommand = (): RepositoryCommand => {
-    const issuer = repositoryCommandIssuer.current!;
-    issuer.intentSequence += 1;
-    return { clientId: issuer.clientId, intentSequence: issuer.intentSequence };
-  };
-  const isCurrentRepositoryCommand = (command: RepositoryCommand) => repositoryCommandIssuer.current?.clientId === command.clientId && repositoryCommandIssuer.current.intentSequence === command.intentSequence;
-  const repositoryGate = useRef(createRepositorySessionGate());
-  const repositoryReads = useRef(new Set<AbortController>());
-  const openRequestGate = useRef(createOpenRequestGate());
-  const openRequestController = useRef<AbortController | null>(null);
-  const [repositorySessionVersion, setRepositorySessionVersion] = useState(0);
-  const applyUpdatedSnapshotRef = useRef<(snapshot: RepositorySnapshot, epoch: number) => boolean>(() => false);
-  const beginRepositorySession = useCallback(() => {
-    for (const controller of repositoryReads.current) controller.abort();
-    repositoryReads.current.clear();
-    return repositoryGate.current.begin();
-  }, []);
   const [navigation, dispatchNavigation] = useReducer(navigationReducer, initialNavigationState);
+  const restoreWorkspaceStateRef = useRef<(snapshot: RepositorySnapshot, saved: LocalWorkspaceState) => string | undefined>(() => undefined);
+  const onSnapshotAppliedRef = useRef<(snapshot: RepositorySnapshot) => void>(() => {});
+  const onUpdatedSnapshotAppliedRef = useRef<(snapshot: RepositorySnapshot) => void>(() => {});
   const { selectedFileId, tourIndex, focusedLine, focusOrigin, focusRouteSignature, completedSteps, graphDirectory } = navigation;
   const setSelectedFileId = useCallback((value: StateUpdate<string>) => dispatchNavigation({ type: "select", value }), []);
   const setTourIndex = useCallback((value: StateUpdate<number>) => dispatchNavigation({ type: "tour", value }), []);
@@ -284,24 +173,13 @@ function AppShell() {
   const [detailTab, setDetailTab] = useState("guide");
   const [searchQuery, setSearchQuery] = useState("");
   const [searchQuestionScope, setSearchQuestionScope] = useState<{ workspaceId: string; fileIds: string[] }>({ workspaceId: "", fileIds: [] });
-  const questionExtraFileIds = searchQuestionScope.workspaceId === repositoryWorkspaceId(repository) ? searchQuestionScope.fileIds : [];
   const [quickOpen, setQuickOpen] = useState(false);
   const [layoutMode, setLayoutMode] = useState<"structure" | "reading">("structure");
-  const [workspaceLayoutPreferences, setWorkspaceLayoutPreferences] = useState(DEFAULT_WORKSPACE_LAYOUT);
-  const [workspaceLayoutReady, setWorkspaceLayoutReady] = useState(false);
-  const [browserLayoutSaveError, setBrowserLayoutSaveError] = useState("");
   const [browserProgressSaveFailures, setBrowserProgressSaveFailures] = useState(new Set<string>());
-  const chatGroupRef = useRef<GroupImperativeHandle | null>(null);
-  const chatContainerRef = useRef<HTMLDivElement | null>(null);
-  const workspaceOuterGroupRef = useRef<GroupImperativeHandle | null>(null);
-  const workspaceInnerGroupRef = useRef<GroupImperativeHandle | null>(null);
-  const lastAppliedOuterLayoutRef = useRef("");
-  const lastAppliedInnerLayoutRef = useRef("");
   const tourToggleButtonRef = useRef<HTMLButtonElement>(null);
   const wasTourBarVisibleRef = useRef(false);
   const [tourVisibilityOverride, setTourVisibilityOverride] = useState<{ signature: string; open: boolean } | null>(null);
   const [navigationHistory, setNavigationHistory] = useState(emptyNavigationHistory);
-  const [repoPath, setRepoPath] = useState("");
   const [desktopMode] = useState(() => Boolean(globalThis.__REPOLENS_RUNTIME__?.desktop));
   const [guidePreferences, setGuidePreferences] = useState<UsageGuidePreferences>(() => createDefaultUsageGuidePreferences());
   const guidePreferencesRef = useRef(guidePreferences);
@@ -310,7 +188,6 @@ function AppShell() {
   const [guideStorageMessage, setGuideStorageMessage] = useState("");
   const [showGuideWelcome, setShowGuideWelcome] = useState(true);
   const [guidePanelOpen, setGuidePanelOpen] = useState(false);
-  const [modelSettingsOpen, setModelSettingsOpen] = useState(false);
   const [guideNoticeAvailable, setGuideNoticeAvailable] = useState(false);
   const [guideRepoRequest, setGuideRepoRequest] = useState(0);
   const guideButtonRef = useRef<HTMLButtonElement>(null);
@@ -318,71 +195,80 @@ function AppShell() {
   const guideInitializedRef = useRef(false);
   const guideSaveSequenceRef = useRef(0);
   const guideWriteQueueRef = useRef<Promise<void>>(Promise.resolve());
-  const closeRepositoryRef = useRef<() => Promise<void>>(async () => {});
   const guideTourPracticeRef = useRef<{ workspaceId: string; sessionVersion: number; origin: { fileId: string; line?: number }; destination: { fileId: string; line: number }; visited: boolean; returned: boolean } | null>(null);
   const guideNavigationRef = useRef<{ repositoryId: string; sessionVersion: number; fileId: string; dependency: boolean } | null>(null);
-  const [desktopBackendError, setDesktopBackendError] = useState("");
-  const [repoBusy, setRepoBusy] = useState(false);
-  const [savedDataClearBusy, setSavedDataClearBusy] = useState(false);
-  const [savedDataClearGeneration, setSavedDataClearGeneration] = useState(0);
-  const savedDataClearGenerationRef = useRef(0);
   const savedDataClearActiveRef = useRef(false);
-  const [questionClearVersion, setQuestionClearVersion] = useState(0);
-  const [chatClearingTarget, setChatClearingTarget] = useState<string | null>(null);
-  const [chatClearVersions, setChatClearVersions] = useState<Record<string, number>>({});
-  const [chatClearAllVersion, setChatClearAllVersion] = useState(0);
-  const [repoMessage, setRepoMessage] = useState("");
-  const workspaceLayoutInitializedRef = useRef(false);
+  const [savedDataClearBusy, setSavedDataClearBusy] = useState(false);
+  const [workspacePersistenceReadyKeys, setWorkspacePersistenceReadyKeys] = useState(new Set<string>());
+  const [workspaceReadFailures, setWorkspaceReadFailures] = useState(new Set<string>());
+  const [nodePositionsReadyKey, setNodePositionsReadyKey] = useState<string | null>(null);
+  const [aiWorkflow, dispatchAiWorkflow] = useReducer(aiWorkflowReducer, initialAiWorkflowState);
+  const handleDispatchAiMessage = useCallback((message: string) => dispatchAiWorkflow({ type: "message", message }), []);
 
-  useEffect(() => {
-    if (desktopMode) return;
-    let cancelled = false;
-    const timer = window.setTimeout(() => {
-      if (cancelled) return;
-      try {
-        const raw = window.localStorage.getItem(WORKSPACE_LAYOUT_STORAGE_KEY);
-        if (raw === null) {
-          workspaceLayoutInitializedRef.current = true;
-          setWorkspaceLayoutReady(true);
-          return;
-        }
-        const normalized = normalizeWorkspaceLayout(JSON.parse(raw));
-        if (!normalized) {
-          setRepoMessage("无法读取已保存的栏目宽度；本次使用默认布局，原记录未被覆盖。");
-          setWorkspaceLayoutReady(true);
-          return;
-        }
-        setWorkspaceLayoutPreferences(normalized);
-        workspaceLayoutInitializedRef.current = true;
-        setWorkspaceLayoutReady(true);
-      } catch (error) {
-        setWorkspaceLayoutReady(true);
-        setRepoMessage(`无法读取已保存的栏目宽度；本次使用默认布局，原记录未被覆盖：${error instanceof Error ? error.message : "浏览器存储不可用。"}`);
-      }
-    }, 0);
-    return () => { cancelled = true; window.clearTimeout(timer); };
-  }, [desktopMode]);
+  const {
+    repository,
+    setRepository,
+    recentRepositories,
+    setRecentRepositories,
+    repoPath,
+    setRepoPath,
+    repoBusy,
+    setRepoBusy,
+    repoMessage,
+    setRepoMessage,
+    desktopBackendError,
+    repositorySessionVersion,
+    setRepositorySessionVersion,
+    repositoryGate,
+    repositoryReads,
+    beginRepositorySession,
+    applySnapshot,
+    applyUpdatedSnapshot,
+    openRepositoryPath,
+    openRepository,
+    closeRepository,
+    closeRepositoryRef,
+    cancelPendingRepositoryOpen,
+    rescanRepository,
+    removeRecentRepository,
+    nextRepositoryCommand,
+    isCurrentRepositoryCommand,
+  } = useRepositorySession({
+    desktopMode,
+    savedDataClearBusy,
+    isSavedDataClearBusy: () => savedDataClearActiveRef.current,
+    onClearAiContext: () => clearAiContext(),
+    onSnapshotApplied: (snapshot) => onSnapshotAppliedRef.current(snapshot),
+    onUpdatedSnapshotApplied: (snapshot) => onUpdatedSnapshotAppliedRef.current(snapshot),
+    onRestoreWorkspaceState: (snapshot, saved) => restoreWorkspaceStateRef.current(snapshot, saved),
+    onGuideTaskCompleted: (task) => completeGuideTask(task),
+    onCloseGuidePanel: () => {
+      setShowGuideWelcome(false);
+      setGuidePanelOpen(false);
+      updateGuidePreferences((p) => ({ ...p, welcomeHandled: true, checklistOpen: false, noticeDismissed: true }));
+      setGuideNoticeAvailable(false);
+    },
+    onLoadSampleStart: () => {
+      setSearchQuery("");
+      setCollapsedFolders([]);
+      setTourIndex(0);
+      setCompletedSteps([]);
+      setFocusedLine(null);
+      setShowAllGraph(false);
+      setGraphDirectory("");
+      setDetailTab("guide");
+      setMobileView("graph");
+    },
+    workspacePersistenceReadyKeys,
+    setWorkspacePersistenceReadyKeys,
+    setWorkspaceReadFailures,
+    setNodePositionsReadyKey,
+    onDispatchAiMessage: handleDispatchAiMessage,
+  });
+  const questionExtraFileIds = searchQuestionScope.workspaceId === repositoryWorkspaceId(repository) ? searchQuestionScope.fileIds : [];
   const [loadedSource, setLoadedSource] = useState<{ fileId: string; repositoryId: string; revision?: string; text: string } | null>(null);
   const [sourceLoad, setSourceLoad] = useState<{ key: string; status: "loading" | "loaded" | "error"; message?: string } | null>(null);
-  const [aiSettingsDraft, setAiSettingsDraft] = useState({ baseUrl: "", model: "", apiKey: "" });
-  const [aiSettingsSaved, setAiSettingsSaved] = useState({ baseUrl: "", model: "", configured: false });
-  const [aiSettingsDirty, setAiSettingsDirty] = useState(false);
-  const [aiSettingsFeedback, setAiSettingsFeedback] = useState("");
-  const [aiSettingsReadError, setAiSettingsReadError] = useState<{ repositoryId: string; sessionVersion: number; message: string } | null>(null);
-  const [aiSettingsSaveError, setAiSettingsSaveError] = useState<{ repositoryId: string; sessionVersion: number; message: string } | null>(null);
-  const aiSettingsDirtyRef = useRef(false);
-  const [aiSettingsReadySession, setAiSettingsReadySession] = useState<{ repositoryId: string; sessionVersion: number } | null>(null);
-  const [aiSettingsBusy, setAiSettingsBusy] = useState(false);
-  const [aiResultsByFile, setAiResultsByFile] = useState<Map<string, AiResultRecord>>(() => new Map());
-  const [aiRoutesByRepository, setAiRoutesByRepository] = useState<Map<string, AiRouteRecord>>(() => new Map());
-  const [readingNotesByWorkspace, setReadingNotesByWorkspace] = useState<Map<string, ReadingNote[]>>(() => new Map());
-  const readingNotesRef = useRef(readingNotesByWorkspace);
-  useLayoutEffect(() => { readingNotesRef.current = readingNotesByWorkspace; }, [readingNotesByWorkspace]);
-  const [savedToursByWorkspace, setSavedToursByWorkspace] = useState<Map<string, AiRouteRecord[]>>(() => new Map());
-  const savedToursRef = useRef(savedToursByWorkspace);
-  useLayoutEffect(() => { savedToursRef.current = savedToursByWorkspace; }, [savedToursByWorkspace]);
-  const readingArtifactJournals = useRef(new Map<string, ReadingArtifactJournal<ReadingNote, AiRouteRecord>>());
-  const [aiWorkflow, dispatchAiWorkflow] = useReducer(aiWorkflowReducer, initialAiWorkflowState);
+
   const { aiMessage, pendingAiMode, aiPreview, aiCandidates, selectedAiFiles, selectedAiRanges } = {
     aiMessage: aiWorkflow.message,
     pendingAiMode: ["ready", "error"].includes(aiWorkflow.status) && aiWorkflow.candidates.length ? aiWorkflow.mode as AiMode : null,
@@ -391,14 +277,39 @@ function AppShell() {
     selectedAiFiles: aiWorkflow.selectedFiles as string[],
     selectedAiRanges: aiWorkflow.ranges as Record<string, AiLineRange>,
   };
-  const currentAiSettingsReadError = aiSettingsReadError?.repositoryId === repository.id && aiSettingsReadError.sessionVersion === repositorySessionVersion ? aiSettingsReadError.message : null;
-  const currentAiSettingsSaveError = aiSettingsSaveError?.repositoryId === repository.id && aiSettingsSaveError.sessionVersion === repositorySessionVersion ? aiSettingsSaveError.message : null;
   const aiBusy = aiWorkflow.status === "previewing" || aiWorkflow.status === "generating";
-  const aiSettingsSessionReady = repository.source !== "local" || (aiSettingsReadySession?.repositoryId === repository.id && aiSettingsReadySession.sessionVersion === repositorySessionVersion);
-  const aiSettings = {
-    ...aiSettingsDraft,
-    configured: aiSettingsSaved.configured && !aiSettingsDirty && aiSettingsSessionReady && !aiSettingsBusy,
-  };
+  const aiRequestSequence = useRef(0);
+  const aiAbortController = useRef<AbortController | null>(null);
+  const aiContextRef = useRef("");
+  const clearAiContext = useCallback((preserveScope?: boolean) => {
+    const requestId = ++aiRequestSequence.current;
+    dispatchAiWorkflow({ type: "invalidate", requestId, preserveScope });
+    const controller = aiAbortController.current;
+    aiAbortController.current = null;
+    controller?.abort();
+  }, []);
+  const {
+    modelSettingsOpen,
+    openModelSettingsDialog,
+    closeModelSettingsDialog,
+    aiSettingsDraft,
+    aiSettingsSaved,
+    aiSettingsDirty,
+    aiSettingsFeedback,
+    aiSettingsBusy,
+    aiSettingsRevision,
+    currentAiSettingsReadError,
+    currentAiSettingsSaveError,
+    aiSettings,
+    editAiSettings,
+    saveAiSettings,
+  } = useModelSettings({
+    repositoryId: repository.id,
+    repositorySource: repository.source,
+    repositorySessionVersion,
+    onClearAiContext: clearAiContext,
+    onDispatchAiMessage: (message) => dispatchAiWorkflow({ type: "message", message }),
+  });
   const persistGuidePreferences = useCallback((preferences: UsageGuidePreferences): Promise<boolean> => {
     if (!guidePersistenceAllowedRef.current) return Promise.resolve(false);
     if (!desktopMode) {
@@ -459,15 +370,8 @@ function AppShell() {
   const completeGuideTask = useCallback((task: UsageGuideTaskId) => {
     updateGuidePreferences((previous) => completeUsageGuideTask(previous, task));
   }, [updateGuidePreferences]);
-  const [aiSettingsRevision, setAiSettingsRevision] = useState(0);
-  const aiSettingsDraftRevision = useRef(0);
-  const aiSettingsSaveSequence = useRef(0);
-  const aiSettingsReadSequence = useRef(0);
-  const aiSettingsBusyRef = useRef(false);
   const settingsSessionRef = useRef({ repositoryId: repository.id, sessionVersion: repositorySessionVersion });
-  const aiRequestSequence = useRef(0);
-  const aiAbortController = useRef<AbortController | null>(null);
-  const aiContextRef = useRef("");
+  useEffect(() => { settingsSessionRef.current = { repositoryId: repository.id, sessionVersion: repositorySessionVersion }; }, [repository.id, repositorySessionVersion]);
   const [mobileView, setMobileView] = useState<MobileView>("graph");
   const [narrowLayout, setNarrowLayout] = useState(false);
   const [workspaceViewportWidth, setWorkspaceViewportWidth] = useState(0);
@@ -479,19 +383,7 @@ function AppShell() {
   const compactGraphRef = useRef(compactGraph);
   useLayoutEffect(() => { compactGraphRef.current = compactGraph; }, [compactGraph]);
   const [flow, setFlow] = useState<ReactFlowInstance<GraphNode> | null>(null);
-  const layoutOwner = useRef({ version: 0, repositoryId: BOOT_SNAPSHOT.id });
   const graphCanvasRef = useRef<HTMLDivElement>(null);
-  const [nodePositions, setNodePositions] = useState(new Map<string, { x: number; y: number }>());
-  const nodePositionsRef = useRef(nodePositions);
-  useLayoutEffect(() => { nodePositionsRef.current = nodePositions; }, [nodePositions]);
-  const graphNodeDragging = useRef(false);
-  const graphLayoutAnchor = useRef<string | undefined>(undefined);
-  const nodePositionsPersisted = useRef(new Map<string, string>());
-  const dirtyNodePositions = useRef(new Map<string, Set<string>>());
-  const pendingNodePositionRestore = useRef<{ key: string; workspaceId: string; signature: string } | null>(null);
-  const [nodePositionsReadyKey, setNodePositionsReadyKey] = useState<string | null>(null);
-  const [workspacePersistenceReadyKeys, setWorkspacePersistenceReadyKeys] = useState(new Set<string>());
-  const [workspaceReadFailures, setWorkspaceReadFailures] = useState(new Set<string>());
   const [graphReady, setGraphReady] = useState(false);
   const [graphSizeRevision, setGraphSizeRevision] = useState(0);
   const graphResizeRequest = useRef(0);
@@ -499,99 +391,149 @@ function AppShell() {
   const searchInputRef = useRef<HTMLInputElement>(null);
   const filesById = useMemo(() => new Map(repository.files.map((file) => [file.id, file])), [repository.files]);
   const workspaceId = repositoryWorkspaceId(repository);
+  const chatDocked = workspaceViewportWidth >= 1280;
+  const {
+    workspaceLayoutPreferences,
+    setWorkspaceLayoutPreferences,
+    workspaceLayoutReady,
+    setWorkspaceLayoutReady,
+    workspaceLayoutInitializedRef,
+    browserLayoutSaveError,
+    setBrowserLayoutSaveError,
+    chatGroupRef,
+    chatContainerRef,
+    workspaceOuterGroupRef,
+    workspaceInnerGroupRef,
+    saveWorkspaceLayoutPreferences,
+    handleWorkspaceOuterLayoutChanged,
+    handleWorkspaceInnerLayoutChanged,
+    resetWorkspaceColumnLayout,
+  } = useWorkspaceLayout({
+    desktopMode,
+    savedDataClearBusy,
+    layoutMode,
+    showGuideWelcome,
+    chatOpen,
+    chatDocked,
+    workspaceViewportWidth,
+    narrowLayout,
+    onSetRepoMessage: setRepoMessage,
+  });
+  const {
+    nodes,
+    setNodes,
+    edges,
+    onNodesChange,
+    nodePositions,
+    setNodePositions,
+    nodePositionsRef,
+    nodePositionsPersisted,
+    dirtyNodePositions,
+    pendingNodePositionRestore,
+    activeNodePositionKeyRef,
+  } = useGraphCoordinates({
+    repository,
+    workspaceId,
+    selectedFileId,
+    showAllGraph,
+    compactGraph,
+    graphDirectory,
+    layoutVersion,
+    desktopMode,
+    savedDataClearBusy,
+    workspacePersistenceReadyKeys,
+    onSetRepoMessage: setRepoMessage,
+    nodePositionSessionKey,
+    nodePositionSignature,
+    workspaceSession,
+    bootSnapshotId: BOOT_SNAPSHOT.id,
+    nodePositionsReadyKey,
+    setNodePositionsReadyKey,
+  });
+
+  const activeProgressKeyRef = useRef("");
+
+  const {
+    readingNotesByWorkspace,
+    setReadingNotesByWorkspace,
+    savedToursByWorkspace,
+    setSavedToursByWorkspace,
+    readingNotesRef,
+    savedToursRef,
+    aiResultsByFile,
+    setAiResultsByFile,
+    aiRoutesByRepository,
+    setAiRoutesByRepository,
+    readingArtifactJournals,
+    savedDataClearGeneration,
+    savedDataClearGenerationRef,
+    questionClearVersion,
+    chatClearingTarget,
+    chatClearVersions,
+    chatClearAllVersion,
+    restoreWorkspaceState,
+    saveReadingNotes,
+    saveTours,
+    persistReadingArtifactJournal,
+    retryWorkspaceRestore,
+    retryReadingArtifactSave,
+    clearCurrentSavedData,
+    clearAllSavedData,
+    clearRetryPending,
+    retrySavedDataClear,
+  } = useWorkspacePersistence({
+    repository,
+    workspaceId,
+    repositorySessionVersion,
+    desktopMode,
+    repoBusy,
+    savedDataClearBusy,
+    setSavedDataClearBusy,
+    onClearAiContext: clearAiContext,
+    onSetRepoMessage: setRepoMessage,
+    repositoryGate,
+    workspacePersistenceReadyKeys,
+    setWorkspacePersistenceReadyKeys,
+    workspaceReadFailures,
+    setWorkspaceReadFailures,
+    nodePositionsRef,
+    setNodePositions,
+    nodePositionsPersisted,
+    dirtyNodePositions,
+    pendingNodePositionRestore,
+    setNodePositionsReadyKey,
+    setRecentRepositories,
+    progressMemory,
+    workspaceLayoutReady,
+    workspaceLayoutInitializedRef,
+    workspaceLayoutPreferences,
+    setWorkspaceLayoutPreferences,
+    setWorkspaceLayoutReady,
+    setBrowserLayoutSaveError,
+    setBrowserProgressSaveFailures,
+    initializeGuidePreferences,
+    guidePreferencesRef,
+    setGuidePreferences,
+    setShowGuideWelcome,
+    setGuidePanelOpen,
+    setGuideNoticeAvailable,
+    setGuideStorageMessage,
+    guideTourPracticeRef,
+    guideNavigationRef,
+    guideSaveSequenceRef,
+    guideWriteQueueRef,
+    setTourIndex,
+    setCompletedSteps,
+    setTourVisibilityOverride,
+    savedDataClearActiveRef,
+    getActiveProgressKey: () => activeProgressKeyRef.current,
+    tourIndex,
+    completedSteps,
+  });
   const currentReadingNotes = readingNotesByWorkspace.get(workspaceId) ?? [];
   const currentSavedTours = savedToursByWorkspace.get(workspaceId) ?? [];
   const persistenceStatus = useWorkspacePersistenceStatus(workspaceId);
   const layoutPersistenceStatus = useWorkspacePersistenceStatus(WORKSPACE_LAYOUT_PERSISTENCE_ID);
-  const chatDocked = workspaceViewportWidth >= 1280;
-  useLayoutEffect(() => {
-    const apply = () => {
-      const width = (chatContainerRef.current?.getBoundingClientRect().width ?? 0) - (chatContainerRef.current?.querySelector(".chat-resize-handle")?.getBoundingClientRect().width ?? 0);
-      if (!width || !chatGroupRef.current) return;
-      const assistant = chatOpen && chatDocked ? Math.min(45, (workspaceLayoutPreferences.chatWidth ?? 360) / width * 100) : 0;
-      chatGroupRef.current.setLayout({ reader: 100 - assistant, assistant });
-    };
-    apply();
-    let second = 0;
-    const first = requestAnimationFrame(() => { second = requestAnimationFrame(apply); });
-    return () => { cancelAnimationFrame(first); cancelAnimationFrame(second); };
-  }, [chatOpen, chatDocked, workspaceViewportWidth, workspaceLayoutPreferences.chatWidth]);
-  const outerPanelLayoutApplyKey = `${showGuideWelcome}:${workspaceViewportWidth}:${layoutMode}:${JSON.stringify(workspaceOuterLayout(workspaceLayoutPreferences, layoutMode))}`;
-  const innerPanelLayoutApplyKey = `${showGuideWelcome}:${workspaceViewportWidth}:${layoutMode}:${JSON.stringify(workspaceInnerLayout(workspaceLayoutPreferences, layoutMode))}`;
-  const saveWorkspaceLayoutPreferences = useCallback((next: typeof DEFAULT_WORKSPACE_LAYOUT) => {
-    setWorkspaceLayoutPreferences(next);
-    if (!workspaceLayoutReady || savedDataClearBusy) return;
-    if (!workspaceLayoutInitializedRef.current) {
-      setRepoMessage("栏目宽度仅在本页生效。原偏好未能读取；双击分隔线可明确重置并保存。");
-      return;
-    }
-    if (!desktopMode) {
-      try {
-        window.localStorage.setItem(WORKSPACE_LAYOUT_STORAGE_KEY, JSON.stringify(next));
-        setBrowserLayoutSaveError("");
-      } catch (error) {
-        setBrowserLayoutSaveError(error instanceof Error ? error.message : "浏览器存储不可用。");
-        setRepoMessage(`栏目宽度未能保存：${error instanceof Error ? error.message : "浏览器存储不可用。"}`);
-      }
-      return;
-    }
-    void enqueueWorkspacePersistence(WORKSPACE_LAYOUT_PERSISTENCE_ID, () => localWorkspaceProvider.saveLayoutPreferences(next), { key: "layout-preferences" }).catch((error: Error) => {
-      setRepoMessage(`栏目宽度未能保存：${error.message}`);
-    });
-  }, [desktopMode, savedDataClearBusy, workspaceLayoutReady]);
-  const handleWorkspaceOuterLayoutChanged = useCallback((layout: Record<string, number>, meta: { isUserInteraction: boolean }) => {
-    if (!meta.isUserInteraction || !workspaceLayoutReady || savedDataClearBusy || narrowLayout) return;
-    const next = updateWorkspaceLayout(workspaceLayoutPreferences, layoutMode, "outer", layout);
-    if (JSON.stringify(next) === JSON.stringify(workspaceLayoutPreferences)) return;
-    lastAppliedOuterLayoutRef.current = `${workspaceViewportWidth}:${layoutMode}:${JSON.stringify(workspaceOuterLayout(next, layoutMode))}`;
-    saveWorkspaceLayoutPreferences(next);
-  }, [layoutMode, narrowLayout, saveWorkspaceLayoutPreferences, savedDataClearBusy, workspaceLayoutPreferences, workspaceLayoutReady, workspaceViewportWidth]);
-  const handleWorkspaceInnerLayoutChanged = useCallback((layout: Record<string, number>, meta: { isUserInteraction: boolean }) => {
-    if (!meta.isUserInteraction || layoutMode !== "structure" || !workspaceLayoutReady || savedDataClearBusy || narrowLayout) return;
-    const next = updateWorkspaceLayout(workspaceLayoutPreferences, layoutMode, "inner", layout);
-    if (JSON.stringify(next) === JSON.stringify(workspaceLayoutPreferences)) return;
-    lastAppliedInnerLayoutRef.current = `${workspaceViewportWidth}:${layoutMode}:${JSON.stringify(workspaceInnerLayout(next, layoutMode))}`;
-    saveWorkspaceLayoutPreferences(next);
-  }, [layoutMode, narrowLayout, saveWorkspaceLayoutPreferences, savedDataClearBusy, workspaceLayoutPreferences, workspaceLayoutReady, workspaceViewportWidth]);
-  const resetWorkspaceColumnLayout = useCallback(() => {
-    if (!workspaceLayoutReady || savedDataClearBusy || narrowLayout) return;
-    workspaceLayoutInitializedRef.current = true;
-    saveWorkspaceLayoutPreferences({ ...workspaceLayoutPreferences, [layoutMode]: DEFAULT_WORKSPACE_LAYOUT[layoutMode] });
-  }, [layoutMode, narrowLayout, saveWorkspaceLayoutPreferences, savedDataClearBusy, workspaceLayoutPreferences, workspaceLayoutReady]);
-  useLayoutEffect(() => {
-    const outer = workspaceOuterGroupRef.current;
-    const inner = workspaceInnerGroupRef.current;
-    if (!outer || !inner || !workspaceLayoutReady) return;
-    if (narrowLayout) {
-      lastAppliedOuterLayoutRef.current = "";
-      lastAppliedInnerLayoutRef.current = "";
-      return;
-    }
-    const applyOuter = lastAppliedOuterLayoutRef.current !== outerPanelLayoutApplyKey;
-    const applyInner = layoutMode === "structure" && lastAppliedInnerLayoutRef.current !== innerPanelLayoutApplyKey;
-    if (applyOuter) {
-      outer.setLayout(workspaceOuterLayout(workspaceLayoutPreferences, layoutMode));
-      lastAppliedOuterLayoutRef.current = outerPanelLayoutApplyKey;
-    }
-    if (layoutMode === "reading") {
-      lastAppliedInnerLayoutRef.current = "";
-    }
-    if (applyInner) {
-      inner.setLayout(workspaceInnerLayout(workspaceLayoutPreferences, layoutMode));
-      lastAppliedInnerLayoutRef.current = innerPanelLayoutApplyKey;
-    }
-    if (!applyOuter && !applyInner) return;
-    // The panel library measures its new pixel constraints after a viewport
-    // change. Reapply the saved proportions after that measurement, so the
-    // temporary minimum-width clamp never becomes the restored preference.
-    let frame = requestAnimationFrame(() => {
-      frame = requestAnimationFrame(() => {
-        if (applyOuter) outer.setLayout(workspaceOuterLayout(workspaceLayoutPreferences, layoutMode));
-        if (applyInner) inner.setLayout(workspaceInnerLayout(workspaceLayoutPreferences, layoutMode));
-      });
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [innerPanelLayoutApplyKey, layoutMode, narrowLayout, outerPanelLayoutApplyKey, workspaceLayoutPreferences, workspaceLayoutReady]);
   const activePersistenceKey = nodePositionSessionKey(repository);
   const browserPreferencesUnsaved = Boolean(browserLayoutSaveError || browserProgressSaveFailures.size);
   const layoutSaveFailed = layoutPersistenceStatus.phase === "memory";
@@ -611,8 +553,6 @@ function AppShell() {
     }
     setRepoMessage(failures.size || layoutFailed ? "浏览器存储仍不可用，阅读进度或栏目宽度尚未保存。" : "阅读进度和栏目宽度已保存。");
   }, [browserLayoutSaveError, browserProgressSaveFailures, workspaceLayoutPreferences]);
-  const activeNodePositionKeyRef = useRef(nodePositionSessionKey(repository));
-  useLayoutEffect(() => { activeNodePositionKeyRef.current = nodePositionSessionKey(repository); }, [repository]);
   const currentFile = filesById.get(selectedFileId) ?? repository.files[0] ?? EMPTY_FILE;
   const aiResult = aiResultsByFile.get(`${workspaceId}:${currentFile.id}`) ?? null;
   const aiStale = aiResultIsStale(aiResult, repository);
@@ -633,10 +573,11 @@ function AppShell() {
   useLayoutEffect(() => { aiContextRef.current = aiContextKey; }, [aiContextKey]);
   useLayoutEffect(() => { settingsSessionRef.current = { repositoryId: repository.id, sessionVersion: repositorySessionVersion }; }, [repository.id, repositorySessionVersion]);
   const aiRoute = aiRoutesByRepository.get(workspaceId) ?? null;
-  const aiRouteStale = aiRoute ? Boolean(aiRoute.stale) || aiContextIsStale(aiRoute.contextFiles, repository) : false;
+  const aiRouteStale = aiRoute ? !getReadingTourStatus(aiRoute, new Map(repository.files.map(file => [file.id, file]))).readable : false;
   const activeTour = aiRoute?.steps ?? repository.tour;
   const activeRouteSignature = aiRoute?.signature ?? routeSignature(activeTour);
   const activeProgressKey = progressKey(repository, activeTour, aiRoute?.signature);
+  useLayoutEffect(() => { activeProgressKeyRef.current = activeProgressKey; }, [activeProgressKey]);
   const activeTourRef = useRef(activeTour);
   useLayoutEffect(() => { activeTourRef.current = activeTour; }, [activeTour]);
   const progressSession = useRef(createProgressSessionGate());
@@ -667,217 +608,9 @@ function AppShell() {
   const graphCandidateCount = scopedGraphFiles.length ? 1 + graphNeighborIds.length : 0;
   const graphHiddenCount = showAllGraph ? 0 : Math.max(0, graphCandidateCount - graphVisibleCount);
 
-  const persistReadingArtifactJournal = useCallback((snapshot: RepositorySnapshot, notes: ReadingNote[], tours: AiRouteRecord[]) => {
-    const targetWorkspaceId = repositoryWorkspaceId(snapshot);
-    const journal = readingArtifactJournals.current.get(targetWorkspaceId);
-    if (!journal || !hasReadingArtifactOperations(journal)) return Promise.resolve();
-    const checkpoint = readingArtifactJournalCheckpoint(journal);
-    const saveNotes = hasReadingArtifactOperations(journal, "notes");
-    const saveTours = hasReadingArtifactOperations(journal, "tours");
-    const saves: Promise<unknown>[] = [];
-    if (saveNotes) saves.push(enqueueWorkspacePersistence(targetWorkspaceId, async () => {
-      await localWorkspaceProvider.saveReadingNotes(workspaceSession(snapshot), notes);
-      const current = readingArtifactJournals.current.get(targetWorkspaceId);
-      if (current) readingArtifactJournals.current.set(targetWorkspaceId, acknowledgeReadingArtifactJournal(current, "notes", checkpoint));
-    }, { key: "reading-notes" }));
-    if (saveTours) saves.push(enqueueWorkspacePersistence(targetWorkspaceId, async () => {
-      await localWorkspaceProvider.saveTours(workspaceSession(snapshot), tours);
-      const current = readingArtifactJournals.current.get(targetWorkspaceId);
-      if (current) readingArtifactJournals.current.set(targetWorkspaceId, acknowledgeReadingArtifactJournal(current, "tours", checkpoint));
-    }, { key: "saved-tours" }));
-    return Promise.all(saves).then(() => undefined);
-  }, []);
-
-  const restoreWorkspaceState = useCallback((snapshot: RepositorySnapshot, saved: LocalWorkspaceState) => {
-    const investigationWorkspaceId = repositoryWorkspaceId(snapshot);
-    registerInvestigationSession(investigationWorkspaceId, `${investigationWorkspaceId}:${snapshot.persistenceSessionId ?? ""}`);
-    if (saved.persistenceReady === false) failInvestigationRead(investigationWorkspaceId, saved.warning ?? "调查记录读取失败。");
-    else restoreInvestigations(investigationWorkspaceId, saved.investigations ?? []);
-    initializeGuidePreferences(saved.guidePreferences ?? null, saved.guidePreferences != null, hasExistingWorkspaceUse(saved), saved.persistenceReady !== false, saved.warning);
-    const positionsKey = nodePositionSessionKey(snapshot);
-    if (saved.persistenceReady === false) {
-      setWorkspacePersistenceReadyKeys((previous) => { const next = new Set(previous); next.delete(positionsKey); return next; });
-      setNodePositionsReadyKey((current) => current === positionsKey ? null : current);
-      setWorkspaceReadFailures((previous) => new Set(previous).add(positionsKey));
-      return saved.warning ?? "本地保存数据尚未成功读取；本页修改不会覆盖原记录。";
-    }
-    if (desktopMode && !workspaceLayoutInitializedRef.current) {
-      const restoredLayout = saved.layoutPreferences == null ? DEFAULT_WORKSPACE_LAYOUT : normalizeWorkspaceLayout(saved.layoutPreferences);
-      if (restoredLayout) {
-        setWorkspaceLayoutPreferences(restoredLayout);
-        workspaceLayoutInitializedRef.current = true;
-        setWorkspaceLayoutReady(true);
-      } else {
-        setRepoMessage("无法读取已保存的栏目宽度；本次使用默认布局，原记录未被覆盖。");
-      }
-    }
-    const targetWorkspaceId = repositoryWorkspaceId(snapshot);
-    const validSavedNodePositions = Object.fromEntries(Object.entries(saved.nodePositions).filter(([fileId, position]) =>
-      Number.isFinite(position?.x) && Number.isFinite(position?.y) && snapshot.files.some((file) => file.id === fileId)));
-    nodePositionsPersisted.current.set(positionsKey, nodePositionSignature(saved.nodePositions));
-    const dirtyIds = dirtyNodePositions.current.get(targetWorkspaceId) ?? new Set<string>();
-    const inMemoryPositions = Object.fromEntries([...nodePositionsRef.current].flatMap(([key, point]) => {
-      const prefix = `${targetWorkspaceId}:`;
-      const fileId = key.startsWith(prefix) ? key.slice(prefix.length) : "";
-      return dirtyIds.has(fileId) && snapshot.files.some((file) => file.id === fileId) ? [[fileId, point] as const] : [];
-    }));
-    const savedNodePositions = { ...validSavedNodePositions, ...inMemoryPositions };
-    pendingNodePositionRestore.current = { key: positionsKey, workspaceId: targetWorkspaceId, signature: nodePositionSignature(savedNodePositions) };
-    setRecentRepositories(saved.recentRepositories);
-    for (const [key, value] of Object.entries(saved.progress)) if (!progressMemory.has(key)) progressMemory.set(key, value);
-    setAiResultsByFile((previous) => {
-      const next = new Map(previous);
-      for (const [fileId, value] of Object.entries(saved.aiResults)) {
-        const resultKey = `${repositoryWorkspaceId(snapshot)}:${fileId}`;
-        if (!next.has(resultKey) && value && typeof value === "object" && Array.isArray((value as AiResultRecord).__contextFiles)) next.set(resultKey, value as AiResultRecord);
-      }
-      return next;
-    });
-    if (saved.aiRoute && saved.aiRoute.repositoryId === snapshot.id && Array.isArray(saved.aiRoute.steps) && Array.isArray(saved.aiRoute.contextFiles)) {
-      setAiRoutesByRepository((previous) => previous.has(repositoryWorkspaceId(snapshot)) ? previous : new Map(previous).set(repositoryWorkspaceId(snapshot), saved.aiRoute as unknown as AiRouteRecord));
-    }
-    const artifactWorkspaceId = repositoryWorkspaceId(snapshot);
-    const journal = readingArtifactJournals.current.get(artifactWorkspaceId) ?? createReadingArtifactJournal<ReadingNote, AiRouteRecord>();
-    readingArtifactJournals.current.set(artifactWorkspaceId, journal);
-    const restoredNotes = applyReadingArtifactJournal(Array.isArray(saved.readingNotes) ? saved.readingNotes.filter((item): item is ReadingNote => Boolean(item && typeof item.id === "string" && typeof item.fileId === "string" && typeof item.text === "string")) : [], journal, "notes");
-    const restoredTours = applyReadingArtifactJournal(Array.isArray(saved.savedTours) ? saved.savedTours as AiRouteRecord[] : [], journal, "tours");
-    const nextNotes = new Map(readingNotesRef.current); nextNotes.set(artifactWorkspaceId, restoredNotes); readingNotesRef.current = nextNotes; setReadingNotesByWorkspace(nextNotes);
-    const nextTours = new Map(savedToursRef.current); nextTours.set(artifactWorkspaceId, restoredTours); savedToursRef.current = nextTours; setSavedToursByWorkspace(nextTours);
-    setNodePositions((previous) => {
-      const prefix = `${repositoryWorkspaceId(snapshot)}:`;
-      const next = new Map([...previous].filter(([key]) => !key.startsWith(prefix)));
-      for (const [fileId, position] of Object.entries(savedNodePositions)) next.set(`${prefix}${fileId}`, position);
-      return next;
-    });
-    setWorkspacePersistenceReadyKeys((previous) => {
-      const next = new Set(previous);
-      next.delete(positionsKey);
-      next.add(positionsKey);
-      while (next.size > 64) next.delete(next.values().next().value as string);
-      return next;
-    });
-    setWorkspaceReadFailures((previous) => { const next = new Set(previous); next.delete(positionsKey); return next; });
-    if (hasReadingArtifactOperations(journal)) {
-      void persistReadingArtifactJournal(snapshot, restoredNotes, restoredTours).catch((error: Error) => setRepoMessage(`原有阅读记录已恢复，但本页改动尚未保存：${error.message}`));
-    }
-    return saved.warning;
-  }, [desktopMode, initializeGuidePreferences, persistReadingArtifactJournal]);
-
-  const retryWorkspaceRestore = useCallback(async () => {
-    const snapshot = repository;
-    const restoreGeneration = savedDataClearGenerationRef.current;
-    const epoch = repositoryGate.current.current().epoch;
-    try {
-      const saved = await localWorkspaceProvider.get(repositoryWorkspaceId(snapshot));
-      if (!repositoryGate.current.isCurrent(epoch, snapshot.id) || savedDataClearActiveRef.current || restoreGeneration !== savedDataClearGenerationRef.current) return;
-      const warning = restoreWorkspaceState(snapshot, saved);
-      if (saved.persistenceReady === false) throw new Error(warning ?? "本地保存数据尚未成功读取。");
-      setRepoMessage(warning ? `保存数据已读取：${warning}` : "保存数据已恢复；本页待保存修改正在写入。");
-    } catch (error) {
-      if (!repositoryGate.current.isCurrent(epoch, snapshot.id) || savedDataClearActiveRef.current || restoreGeneration !== savedDataClearGenerationRef.current) return;
-      const failedKey = nodePositionSessionKey(snapshot);
-      setWorkspacePersistenceReadyKeys((current) => { const next = new Set(current); next.delete(failedKey); return next; });
-      setWorkspaceReadFailures((current) => new Set(current).add(failedKey));
-      setNodePositionsReadyKey((current) => current === failedKey ? null : current);
-      setRepoMessage(`保存数据读取失败；原记录已保留，可稍后重试：${error instanceof Error ? error.message : "本地存储不可用。"}`);
-    }
-  }, [repository, restoreWorkspaceState]);
-
-  const retryReadingArtifactSave = useCallback(async () => {
-    try {
-      const layoutSave = desktopMode && workspaceLayoutReady ? enqueueWorkspacePersistence(WORKSPACE_LAYOUT_PERSISTENCE_ID, () => localWorkspaceProvider.saveLayoutPreferences(workspaceLayoutPreferences), { key: "layout-preferences" }) : Promise.resolve();
-      if (!workspacePersistenceReadyKeys.has(nodePositionSessionKey(repository))) { await layoutSave; return; }
-      await Promise.all([
-        persistReadingArtifactJournal(repository, readingNotesRef.current.get(workspaceId) ?? [], savedToursRef.current.get(workspaceId) ?? []),
-        enqueueWorkspacePersistence(workspaceId, () => localWorkspaceProvider.saveProgress(workspaceSession(repository), activeProgressKey, JSON.stringify({ stepIndex: tourIndex, completedSteps })), { key: `progress:${activeProgressKey}` }),
-        layoutSave,
-      ]);
-      setRepoMessage("已重试阅读进度、笔记、路线和栏目宽度的保存；请查看保存状态。");
-    } catch (error) {
-      setRepoMessage(`仍有阅读数据尚未保存：${error instanceof Error ? error.message : "本地存储不可用。"}`);
-    }
-  }, [activeProgressKey, completedSteps, desktopMode, persistReadingArtifactJournal, repository, tourIndex, workspaceId, workspaceLayoutPreferences, workspaceLayoutReady, workspacePersistenceReadyKeys]);
-
   useEffect(() => {
-    if (repository.source !== "local") return;
-    const activeRepositoryId = repository.id;
-    const activeWorkspaceId = workspaceId;
-    const epoch = repositoryGate.current.current().epoch;
-    const restoreGeneration = savedDataClearGenerationRef.current;
-    let cancelled = false;
-    const controller = new AbortController();
-    localWorkspaceProvider.get(activeWorkspaceId, controller.signal).then((saved) => {
-      if (cancelled || !repositoryGate.current.isCurrent(epoch, activeRepositoryId) || savedDataClearActiveRef.current || restoreGeneration !== savedDataClearGenerationRef.current) return;
-      registerInvestigationSession(activeWorkspaceId, `${activeWorkspaceId}:${repository.persistenceSessionId ?? ""}`);
-      if (saved.persistenceReady === false) failInvestigationRead(activeWorkspaceId, saved.warning ?? "调查记录读取失败。");
-      else restoreInvestigations(activeWorkspaceId, saved.investigations ?? []);
-      if (saved.persistenceReady === false) {
-        const failedKey = nodePositionSessionKey(repository);
-        setWorkspacePersistenceReadyKeys((current) => { const next = new Set(current); next.delete(failedKey); return next; });
-        setWorkspaceReadFailures((current) => new Set(current).add(failedKey));
-        setRepoMessage(saved.warning ?? "阅读记录读取失败；本页修改不会覆盖原有保存数据。");
-        return;
-      }
-      const restoredKey = nodePositionSessionKey(repository);
-      setWorkspacePersistenceReadyKeys((current) => new Set(current).add(restoredKey));
-      setWorkspaceReadFailures((current) => { const next = new Set(current); next.delete(restoredKey); return next; });
-      const journal = readingArtifactJournals.current.get(activeWorkspaceId) ?? createReadingArtifactJournal<ReadingNote, AiRouteRecord>();
-      readingArtifactJournals.current.set(activeWorkspaceId, journal);
-      const notes = applyReadingArtifactJournal(Array.isArray(saved.readingNotes) ? saved.readingNotes.filter((item): item is ReadingNote => Boolean(item && typeof item.id === "string" && typeof item.fileId === "string" && typeof item.text === "string")) : [], journal, "notes");
-      const tours = applyReadingArtifactJournal(Array.isArray(saved.savedTours) ? saved.savedTours as AiRouteRecord[] : [], journal, "tours");
-      const nextNotes = new Map(readingNotesRef.current); nextNotes.set(activeWorkspaceId, notes); readingNotesRef.current = nextNotes; setReadingNotesByWorkspace(nextNotes);
-      const nextTours = new Map(savedToursRef.current); nextTours.set(activeWorkspaceId, tours); savedToursRef.current = nextTours; setSavedToursByWorkspace(nextTours);
-      if (saved.aiRoute && Array.isArray(saved.aiRoute.steps) && Array.isArray(saved.aiRoute.contextFiles)) setAiRoutesByRepository((current) => current.has(activeWorkspaceId) ? current : new Map(current).set(activeWorkspaceId, saved.aiRoute as unknown as AiRouteRecord));
-      if (hasReadingArtifactOperations(journal)) void persistReadingArtifactJournal(repository, notes, tours).catch((error: Error) => setRepoMessage(`原有阅读记录已恢复，但本页改动尚未保存：${error.message}`));
-    }).catch((error: Error) => {
-      if (cancelled || error.name === "AbortError" || savedDataClearActiveRef.current || restoreGeneration !== savedDataClearGenerationRef.current) return;
-      failInvestigationRead(activeWorkspaceId, error.message);
-      const failedKey = nodePositionSessionKey(repository);
-      setWorkspacePersistenceReadyKeys((current) => { const next = new Set(current); next.delete(failedKey); return next; });
-      setWorkspaceReadFailures((current) => new Set(current).add(failedKey));
-      setRepoMessage(`阅读记录读取失败；本页修改不会覆盖原有保存数据：${error.message}`);
-    });
-    return () => { cancelled = true; controller.abort(); };
-  }, [repository, repository.id, repository.source, workspaceId, persistReadingArtifactJournal]);
-
-  useEffect(() => {
-    const pending = pendingNodePositionRestore.current;
-    if (!pending || workspaceId !== pending.workspaceId) return;
-    const prefix = `${workspaceId}:`;
-    const current = Object.fromEntries([...nodePositions].flatMap(([key, point]) =>
-      key.startsWith(prefix) ? [[key.slice(prefix.length), point] as const] : []));
-    if (nodePositionSignature(current) !== pending.signature) return;
-    pendingNodePositionRestore.current = null;
-    setNodePositionsReadyKey(pending.key);
-  }, [nodePositions, workspaceId]);
-
-  useEffect(() => {
-    if (!desktopMode || savedDataClearBusy || repository.id === BOOT_SNAPSHOT.id) return;
-    const positionsKey = nodePositionSessionKey(repository);
-    if (nodePositionsReadyKey !== positionsKey) return;
-    const timer = window.setTimeout(() => {
-      const positions = Object.fromEntries([...nodePositions].flatMap(([key, point]) => {
-        const prefix = `${workspaceId}:`;
-        return key.startsWith(prefix) ? [[key.slice(prefix.length), point] as const] : [];
-      }));
-      const serialized = nodePositionSignature(positions);
-      if (serialized === nodePositionsPersisted.current.get(positionsKey)) return;
-      const save = enqueueWorkspacePersistence(workspaceId, async () => {
-        if (!workspacePersistenceReadyKeys.has(positionsKey)) return;
-        await localWorkspaceProvider.saveNodePositions(workspaceSession(repository), positions);
-        nodePositionsPersisted.current.set(positionsKey, serialized);
-        const currentPositions = Object.fromEntries([...nodePositionsRef.current].flatMap(([key, point]) => {
-          const prefix = `${workspaceId}:`;
-          return key.startsWith(prefix) ? [[key.slice(prefix.length), point] as const] : [];
-        }));
-        if (nodePositionSignature(currentPositions) === serialized) dirtyNodePositions.current.delete(workspaceId);
-      });
-      void save.catch((error: Error) => {
-        if (activeNodePositionKeyRef.current === positionsKey) setRepoMessage(`节点位置尚未保存到本地：${error.message}`);
-      });
-    }, 450);
-    return () => window.clearTimeout(timer);
-  }, [desktopMode, nodePositions, nodePositionsReadyKey, repository, repository.id, workspaceId, workspacePersistenceReadyKeys, savedDataClearBusy]);
+    restoreWorkspaceStateRef.current = restoreWorkspaceState;
+  }, [restoreWorkspaceState]);
 
   useEffect(() => {
     let cancelled = false;
@@ -918,87 +651,6 @@ function AppShell() {
     });
     return () => { cancelled = true; };
   }, [beginRepositorySession, desktopMode, initializeGuidePreferences, restoreWorkspaceState, setSelectedFileId]);
-
-  const initialLayout = useMemo(
-    () => layoutGraph(repository, selectedFileId, showAllGraph, compactGraph, graphDirectory, nodePositions),
-    // Re-layout only on explicit reset; normal selection keeps user-arranged positions.
-    [repository, selectedFileId, showAllGraph, compactGraph, graphDirectory, nodePositions],
-  );
-  const [nodes, setNodes, onNodesChangeBase] = useNodesState<GraphNode>(initialLayout.nodes);
-  const graphNodesRef = useRef<GraphNode[]>(nodes);
-  useLayoutEffect(() => { graphNodesRef.current = nodes; }, [nodes]);
-  const edges = initialLayout.edges;
-
-  useEffect(() => {
-    const sameWorkspace = layoutOwner.current.repositoryId === workspaceId;
-    const shouldReset = layoutOwner.current.version !== layoutVersion;
-    if (!sameWorkspace || shouldReset) graphLayoutAnchor.current = undefined;
-    const present = new Set(repository.files.map((file) => `${workspaceId}:${file.id}`));
-    // Drop removed files and clear positions only when an explicit layout reset occurs.
-    setNodePositions((previous) => {
-      let changed = false;
-      const next = new Map<string, { x: number; y: number }>();
-      for (const [id, position] of previous) {
-        const isCurrentRepository = id.startsWith(`${workspaceId}:`);
-        if (isCurrentRepository && (shouldReset || !present.has(id))) { changed = true; continue; }
-        next.set(id, position);
-      }
-      return changed ? next : previous;
-    });
-    // Keep React Flow's controlled nodes synchronized with the repository and the saved drag positions.
-    const next = initialLayout.nodes.map((node) => {
-        const existing = graphNodesRef.current.find((candidate) => candidate.id === node.id);
-        const savedPosition = nodePositions.get(`${workspaceId}:${node.id}`);
-        const position = !shouldReset
-          ? graphNodeDragging.current
-            ? existing?.position ?? node.position
-            : savedPosition
-              ? node.position
-              : (sameWorkspace ? existing?.position : undefined) ?? node.position
-          : node.position;
-        const dimensionsMatch = existing?.measured?.width === node.measured?.width && existing?.measured?.height === node.measured?.height;
-        return { ...node, ...(dimensionsMatch && existing?.measured ? { measured: existing.measured } : {}), position, selected: node.id === selectedFileId, data: { ...node.data, selected: node.id === selectedFileId } };
-      });
-    const resolved = graphNodeDragging.current ? next : separateOverlappingGraphNodes(next, { gap: compactGraph ? 12 : 16, anchorId: graphLayoutAnchor.current });
-    setNodes(resolved);
-    if (!graphNodeDragging.current) {
-      const adjusted = resolved.filter((node, index) => node.position.x !== next[index].position.x || node.position.y !== next[index].position.y);
-      if (adjusted.length) setNodePositions((previous) => {
-        let changed = false;
-        const updated = new Map(previous);
-        for (const node of adjusted) {
-          const key = `${workspaceId}:${node.id}`;
-          const current = updated.get(key);
-          if (current?.x === node.position.x && current?.y === node.position.y) continue;
-          updated.set(key, node.position);
-          changed = true;
-        }
-        return changed ? updated : previous;
-      });
-    }
-    layoutOwner.current = { version: layoutVersion, repositoryId: workspaceId };
-  }, [initialLayout, repository.id, workspaceId, repository.files, layoutVersion, selectedFileId, setNodes, nodePositions, compactGraph]);
-
-  const onNodesChange = useCallback((changes: Parameters<typeof onNodesChangeBase>[0]) => {
-    if (savedDataClearBusy) return;
-    const positionChanges = changes.filter((change) => change.type === "position");
-    const dragState = [...positionChanges].reverse().find((change) => typeof change.dragging === "boolean")?.dragging;
-    if (typeof dragState === "boolean") graphNodeDragging.current = dragState;
-    if (dragState === false) {
-      const completedDrag = [...positionChanges].reverse().find((change) => change.dragging === false && change.position);
-      if (completedDrag) graphLayoutAnchor.current = completedDrag.id;
-    }
-    for (const change of changes) if (change.type === "position" && change.position) {
-      setNodePositions((previous) => new Map(previous).set(`${workspaceId}:${change.id}`, change.position!));
-      const positionsKey = nodePositionSessionKey(repository);
-      if (desktopMode && !workspacePersistenceReadyKeys.has(positionsKey)) {
-        const dirty = dirtyNodePositions.current.get(workspaceId) ?? new Set<string>();
-        dirty.add(change.id);
-        dirtyNodePositions.current.set(workspaceId, dirty);
-      }
-    }
-    onNodesChangeBase(changes);
-  }, [desktopMode, onNodesChangeBase, repository, workspaceId, workspacePersistenceReadyKeys, savedDataClearBusy]);
 
   useLayoutEffect(() => {
     const updateLayout = () => {
@@ -1140,13 +792,6 @@ function AppShell() {
     return () => { cancelled = true; };
   }, [currentFile, repository.id, repository.source, repository.revision, detailTab]);
 
-  const clearAiContext = useCallback((preserveScope?: boolean) => {
-    const requestId = ++aiRequestSequence.current;
-    dispatchAiWorkflow({ type: "invalidate", requestId, preserveScope });
-    const controller = aiAbortController.current;
-    aiAbortController.current = null;
-    controller?.abort();
-  }, []);
   const changeAiScope = useCallback((selectedFiles: string[], ranges: Record<string, AiLineRange>) => {
     const requestId = ++aiRequestSequence.current;
     dispatchAiWorkflow({ type: "scopeChanged", requestId, selectedFiles, ranges });
@@ -1154,174 +799,43 @@ function AppShell() {
     aiAbortController.current = null;
     controller?.abort();
   }, []);
-  const editAiSettings = useCallback((patch: Partial<typeof aiSettings>) => {
-    aiSettingsDraftRevision.current += 1;
-    aiSettingsDirtyRef.current = true;
-    setAiSettingsDirty(true);
-    setAiSettingsFeedback("");
-    clearAiContext();
-    setAiSettingsRevision((revision) => revision + 1);
-    setAiSettingsDraft((previous) => ({ ...previous, ...patch }));
-  }, [clearAiContext]);
 
-  const applySnapshot = useCallback((snapshot: RepositorySnapshot, epoch: number) => {
-    if (!repositoryGate.current.isCurrent(epoch, snapshot.id)) return false;
-    const initialDirectory = snapshot.origin?.kind === "github" ? snapshot.origin.subdirectory : "";
-    const scopedFiles = [...snapshot.files].filter((file) => !initialDirectory || file.id.startsWith(`${initialDirectory}/`)).sort((a, b) => a.path.localeCompare(b.path));
-    const restoredFileId = initialDirectory
-      ? scopedFiles[0]?.id ?? snapshot.files[0]?.id ?? ""
-      : snapshot.files.some((file) => file.id === selectedFileId) ? selectedFileId : snapshot.files[0]?.id ?? "";
-    const graphDirectory = initialDirectory && scopedFiles.length ? initialDirectory : "";
-    setRepository(snapshot);
-    dispatchNavigation({ type: "snapshot", selectedFileId: restoredFileId, graphDirectory, clearFocus: true, resetTour: true });
-    clearAiContext(); setSearchQuery(""); setCollapsedFolders([]); setShowAllGraph(false);
-    setDetailTab("guide"); setMobileView("files");
-    return true;
+  useEffect(() => {
+    onSnapshotAppliedRef.current = (snapshot) => {
+      const initialDirectory = snapshot.origin?.kind === "github" ? snapshot.origin.subdirectory : "";
+      const scopedFiles = [...snapshot.files].filter((file) => !initialDirectory || file.id.startsWith(`${initialDirectory}/`)).sort((a, b) => a.path.localeCompare(b.path));
+      const restoredFileId = initialDirectory
+        ? scopedFiles[0]?.id ?? snapshot.files[0]?.id ?? ""
+        : snapshot.files.some((file) => file.id === selectedFileId) ? selectedFileId : snapshot.files[0]?.id ?? "";
+      const graphDirectory = initialDirectory && scopedFiles.length ? initialDirectory : "";
+      dispatchNavigation({ type: "snapshot", selectedFileId: restoredFileId, graphDirectory, clearFocus: true, resetTour: true });
+      clearAiContext(); setSearchQuery(""); setCollapsedFolders([]); setShowAllGraph(false);
+      setDetailTab("guide"); setMobileView("files");
+    };
   }, [clearAiContext, selectedFileId]);
 
-  const applyUpdatedSnapshot = useCallback((snapshot: RepositorySnapshot, epoch: number) => {
-    if (!repositoryGate.current.acceptUpdate(epoch, snapshot)) return false;
-    const previousFile = filesById.get(selectedFileId);
-    const sortedFiles = [...snapshot.files].sort((a, b) => a.path.localeCompare(b.path));
-    const nextFile = sortedFiles.find((file) => file.id === selectedFileId) ?? sortedFiles[0];
-    let nextDirectory = graphDirectory;
-    if (!nextFile || (nextDirectory && !snapshot.files.some((file) => file.id.startsWith(`${nextDirectory}/`)))) nextDirectory = "";
-    if (nextFile && nextDirectory && !nextFile.id.startsWith(`${nextDirectory}/`)) nextDirectory = "";
-    const contentChanged = previousFile && nextFile && previousFile.contentHash !== nextFile.contentHash;
-    const previousReferenceFile = focusedLine ? filesById.get(focusedLine.fileId) : undefined;
-    const nextReferenceFile = focusedLine ? snapshot.files.find((file) => file.id === focusedLine.fileId) : undefined;
-    const referenceChanged = Boolean(focusedLine && (!previousReferenceFile || !nextReferenceFile || previousReferenceFile.contentHash !== nextReferenceFile.contentHash));
-    const routeExpired = Boolean(aiRoute && !aiRouteStale && (aiRoute.stale || aiContextIsStale(aiRoute.contextFiles, snapshot)));
-    const expiredRouteFocus = routeExpired && focusOrigin === "route" && focusRouteSignature === aiRoute?.signature;
-    setRepository(snapshot);
-    clearAiContext();
-    dispatchNavigation({ type: "snapshot", selectedFileId: nextFile?.id ?? "", graphDirectory: nextDirectory, clearFocus: referenceChanged || !nextFile || expiredRouteFocus, resetTour: false });
-    setLoadedSource(null);
-    setRepoMessage(expiredRouteFocus ? "阅读路线引用的源码已变化，旧行号已清除；路线说明仍可查看。" : referenceChanged ? "定位到的源码已变化，旧行号已清除。" : contentChanged ? "当前文件已变化，旧 AI 确认已清除。" : snapshot.files.length ? "本地索引已更新。" : "仓库中已没有可分析的源码文件。");
-    return true;
-  }, [aiRoute, aiRouteStale, clearAiContext, filesById, focusOrigin, focusRouteSignature, focusedLine, graphDirectory, selectedFileId]);
-  useEffect(() => { applyUpdatedSnapshotRef.current = applyUpdatedSnapshot; }, [applyUpdatedSnapshot]);
-
   useEffect(() => {
-    if (!desktopMode) return;
-    return window.repoLens?.onBackendStatus(({ available, message }) => {
-      setDesktopBackendError(available ? "" : message);
-      if (!available) {
-        aiRequestSequence.current += 1;
-        aiAbortController.current?.abort();
-        aiAbortController.current = null;
-        clearAiContext();
-        setRepoMessage(message);
-      }
-    });
-  }, [desktopMode, clearAiContext]);
-
-  const openRepositoryPath = useCallback(async (path: string) => {
-    if (savedDataClearBusy) return;
-    const command = nextRepositoryCommand();
-    const requestId = openRequestGate.current.begin();
-    openRequestController.current?.abort();
-    const controller = new AbortController();
-    openRequestController.current = controller;
-    setRepoBusy(true); setRepoMessage("");
-    try {
-      const snapshot = await localRepositoryProvider.openRepository(path, command, controller.signal);
-      if (!openRequestGate.current.isCurrent(requestId) || !isCurrentRepositoryCommand(command) || controller.signal.aborted) return;
-      let workspaceWarning: string | undefined;
-      if (desktopMode) {
-        try {
-          const saved = await localWorkspaceProvider.get(repositoryWorkspaceId(snapshot), controller.signal);
-          if (!openRequestGate.current.isCurrent(requestId) || !isCurrentRepositoryCommand(command) || controller.signal.aborted) return;
-          workspaceWarning = restoreWorkspaceState(snapshot, saved);
-        }
-        catch (error) {
-          if (controller.signal.aborted) return;
-          if (!openRequestGate.current.isCurrent(requestId) || !isCurrentRepositoryCommand(command)) return;
-          const failedKey = nodePositionSessionKey(snapshot);
-          setWorkspacePersistenceReadyKeys((current) => { const next = new Set(current); next.delete(failedKey); return next; });
-          setWorkspaceReadFailures((current) => new Set(current).add(failedKey));
-          setNodePositionsReadyKey((current) => current === failedKey ? null : current);
-          workspaceWarning = error instanceof Error ? error.message : "无法读取桌面保存数据。";
-          failInvestigationRead(repositoryWorkspaceId(snapshot), workspaceWarning);
-        }
-      }
-      if (!openRequestGate.current.isCurrent(requestId) || !isCurrentRepositoryCommand(command) || controller.signal.aborted) return;
-      const epoch = beginRepositorySession();
-      if (!repositoryGate.current.activate(epoch, snapshot)) return;
-      setRepositorySessionVersion((version) => version + 1);
-      if (applySnapshot(snapshot, epoch)) {
-        completeGuideTask("repository");
-        setShowGuideWelcome(false);
-        setGuidePanelOpen(false);
-        updateGuidePreferences((previous) => ({ ...previous, welcomeHandled: true, checklistOpen: false, noticeDismissed: true }));
-        setGuideNoticeAvailable(false);
-        setRepoPath(path);
-        setRepoMessage(workspaceWarning ? `仓库已打开，但无法读取已保存数据。本页修改尚未保存，原记录不会被覆盖：${workspaceWarning}` : "仓库已打开，正在监听文件变化。");
-        try {
-          await enqueueWorkspacePersistence(repositoryWorkspaceId(snapshot), () => localWorkspaceProvider.touchRecent(workspaceSession(snapshot)));
-          const saved = await localWorkspaceProvider.get(repositoryWorkspaceId(snapshot));
-          if (openRequestGate.current.isCurrent(requestId) && isCurrentRepositoryCommand(command) && saved.persistenceReady !== false) setRecentRepositories(saved.recentRepositories);
-        } catch (error) { if (openRequestGate.current.isCurrent(requestId)) setRepoMessage(`仓库已打开；最近打开列表未能更新：${error instanceof Error ? error.message : "本地存储不可用。"}`); }
-      }
-    }
-    catch (error) { if (openRequestGate.current.isCurrent(requestId) && isCurrentRepositoryCommand(command) && !controller.signal.aborted) setRepoMessage(repositoryOpenErrorMessage(error)); }
-    finally {
-      if (openRequestController.current === controller) openRequestController.current = null;
-      if (openRequestGate.current.isCurrent(requestId) && isCurrentRepositoryCommand(command)) setRepoBusy(false);
-    }
-  }, [applySnapshot, beginRepositorySession, completeGuideTask, desktopMode, restoreWorkspaceState, savedDataClearBusy, updateGuidePreferences]);
-  const openRepository = useCallback((event: React.FormEvent) => {
-    event.preventDefault();
-    void openRepositoryPath(repoPath);
-  }, [openRepositoryPath, repoPath]);
-
-  useEffect(() => {
-    if (repository.source !== "local") return;
-    let updateQueue = Promise.resolve();
-    const repositoryId = repository.id;
-    const epoch = repositoryGate.current.current().epoch;
-    if (!repositoryGate.current.isCurrent(epoch, repositoryId)) return;
-    const controllers = new Set<AbortController>();
-    const activeReads = repositoryReads.current;
-    const unsubscribe = localRepositoryProvider.subscribe(repositoryId, (_revision, sequence) => {
-      updateQueue = updateQueue.then(async () => {
-        if (!repositoryGate.current.isCurrent(epoch, repositoryId)) return;
-        const controller = new AbortController(); controllers.add(controller); activeReads.add(controller);
-        try {
-          const next = await localRepositoryProvider.getSnapshot(repositoryId, controller.signal);
-          if (!repositoryGate.current.isCurrent(epoch, repositoryId) || next.id !== repositoryId || (next.sequence ?? 0) < sequence) return;
-          if (applyUpdatedSnapshotRef.current(next, epoch)) dispatchAiWorkflow({ type: "message", message: "仓库文件已变化，旧 AI 讲解需要重新生成；相关源码引用已停用。" });
-        } catch (error) { if (!controller.signal.aborted && repositoryGate.current.isCurrent(epoch, repositoryId)) setRepoMessage((error as Error).message); }
-        finally { controllers.delete(controller); activeReads.delete(controller); }
-      });
-    }, setRepoMessage);
-    return () => {
-      unsubscribe();
-      for (const controller of controllers) { controller.abort(); activeReads.delete(controller); }
-      controllers.clear();
+    onUpdatedSnapshotAppliedRef.current = (snapshot) => {
+      const previousFile = filesById.get(selectedFileId);
+      const sortedFiles = [...snapshot.files].sort((a, b) => a.path.localeCompare(b.path));
+      const nextFile = sortedFiles.find((file) => file.id === selectedFileId) ?? sortedFiles[0];
+      let nextDirectory = graphDirectory;
+      if (!nextFile || (nextDirectory && !snapshot.files.some((file) => file.id.startsWith(`${nextDirectory}/`)))) nextDirectory = "";
+      if (nextFile && nextDirectory && !nextFile.id.startsWith(`${nextDirectory}/`)) nextDirectory = "";
+      const contentChanged = previousFile && nextFile && previousFile.contentHash !== nextFile.contentHash;
+      const previousReferenceFile = focusedLine ? filesById.get(focusedLine.fileId) : undefined;
+      const nextReferenceFile = focusedLine ? snapshot.files.find((file) => file.id === focusedLine.fileId) : undefined;
+      const referenceChanged = Boolean(focusedLine && (!previousReferenceFile || !nextReferenceFile || previousReferenceFile.contentHash !== nextReferenceFile.contentHash));
+      const routeExpired = Boolean(aiRoute && !aiRouteStale && (aiRoute.stale || aiContextIsStale(aiRoute.contextFiles, snapshot)));
+      const expiredRouteFocus = routeExpired && focusOrigin === "route" && focusRouteSignature === aiRoute?.signature;
+      clearAiContext();
+      dispatchNavigation({ type: "snapshot", selectedFileId: nextFile?.id ?? "", graphDirectory: nextDirectory, clearFocus: referenceChanged || !nextFile || expiredRouteFocus, resetTour: false });
+      setLoadedSource(null);
+      setRepoMessage(expiredRouteFocus ? "阅读路线引用的源码已变化，旧行号已清除；路线说明仍可查看。" : referenceChanged ? "定位到的源码已变化，旧行号已清除。" : contentChanged ? "当前文件已变化，旧 AI 确认已清除。" : snapshot.files.length ? "本地索引已更新。" : "仓库中已没有可分析的源码文件。");
     };
-  }, [repository.source, repository.id, repositorySessionVersion]);
+  }, [aiRoute, aiRouteStale, clearAiContext, filesById, focusOrigin, focusRouteSignature, focusedLine, graphDirectory, selectedFileId, setRepoMessage]);
 
-  useEffect(() => {
-    const requestId = ++aiSettingsReadSequence.current;
-    const draftRevision = aiSettingsDraftRevision.current;
-    const sessionVersion = repositorySessionVersion;
-    const repositoryId = repository.id;
-    localExplanationProvider.getSettings().then((value) => {
-      if (requestId !== aiSettingsReadSequence.current || settingsSessionRef.current.sessionVersion !== sessionVersion || settingsSessionRef.current.repositoryId !== repositoryId) return;
-      setAiSettingsReadError(null);
-      setAiSettingsSaved(value);
-      setAiSettingsReadySession({ repositoryId, sessionVersion });
-      if (draftRevision === aiSettingsDraftRevision.current && !aiSettingsDirtyRef.current) {
-        setAiSettingsDraft((previous) => ({ ...previous, baseUrl: value.baseUrl, model: value.model, apiKey: "" }));
-        aiSettingsDirtyRef.current = false;
-        setAiSettingsDirty(false);
-      }
-    }).catch((error: Error) => {
-      if (requestId !== aiSettingsReadSequence.current || settingsSessionRef.current.sessionVersion !== sessionVersion || settingsSessionRef.current.repositoryId !== repositoryId) return;
-      setAiSettingsReadError({ repositoryId, sessionVersion, message: error instanceof Error ? error.message : "无法读取本地模型配置。" });
-    });
-  }, [repository.id, repositorySessionVersion]);
+
 
   useEffect(() => {
     const focusSearch = (event: KeyboardEvent) => {
@@ -1577,78 +1091,14 @@ function AppShell() {
     window.requestAnimationFrame(() => focusGraphFile(currentFile.id));
   }, [currentFile.id, focusGraphFile, workspaceId, savedDataClearBusy]);
 
-  const removeRecentRepository = useCallback(async (targetId: string) => {
-    try {
-      await localWorkspaceProvider.removeRecent(targetId);
-      const saved = await localWorkspaceProvider.get(workspaceId);
-      setRecentRepositories(saved.recentRepositories);
-    } catch (error) { setRepoMessage(`无法移除最近仓库：${error instanceof Error ? error.message : "本地存储不可用。"}`); }
-  }, [workspaceId]);
 
-  const saveReadingNotes = useCallback((notes: ReadingNote[], expected?: { repositoryId: string; workspaceId: string; sessionVersion: number; clearGeneration: number }): Promise<boolean> => {
-    const targetId = workspaceId;
-    const snapshot = repository;
-    const epoch = repositoryGate.current.current().epoch;
-    const sessionVersion = repositorySessionVersion;
-    if (savedDataClearActiveRef.current || expected && (expected.repositoryId !== snapshot.id || expected.workspaceId !== targetId || expected.sessionVersion !== sessionVersion || expected.clearGeneration !== savedDataClearGenerationRef.current) || !repositoryGate.current.isCurrent(epoch, snapshot.id)) return Promise.resolve(false);
-    const previousNotes = readingNotesRef.current.get(targetId) ?? [];
-    const journal = readingArtifactJournals.current.get(targetId) ?? createReadingArtifactJournal<ReadingNote, AiRouteRecord>();
-    const stagedJournal = stageReadingArtifactChanges(journal, "notes", previousNotes, notes);
-    readingArtifactJournals.current.set(targetId, stagedJournal);
-    const next = new Map(readingNotesRef.current); next.set(targetId, notes);
-    readingNotesRef.current = next;
-    setReadingNotesByWorkspace(next);
-    const restoreKey = nodePositionSessionKey(snapshot);
-    if (!workspacePersistenceReadyKeys.has(restoreKey) || workspaceReadFailures.has(restoreKey)) {
-      setRepoMessage("原有阅读记录尚未读取成功。本次修改尚未保存到本地；读取恢复后会与原记录合并。");
-      return Promise.resolve(false);
-    }
-    const checkpoint = readingArtifactJournalCheckpoint(stagedJournal);
-    return enqueueWorkspacePersistence(targetId, () => localWorkspaceProvider.saveReadingNotes(workspaceSession(snapshot), notes), { key: "reading-notes" }).then((result) => {
-      if (result && "skipped" in result && result.skipped) return false;
-      const current = readingArtifactJournals.current.get(targetId);
-      if (current) readingArtifactJournals.current.set(targetId, acknowledgeReadingArtifactJournal(current, "notes", checkpoint));
-      return true;
-    }).catch((error: Error) => {
-      if (repositoryGate.current.isCurrent(epoch, snapshot.id)) setRepoMessage(`阅读记录尚未保存到本地：${error.message}`);
-      return false;
-    });
-  }, [repository, repositorySessionVersion, workspaceId, workspacePersistenceReadyKeys, workspaceReadFailures]);
-
-  const saveTours = useCallback((tours: AiRouteRecord[], expected?: { repositoryId: string; workspaceId: string; sessionVersion: number; clearGeneration: number }): Promise<boolean> => {
-    const targetId = workspaceId;
-    const snapshot = repository;
-    const epoch = repositoryGate.current.current().epoch;
-    const sessionVersion = repositorySessionVersion;
-    if (savedDataClearActiveRef.current || expected && (expected.repositoryId !== snapshot.id || expected.workspaceId !== targetId || expected.sessionVersion !== sessionVersion || expected.clearGeneration !== savedDataClearGenerationRef.current) || !repositoryGate.current.isCurrent(epoch, snapshot.id)) return Promise.resolve(false);
-    const previousTours = savedToursRef.current.get(targetId) ?? [];
-    const journal = readingArtifactJournals.current.get(targetId) ?? createReadingArtifactJournal<ReadingNote, AiRouteRecord>();
-    const stagedJournal = stageReadingArtifactChanges(journal, "tours", previousTours, tours);
-    readingArtifactJournals.current.set(targetId, stagedJournal);
-    const next = new Map(savedToursRef.current); next.set(targetId, tours); savedToursRef.current = next; setSavedToursByWorkspace(next);
-    const restoreKey = nodePositionSessionKey(snapshot);
-    if (!workspacePersistenceReadyKeys.has(restoreKey) || workspaceReadFailures.has(restoreKey)) {
-      setRepoMessage("原有阅读路线尚未读取成功。本次修改尚未保存到本地；读取恢复后会与原路线合并。");
-      return Promise.resolve(false);
-    }
-    const checkpoint = readingArtifactJournalCheckpoint(stagedJournal);
-    return enqueueWorkspacePersistence(targetId, () => localWorkspaceProvider.saveTours(workspaceSession(snapshot), tours), { key: "saved-tours" }).then((result) => {
-      if (result && "skipped" in result && result.skipped) return false;
-      const current = readingArtifactJournals.current.get(targetId);
-      if (current) readingArtifactJournals.current.set(targetId, acknowledgeReadingArtifactJournal(current, "tours", checkpoint));
-      return true;
-    }).catch((error: Error) => {
-      if (repositoryGate.current.isCurrent(epoch, snapshot.id)) setRepoMessage(`阅读路线尚未保存到本地：${error.message}`);
-      return false;
-    });
-  }, [repository, repositorySessionVersion, workspaceId, workspacePersistenceReadyKeys, workspaceReadFailures]);
 
   const activateSavedTour = useCallback((route: AiRouteRecord) => {
-    if (route.stale || aiContextIsStale(route.contextFiles, repository)) { setRepoMessage("这条路线引用的源码已变化或尚未校验；请重新生成或手动更新路线引用后再开始。"); return; }
-    if (!route.steps.length) { setRepoMessage("这条路线没有有效步骤。"); return; }
+    if (!getReadingTourStatus(route, new Map(repository.files.map(file => [file.id, file]))).readable) { setRepoMessage("这条路线的源码依据不完整、已变化或尚未校验；请编辑并重新校验后再开始。"); return; }
     clearAiContext();
-    setAiRoutesByRepository((previous) => new Map(previous).set(workspaceId, route));
-    dispatchNavigation({ type: "restart-tour", step: route.steps[0], routeSignature: route.signature });
+    setAiRoutesByRepository((previous) => JSON.stringify(previous.get(workspaceId)) === JSON.stringify(route) ? previous : new Map(previous).set(workspaceId, route));
+    if (route.signature !== activeRouteSignature) dispatchNavigation({ type: "restart-tour", step: route.steps[0], routeSignature: route.signature });
+    setTourVisibilityOverride({ signature: `${workspaceId}:${route.signature}:${repositorySessionVersion}`, open: true });
     setDetailTab("source"); setMobileView("details"); setRepoMessage("");
     const restoreKey = nodePositionSessionKey(repository);
     if (!desktopMode || (workspacePersistenceReadyKeys.has(restoreKey) && !workspaceReadFailures.has(restoreKey))) {
@@ -1656,82 +1106,7 @@ function AppShell() {
         setRepoMessage(`路线已打开，但未能保存为当前路线：${error.message}`);
       });
     } else setRepoMessage("阅读路线已打开；保存数据恢复完成后才会写入本地。");
-  }, [clearAiContext, desktopMode, repository, workspaceId, workspacePersistenceReadyKeys, workspaceReadFailures]);
-
-  const clearCurrentSavedData = useCallback(async () => {
-    if (!desktopMode || repository.id === BOOT_SNAPSHOT.id || savedDataClearBusy || repoBusy) return;
-    savedDataClearActiveRef.current = true;
-    savedDataClearGenerationRef.current += 1;
-    setSavedDataClearGeneration(savedDataClearGenerationRef.current);
-    setSavedDataClearBusy(true);
-    invalidateInvestigationTasks(workspaceId);
-    setChatClearingTarget(workspaceId);
-    clearAiContext();
-    try {
-      await clearQuestionConversationWorkspace(workspaceId, async () => {
-        const restoreBrowserProgress = stageBrowserProgressClear(workspaceId);
-        try { await localWorkspaceProvider.clearRepository(workspaceSession(repository)); }
-        catch (error) { restoreBrowserProgress(); throw error; }
-      });
-      clearInvestigationMemory(workspaceId);
-      setAiResultsByFile((previous) => new Map([...previous].filter(([key]) => !key.startsWith(`${workspaceId}:`))));
-      setAiRoutesByRepository((previous) => { const next = new Map(previous); next.delete(workspaceId); return next; });
-      setReadingNotesByWorkspace((previous) => { const next = new Map(previous); next.delete(workspaceId); readingNotesRef.current = next; return next; });
-      setSavedToursByWorkspace((previous) => { const next = new Map(previous); next.delete(workspaceId); savedToursRef.current = next; return next; });
-      readingArtifactJournals.current.set(workspaceId, createReadingArtifactJournal<ReadingNote, AiRouteRecord>());
-      setNodePositions((previous) => new Map([...previous].filter(([key]) => !key.startsWith(`${workspaceId}:`))));
-      nodePositionsPersisted.current.delete(nodePositionSessionKey(repository));
-      dirtyNodePositions.current.delete(workspaceId);
-      for (const key of progressMemory.keys()) if (key.startsWith(`repolens:${workspaceId}:`)) progressMemory.delete(key);
-      setTourIndex(0); setCompletedSteps([]); setTourVisibilityOverride(null); setQuestionClearVersion((value) => value + 1); setRecentRepositories((previous) => previous.filter((item) => (item.workspaceId ?? item.id) !== workspaceId));
-      setChatClearVersions((previous) => ({ ...previous, [workspaceId]: (previous[workspaceId] ?? 0) + 1 }));
-      setRepoMessage("已清除此仓库的问答、阅读记录、生成结果、进度和图谱位置。");
-    } catch (error) { setRepoMessage(`无法清除此仓库的保存数据：${error instanceof Error ? error.message : "本地存储不可用。"}`); }
-    finally { savedDataClearActiveRef.current = false; setSavedDataClearBusy(false); setChatClearingTarget(null); }
-  }, [clearAiContext, desktopMode, repository, savedDataClearBusy, setTourIndex, setCompletedSteps, workspaceId, repoBusy]);
-
-  const clearAllSavedData = useCallback(async () => {
-    if (savedDataClearBusy || repoBusy) return;
-    savedDataClearActiveRef.current = true;
-    savedDataClearGenerationRef.current += 1;
-    setSavedDataClearGeneration(savedDataClearGenerationRef.current);
-    setSavedDataClearBusy(true);
-    for (const id of knownInvestigationWorkspaces()) invalidateInvestigationTasks(id);
-    setChatClearingTarget("*");
-    guideSaveSequenceRef.current += 1;
-    await guideWriteQueueRef.current;
-    clearAiContext();
-    try {
-      let guideClearWarning = "";
-      await clearAllQuestionConversations(async () => {
-        const restoreBrowserProgress = stageBrowserProgressClear();
-        try { await localWorkspaceProvider.clearAll(); }
-        catch (error) { restoreBrowserProgress(); throw error; }
-      }, [workspaceId]);
-      if (!desktopMode) {
-        try {
-          window.localStorage.removeItem(USAGE_GUIDE_STORAGE_KEY);
-          window.localStorage.removeItem(WORKSPACE_LAYOUT_STORAGE_KEY);
-          setGuideStorageMessage("");
-        } catch (error) { guideClearWarning = `应用数据已清除，但浏览器未允许移除部分偏好设置：${error instanceof Error ? error.message : "存储不可用。"}`; }
-      }
-      setChatClearAllVersion((value) => value + 1);
-      for (const id of knownInvestigationWorkspaces()) clearInvestigationMemory(id);
-      setRecentRepositories([]); setAiResultsByFile(new Map()); setAiRoutesByRepository(new Map()); setReadingNotesByWorkspace(new Map()); readingNotesRef.current = new Map(); setSavedToursByWorkspace(new Map()); savedToursRef.current = new Map(); setNodePositions(new Map());
-      readingArtifactJournals.current.clear();
-      progressMemory.clear();
-      nodePositionsPersisted.current.clear();
-      dirtyNodePositions.current.clear();
-      setTourIndex(0); setCompletedSteps([]); setTourVisibilityOverride(null); setQuestionClearVersion((value) => value + 1); setRepoMessage(guideClearWarning || "已清除全部 RepoLens 本地保存数据。");
-      setWorkspaceLayoutPreferences(DEFAULT_WORKSPACE_LAYOUT); workspaceLayoutInitializedRef.current = true; setWorkspaceLayoutReady(true);
-      setBrowserLayoutSaveError(""); setBrowserProgressSaveFailures(new Set());
-      const freshGuide = createDefaultUsageGuidePreferences();
-      guidePreferencesRef.current = freshGuide; setGuidePreferences(freshGuide);
-      setShowGuideWelcome(true); setGuidePanelOpen(false); setGuideNoticeAvailable(false); setGuideStorageMessage(guideClearWarning);
-      guideTourPracticeRef.current = null; guideNavigationRef.current = null;
-    } catch (error) { setRepoMessage(`无法清除全部保存数据：${error instanceof Error ? error.message : "本地存储不可用。"}`); }
-    finally { savedDataClearActiveRef.current = false; setSavedDataClearBusy(false); setChatClearingTarget(null); }
-  }, [clearAiContext, desktopMode, savedDataClearBusy, setTourIndex, setCompletedSteps, repoBusy, workspaceId]);
+  }, [activeRouteSignature, repositorySessionVersion, clearAiContext, desktopMode, repository, workspaceId, workspacePersistenceReadyKeys, workspaceReadFailures]);
 
   const locateCurrentGraph = useCallback(() => {
     focusGraphFile(currentFile.id);
@@ -1762,34 +1137,6 @@ function AppShell() {
     return () => { cancelAnimationFrame(frame); window.removeEventListener("resize", revealCurrent); };
   }, [tourIndex, activeTour.length]);
 
-  const loadSample = async (command: RepositoryCommand, epoch: number) => {
-    if (!isCurrentRepositoryCommand(command)) return;
-    openRequestGate.current.invalidate(); openRequestController.current?.abort(); openRequestController.current = null;
-    clearAiContext(); setSearchQuery(""); setCollapsedFolders([]); setTourIndex(0); setCompletedSteps([]); setFocusedLine(null); setShowAllGraph(false); setGraphDirectory(""); setRepoMessage("正在加载内置示例仓库…"); setDetailTab("guide"); setMobileView("graph");
-    try {
-      const snapshot = await sampleRepositoryProvider.getSnapshot();
-      if (!isCurrentRepositoryCommand(command) || !repositoryGate.current.activate(epoch, snapshot)) return;
-      setRepositorySessionVersion((version) => version + 1);
-      if (!applySnapshot(snapshot, epoch)) return;
-      // Same-page returns retain the sample workspace's in-memory positions.
-      // Re-enable autosave only after the sample snapshot has become active.
-      if (desktopMode && workspacePersistenceReadyKeys.has(nodePositionSessionKey(snapshot))) setNodePositionsReadyKey(nodePositionSessionKey(snapshot));
-      setRepoMessage("正在浏览内置示例仓库。");
-      setRepoBusy(false);
-    }
-    catch (error) { if (isCurrentRepositoryCommand(command) && repositoryGate.current.isCurrent(epoch)) { setRepoBusy(false); setRepoMessage(error instanceof Error ? error.message : "无法载入示例仓库。"); } }
-  };
-  const closeRepository = async () => {
-    if (savedDataClearBusy) return;
-    const command = nextRepositoryCommand();
-    openRequestGate.current.invalidate(); openRequestController.current?.abort(); openRequestController.current = null;
-    const epoch = beginRepositorySession(); setRepositorySessionVersion((version) => version + 1); setRepoBusy(true);
-    void localRepositoryProvider.closeRepository(command).catch((error) => {
-      if (isCurrentRepositoryCommand(command) && repositoryGate.current.isCurrent(epoch)) setRepoMessage(`已返回示例；关闭本地仓库尚未确认。${error instanceof Error ? ` ${error.message}` : ""}`);
-    });
-    await loadSample(command, epoch);
-  };
-  useLayoutEffect(() => { closeRepositoryRef.current = closeRepository; });
   const closeUsageGuidePanel = useCallback(() => {
     setGuidePanelOpen(false);
     updateGuidePreferences((previous) => ({ ...previous, checklistOpen: false }));
@@ -1800,7 +1147,7 @@ function AppShell() {
     if (repository.source === "local") await closeRepositoryRef.current();
     setRepoMessage("");
     setShowGuideWelcome(true);
-  }, [closeUsageGuidePanel, repository.source]);
+  }, [closeUsageGuidePanel, repository.source, setRepoMessage]);
   const openUsageGuidePanel = useCallback(() => {
     setShowGuideWelcome(false);
     setGuidePanelOpen(true);
@@ -1812,23 +1159,7 @@ function AppShell() {
     setGuideNoticeAvailable(false);
     updateGuidePreferences((previous) => ({ ...previous, checklistOpen: true, noticeDismissed: true }));
   }, [updateGuidePreferences]);
-  const cancelPendingRepositoryOpen = useCallback(() => {
-    const controller = openRequestController.current;
-    if (!controller) return;
-    const command = nextRepositoryCommand();
-    openRequestGate.current.invalidate();
-    controller.abort();
-    openRequestController.current = null;
-    setRepoBusy(false);
-    void localRepositoryProvider.closeRepository(command).catch((error: unknown) => {
-      if (isCurrentRepositoryCommand(command)) setRepoMessage(`示例已打开，但上一次仓库操作未能确认关闭：${error instanceof Error ? error.message : "本地服务不可用。"}`);
-    });
-  }, []);
-  const openModelSettingsDialog = useCallback(() => {
-    setAiSettingsFeedback("");
-    setModelSettingsOpen(true);
-  }, []);
-  const closeModelSettingsDialog = useCallback(() => setModelSettingsOpen(false), []);
+
   const openGuideWelcome = useCallback(() => {
     void openRepositoryHome();
   }, [openRepositoryHome]);
@@ -1902,61 +1233,9 @@ function AppShell() {
     }
     return () => window.cancelAnimationFrame(frame);
   }, [desktopMode, guideRepoRequest]);
-  const rescanRepository = async () => {
-    if (savedDataClearBusy) return;
-    const repositoryId = repository.id; const epoch = repositoryGate.current.current().epoch; const controller = new AbortController();
-    repositoryReads.current.add(controller); setRepoBusy(true);
-    try {
-      const next = await localRepositoryProvider.rescan(repositoryId, controller.signal);
-      if (!repositoryGate.current.isCurrent(epoch, repositoryId)) return;
-      if (applyUpdatedSnapshotRef.current(next, epoch)) setRepoMessage("仓库已重新扫描。");
-      else if (next.id === repositoryId) setRepoMessage("仓库已是最新，无需更新索引。");
-    }
-    catch (error) { if (!controller.signal.aborted && repositoryGate.current.isCurrent(epoch, repositoryId)) setRepoMessage(error instanceof Error ? error.message : "重新扫描失败。"); }
-    finally { repositoryReads.current.delete(controller); if (repositoryGate.current.isCurrent(epoch, repositoryId)) setRepoBusy(false); }
-  };
-  const saveAiSettings = async (event: React.FormEvent) => {
-    event.preventDefault(); dispatchAiWorkflow({ type: "message", message: "" });
-    if (aiSettingsBusyRef.current) return;
-    setAiSettingsSaveError(null);
-    aiSettingsBusyRef.current = true;
-    setAiSettingsBusy(true);
-    const requestId = ++aiSettingsSaveSequence.current;
-    aiSettingsReadSequence.current += 1;
-    const draftRevision = aiSettingsDraftRevision.current;
-    const repositoryId = repository.id;
-    const sessionVersion = repositorySessionVersion;
-    const submittedSettings = { ...aiSettingsDraft };
-    try {
-      clearAiContext();
-      const value = await localExplanationProvider.saveSettings(submittedSettings);
-      if (requestId !== aiSettingsSaveSequence.current || settingsSessionRef.current.repositoryId !== repositoryId || settingsSessionRef.current.sessionVersion !== sessionVersion) return;
-      setAiSettingsReadError(null);
-      setAiSettingsSaveError(null);
-      setAiSettingsSaved(value);
-      setAiSettingsReadySession({ repositoryId, sessionVersion });
-      if (draftRevision === aiSettingsDraftRevision.current) {
-        setAiSettingsDraft((previous) => ({ ...previous, baseUrl: value.baseUrl, model: value.model, apiKey: "" }));
-        aiSettingsDirtyRef.current = false;
-        setAiSettingsDirty(false);
-        setAiSettingsRevision((revision) => revision + 1);
-        const message = value.configured ? "模型设置已应用；桌面版会加密保存模型配置，浏览器版密钥仅在本次服务中保留。" : "请填写模型服务地址、模型名称和密钥。";
-        setAiSettingsFeedback(value.configured ? message : "");
-        dispatchAiWorkflow({ type: "message", message });
-      } else {
-        const message = "较早的模型设置已应用，表单仍有未应用的修改。重新应用后再使用 AI。";
-        setAiSettingsFeedback(message);
-        dispatchAiWorkflow({ type: "message", message });
-      }
-    } catch (error) {
-      if (requestId === aiSettingsSaveSequence.current && settingsSessionRef.current.repositoryId === repositoryId && settingsSessionRef.current.sessionVersion === sessionVersion) {
-        setAiSettingsSaveError({ repositoryId, sessionVersion, message: error instanceof Error ? error.message : "无法保存本地模型配置。" });
-      }
-    }
-    finally {
-      if (requestId === aiSettingsSaveSequence.current) { aiSettingsBusyRef.current = false; setAiSettingsBusy(false); }
-    }
-  };
+
+
+  const chatModelSettings = useMemo(() => ({ ...aiSettingsSaved, configured: aiSettings.configured }), [aiSettingsSaved, aiSettings.configured]);
   const previewAi = async (mode: AiMode, fileIds?: string[], goal?: string) => {
     if (savedDataClearBusy) return;
     if (desktopBackendError) { setRepoMessage(desktopBackendError); return; }
@@ -2011,9 +1290,9 @@ function AppShell() {
           contextFiles,
         }, (fileId: string) => filesById.get(fileId)?.name ?? fileId);
         setAiRoutesByRepository((previous) => new Map(previous).set(workspaceId, nextRoute));
-        void saveTours([...(savedToursRef.current.get(workspaceId) ?? []).filter((route) => route.signature !== nextRoute.signature), nextRoute]);
+        const routeSaved = await saveTours([...(savedToursRef.current.get(workspaceId) ?? []).filter((route) => route.signature !== nextRoute.signature), nextRoute]);
         const restoreKey = nodePositionSessionKey(repository);
-        if (!desktopMode || (workspacePersistenceReadyKeys.has(restoreKey) && !workspaceReadFailures.has(restoreKey))) {
+        if (routeSaved && (!desktopMode || (workspacePersistenceReadyKeys.has(restoreKey) && !workspaceReadFailures.has(restoreKey)))) {
           try {
             const saved = await enqueueWorkspacePersistence(workspaceId, () => localWorkspaceProvider.saveAiRoute(savedWorkspaceSession, nextRoute as AiRouteRecord));
             if (saved && "skipped" in saved && saved.skipped) return;
@@ -2022,7 +1301,7 @@ function AppShell() {
         } else setRepoMessage("阅读路线已生成；保存数据恢复完成前，不会写入本地。");
         if (aiRequestSequence.current !== requestId || aiContextRef.current !== contextKey) return;
         setSearchQuery(""); setCollapsedFolders([]);
-        finalMessage = "AI 阅读路线已生成；选中步骤即可定位文件和源码。";
+        finalMessage = routeSaved ? "AI 阅读路线已生成；选中步骤即可定位文件和源码。" : "路线已生成，但尚未保存。请检查保存提示；原有路线未删除。";
       } else {
         const result: AiResultRecord = { ...value.result, __repositoryId: value.repositoryId, __entryFileId: value.entryFileId, __revision: value.revision, __mode: "explanation", __contextFiles: contextFiles };
         setAiResultsByFile((previous) => new Map(previous).set(`${workspaceId}:${value.entryFileId}`, result));
@@ -2043,7 +1322,7 @@ function AppShell() {
   };
 
   const repositoryHome = <>
-    <RepositoryHome path={repoPath} busy={repoBusy || savedDataClearBusy} desktop={desktopMode} message={repoMessage} recentRepositories={recentRepositories} guideButtonRef={guideButtonRef} ready={guideReady} onPathChange={setRepoPath}
+    <RepositoryHome clearBlocked={savedDataClearBusy} onRetryClear={clearRetryPending ? () => void retrySavedDataClear() : undefined} path={repoPath} busy={repoBusy || savedDataClearBusy} desktop={desktopMode} message={repoMessage} recentRepositories={recentRepositories} guideButtonRef={guideButtonRef} ready={guideReady} onPathChange={setRepoPath}
       onPickDirectory={() => { void window.repoLens?.selectDirectory().then((selectedPath) => { if (selectedPath) setRepoPath(selectedPath); }).catch((error: unknown) => setRepoMessage(error instanceof Error ? error.message : "无法选择本地目录。")); }}
       onOpen={openRepository} onOpenRecent={(location) => { setRepoPath(location); void openRepositoryPath(location); }} onRemoveRecent={(id) => removeRecentRepository(id)} onTryExample={handleTryExample} onOpenGuide={openUsageGuideFromHome} onOpenSettings={openModelSettingsDialog} />
     <UsageGuidePanel open={guidePanelOpen} completedTaskIds={guidePreferences.completedTaskIds} repositoryName={repository.name} hasDependencies={repository.dependencies.length > 0} hasTour={activeTour.length > 1} canAddNote={repository.source === "local"} returnFocusRef={guideButtonRef} onClose={closeUsageGuidePanel} onStartTask={startUsageGuideTask} onOpenWelcome={openGuideWelcome} onResetProgress={resetUsageGuide} storageMessage={guideStorageMessage} />
@@ -2082,7 +1361,7 @@ function AppShell() {
           </div>
           <button type="button" className="repo-action settings-trigger" aria-label="模型设置" title="模型设置" onClick={openModelSettingsDialog}><Settings2 size={15} /><span>模型设置</span></button>
           {savedDataClearBusy && repository.source !== "local" && !desktopMode && !browserPreferencesUnsaved && <span className="workspace-save-status is-busy" role="status" aria-label="正在清除本地数据">正在清除本地数据…</span>}
-          {(repository.source === "local" || desktopMode || browserPreferencesUnsaved) && <><span className={`workspace-save-status is-${saveStatusLabel === "已保存" ? "saved" : saveStatusLabel === "正在恢复数据" || saveStatusLabel === "保存中" || saveStatusLabel === "正在清除" ? "busy" : "memory"}`} role="status" aria-label={`本地保存状态：${saveStatusLabel}`} title={saveStatusDetail}>{saveStatusLabel}</span>{workspaceReadFailures.has(activePersistenceKey) && <button type="button" className="repo-action" disabled={savedDataClearBusy} onClick={() => void retryWorkspaceRestore()}>重试恢复</button>}{(persistenceStatus.phase === "memory" || layoutSaveFailed || browserPreferencesUnsaved) && <button type="button" className="repo-action" disabled={savedDataClearBusy || (!browserPreferencesUnsaved && !layoutSaveFailed && !workspacePersistenceReadyKeys.has(activePersistenceKey))} onClick={() => { if (browserPreferencesUnsaved) retryBrowserPreferences(); if (persistenceStatus.phase === "memory" || layoutSaveFailed) void retryReadingArtifactSave(); }}>重试保存</button>}</>}
+          {(repository.source === "local" || desktopMode || browserPreferencesUnsaved || clearRetryPending) && <><span className={`workspace-save-status is-${saveStatusLabel === "已保存" ? "saved" : saveStatusLabel === "正在恢复数据" || saveStatusLabel === "保存中" || saveStatusLabel === "正在清除" ? "busy" : "memory"}`} role="status" aria-label={`本地保存状态：${saveStatusLabel}`} title={saveStatusDetail}>{saveStatusLabel}</span>{workspaceReadFailures.has(activePersistenceKey) && <button type="button" className="repo-action" disabled={savedDataClearBusy} onClick={() => void retryWorkspaceRestore()}>重试恢复</button>}{clearRetryPending && <button type="button" className="repo-action" disabled={savedDataClearBusy && !clearRetryPending} onClick={() => void retrySavedDataClear()}>重试清除</button>}{!clearRetryPending && (persistenceStatus.phase === "memory" || layoutSaveFailed || browserPreferencesUnsaved) && <button type="button" className="repo-action" disabled={savedDataClearBusy || (!browserPreferencesUnsaved && !layoutSaveFailed && !workspacePersistenceReadyKeys.has(activePersistenceKey))} onClick={() => { if (browserPreferencesUnsaved) retryBrowserPreferences(); if (persistenceStatus.phase === "memory") void retryChatPreferences().catch(() => {}); if (persistenceStatus.phase === "memory" || layoutSaveFailed) void retryReadingArtifactSave(); }}>重试保存</button>}</>}
           <details className="repo-menu" ref={repositoryMenuRef}>
             <summary aria-label="仓库菜单"><Folder size={15} /><span>仓库</span><ChevronDown size={13} /></summary>
             <div className="repo-menu-popover">
@@ -2127,11 +1406,12 @@ function AppShell() {
           id="workspace-columns"
           className="workspace-panels"
           orientation="horizontal"
-          defaultLayout={workspaceOuterLayout(DEFAULT_WORKSPACE_LAYOUT, "structure")}
+          defaultLayout={workspaceOuterLayout(workspaceLayoutPreferences, layoutMode)}
           groupRef={workspaceOuterGroupRef}
           onLayoutChanged={handleWorkspaceOuterLayoutChanged}
           disabled={savedDataClearBusy || !workspaceLayoutReady}
           data-layout-ready={workspaceLayoutReady ? "true" : "false"}
+          data-preferred-layout={JSON.stringify(workspaceOuterLayout(workspaceLayoutPreferences, layoutMode))}
           resizeTargetMinimumSize={{ fine: 12, coarse: 30 }}
         >
         <ResizablePanel id="files" style={{ overflow: "hidden" }} className={`workspace-panel-content${narrowLayout && mobileView !== "files" ? " mobile-panel-hidden" : ""}`} defaultSize={layoutMode === "reading" ? "28%" : "22%"} minSize={180}>
@@ -2163,14 +1443,14 @@ function AppShell() {
             id="workspace-graph-details"
             className="workspace-details-panels"
             orientation="horizontal"
-            defaultLayout={workspaceInnerLayout(DEFAULT_WORKSPACE_LAYOUT, "structure")}
+            defaultLayout={workspaceInnerLayout(workspaceLayoutPreferences, layoutMode)}
             groupRef={workspaceInnerGroupRef}
             onLayoutChanged={handleWorkspaceInnerLayoutChanged}
             disabled={layoutMode === "reading" || savedDataClearBusy || !workspaceLayoutReady}
             resizeTargetMinimumSize={{ fine: 12, coarse: 30 }}
           >
         <ResizablePanel id="graph" style={{ overflow: "hidden" }} className={`workspace-panel-content${narrowLayout && mobileView !== "graph" ? " mobile-panel-hidden" : ""}`} defaultSize="61.54%" minSize={280}>
-          <GraphPanel
+          <GraphPanel highlightedFileIds={chatGraphTarget === `${workspaceId}:${repository.revision}:${chatClearAllVersion}:${chatClearVersions[workspaceId] ?? 0}` ? chatGraphIds : []} onAnalyze={(ids, label) => { setChatOpen(true); setChatIntent(previous => ({ id: previous.id + 1, mode: "question", sessionId: repository.persistenceSessionId, draft: `请分析这些静态依赖关系：${label}。请区分静态引用与推断。`, attachments: ids.map(id => ({ fileId: id, contentHash: filesById.get(id)?.contentHash ?? "" })) })); }}
           mobileView={mobileView}
           directory={graphDirectory}
           directories={graphDirectories}
@@ -2214,20 +1494,20 @@ function AppShell() {
           filesById={filesById}
           mobileView={mobileView}
           detailTab={detailTab}
-          questionStorageBusy={savedDataClearBusy}
-          questionClearVersion={questionClearVersion}
           savedDataClearGeneration={savedDataClearGeneration}
           savedDataClearBusy={savedDataClearBusy}
-          questionExtraFileIds={questionExtraFileIds}
-          onClearQuestionExtraFiles={() => setSearchQuestionScope({ workspaceId: repositoryWorkspaceId(repository), fileIds: [] })}
-          onDetailTabChange={(tab) => { if (tab === "questions") openAiChat(); else setDetailTab(tab); }}
+          onDetailTabChange={setDetailTab}
           onOpenAi={() => openAiChat("question")}
           onOpenReference={openReference}
           aiSettings={aiSettings}
           onOpenModelSettings={openModelSettingsDialog}
           onOpenRepository={() => { void openRepositoryHome(); }}
           canOpenRepository={guideReady && !repoBusy && !savedDataClearBusy}
-          onPreviewAi={previewAi}
+          onChatSelection={(start, end) => {
+            if (end < 0) { openReference({ fileId: currentFile.id, line: start, endLine: -end }); setDetailTab("guide"); requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('[aria-label="阅读笔记内容"]')?.focus()); return; }
+            setChatOpen(true); setChatIntent(previous => ({ id: previous.id + 1, mode: "question", sessionId: repository.persistenceSessionId, ...(start < 0 ? { draft: "解释这段代码" } : {}), attachments: [{ fileId: currentFile.id, contentHash: currentFile.contentHash ?? "", startLine: Math.abs(start), endLine: end }] }));
+          }}
+          onPreviewAi={(mode) => openAiChat(mode)}
           aiBusy={aiBusy}
           aiPreview={aiPreview}
           aiCandidates={aiCandidates}
@@ -2264,7 +1544,7 @@ function AppShell() {
         <ResizableHandle className="workspace-resize-handle chat-resize-handle" hidden={!chatOpen || !chatDocked} aria-label="调整 AI 栏宽度" title="拖动调整 AI 栏宽度；双击恢复默认" onDoubleClick={() => saveWorkspaceLayoutPreferences({ ...workspaceLayoutPreferences, chatWidth: 360 })} />
         <ResizablePanel id="assistant" minSize={chatOpen && chatDocked ? "320px" : 0} maxSize={chatOpen && chatDocked ? "45%" : 0}>
         <div className="ai-chat-drawer" hidden={!chatOpen}>
-          <AiChatSidebar onRelations={fileId => { setLayoutMode("structure"); selectFile(fileId, "graph"); }} open={chatOpen} repository={repository} currentFile={currentFile} intent={chatIntent} available={!desktopBackendError} clearingTarget={chatClearingTarget} clearVersions={chatClearVersions} clearAllVersion={chatClearAllVersion} extraFileIds={questionExtraFileIds} modelSettings={aiSettingsSaved} onClose={() => setChatOpen(false)} onSettings={openModelSettingsDialog} onOpenRepository={() => { void openRepositoryHome(); }} onOpenReference={openReference} onActivateTour={activateSavedTour} onCompleted={(id) => { if (id !== workspaceId) return; const completionSession = repositorySessionVersion; const completionGeneration = savedDataClearGenerationRef.current; void localWorkspaceProvider.get(id).then((saved) => { if (saved.persistenceReady === false || savedDataClearActiveRef.current || completionGeneration !== savedDataClearGenerationRef.current || completionSession !== settingsSessionRef.current.sessionVersion || repository.id !== settingsSessionRef.current.repositoryId) return; setAiResultsByFile((previous) => { const next = new Map(previous); for (const [fileId, result] of Object.entries(saved.aiResults)) next.set(`${id}:${fileId}`, result as AiResultRecord); return next; }); setSavedToursByWorkspace((previous) => { const next = new Map(previous); const journal = readingArtifactJournals.current.get(id) ?? createReadingArtifactJournal<ReadingNote, AiRouteRecord>(); const merged = applyReadingArtifactJournal(saved.savedTours ?? [], journal, "tours"); next.set(id, merged); savedToursRef.current = next; return next; }); }).catch(() => {}); }} />
+          <AiChatSidebar onShowGraph={ids => { setChatGraphTarget(`${workspaceId}:${repository.revision}:${chatClearAllVersion}:${chatClearVersions[workspaceId] ?? 0}`); setChatGraphIds(ids); setLayoutMode("structure"); setMobileView("graph"); }} savedTourSignatures={(savedToursByWorkspace.get(workspaceId) ?? []).map(route => route.signature)} onSaveTour={route => saveTours([...(savedToursRef.current.get(workspaceId) ?? []).filter(item => item.signature !== route.signature), route])} onRelations={fileId => { setLayoutMode("structure"); selectFile(fileId, "graph"); }} open={chatOpen} repository={repository} currentFile={currentFile} intent={chatIntent} available={!desktopBackendError} clearingTarget={chatClearingTarget} clearVersions={chatClearVersions} clearAllVersion={chatClearAllVersion} extraFileIds={questionExtraFileIds} modelSettings={chatModelSettings} onClose={() => setChatOpen(false)} onSettings={openModelSettingsDialog} onOpenRepository={() => { void openRepositoryHome(); }} onOpenReference={openReference} onActivateTour={activateSavedTour} onCompleted={(id) => { if (id !== workspaceId) return; const completionSession = repositorySessionVersion; const completionGeneration = savedDataClearGenerationRef.current; void localWorkspaceProvider.get(id).then((saved) => { if (saved.persistenceReady === false || savedDataClearActiveRef.current || completionGeneration !== savedDataClearGenerationRef.current || completionSession !== settingsSessionRef.current.sessionVersion || repository.id !== settingsSessionRef.current.repositoryId) return; setAiResultsByFile((previous) => { const next = new Map(previous); for (const [fileId, result] of Object.entries(saved.aiResults)) next.set(`${id}:${fileId}`, result as AiResultRecord); return next; }); setSavedToursByWorkspace((previous) => { const next = new Map(previous); const journal = readingArtifactJournals.current.get(id) ?? createReadingArtifactJournal<ReadingNote, AiRouteRecord>(); const merged = applyReadingArtifactJournal(saved.savedTours ?? [], journal, "tours"); next.set(id, merged); savedToursRef.current = next; return next; }); }).catch(() => {}); }} />
         </div>
         </ResizablePanel></ResizablePanelGroup></div>
       </section>

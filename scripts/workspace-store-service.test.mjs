@@ -69,7 +69,7 @@ test("real local service reports incomplete clear and succeeds after the owned c
   await rm(blockedCopy, { recursive: true, force: true });
   const retryResponse = await clear();
   assert.equal(retryResponse.status, 200);
-  assert.deepEqual(await retryResponse.json(), { ok: true });
+  assert.deepEqual(await retryResponse.json(), { ok: true, cleared: { model: true, workspace: true, copies: true } });
   assert.deepEqual(await readdir(userData), ["workspace-v1.json"]);
   const saved = JSON.parse(await readFile(path.join(userData, "workspace-v1.json"), "utf8"));
   assert.doesNotMatch(JSON.stringify(saved), /Saved answer|private content/);

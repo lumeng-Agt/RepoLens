@@ -1,3 +1,6 @@
+import { extractAll } from "@electron/asar";
+import os from "node:os";
+import { mkdtemp, rm } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -26,7 +29,11 @@ for (const name of names.sort()) {
 await writeFile(path.join(releaseDirectory, "SHA256SUMS.txt"), `${lines.join("\n")}\n`, "utf8");
 
 const { sourceCommit, workingTreeDirty } = getGitProvenance(root);
-const { sourceTreeSha256, sourceFiles } = await hashPackagedApplication(root);
+const extracted = await mkdtemp(path.join(os.tmpdir(), "repolens-manifest-"));
+let packaged;
+try { extractAll(path.join(releaseDirectory, "win-unpacked", "resources", "app.asar"), extracted); packaged = await hashPackagedApplication(extracted, { actual: true }); }
+finally { await rm(extracted, { recursive: true, force: true }); }
+const { sourceTreeSha256, sourceFiles } = packaged;
 const { sourceInputsSha256, sourceInputs } = await hashBuildInputs(root);
 const appPackage = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
 const electronPackage = JSON.parse(await readFile(path.join(root, "node_modules", "electron", "package.json"), "utf8"));
@@ -37,6 +44,7 @@ const manifest = {
   workingTreeDirty,
   sourceTreeSha256,
   sourceFiles,
+  packagedArchiveSha256: createHash("sha256").update(await readFile(path.join(releaseDirectory, "win-unpacked", "resources", "app.asar"))).digest("hex"),
   sourceInputsSha256,
   sourceInputs,
   nodeVersion: process.version,

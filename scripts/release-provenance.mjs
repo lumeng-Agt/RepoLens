@@ -3,39 +3,30 @@ import { execFileSync } from "node:child_process";
 import { readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 
-const APPLICATION_ROOTS = [
-  "desktop/main.mjs",
-  "desktop/model-settings.mjs",
-  "desktop/preload.cjs",
-  "desktop/security-policy.mjs",
-  "desktop/renderer",
-  "data",
-  "scripts/local-server.mjs",
-  "package.json",
-];
+const APPLICATION_ROOTS = ["desktop", "data", "scripts/local-server.mjs", "package.json"];
 const BUILD_INPUT_ROOTS = [
-  "app", "build", "components", "data", "desktop", "fixtures", "scripts",
-  "package.json", "package-lock.json", "tsconfig.json", "vite.config.ts",
+  "hooks", "lib", "public", "vendor", "app", "build", "components", "data", "desktop", "fixtures", "scripts",
+  ".npmrc", "next.config.ts", "next-env.d.ts", "cloudflare-env.d.ts", "components.json", "THIRD-PARTY-NOTICES.md", "package.json", "package-lock.json", "tsconfig.json", "vite.config.ts",
   "desktop.vite.config.mjs", "postcss.config.mjs", "eslint.config.mjs", "wrangler.jsonc",
 ];
 
-async function visit(root, relativePath, output) {
+async function visit(root, relativePath, output, includeTests = false) {
   const absolutePath = path.join(root, relativePath);
   const entries = await readdir(absolutePath, { withFileTypes: true });
   entries.sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
   for (const entry of entries) {
     const childPath = path.join(relativePath, entry.name);
-    if (entry.isDirectory()) await visit(root, childPath, output);
-    else if (entry.isFile() && !/\.test\.[^.]+$/.test(entry.name)) output.push(childPath);
+    if (entry.isDirectory()) await visit(root, childPath, output, includeTests);
+    else if (entry.isFile() && (includeTests || !/\.test\.[^.]+$/.test(entry.name))) output.push(childPath);
   }
 }
 
-export async function hashPackagedApplication(root) {
+export async function hashPackagedApplication(root, { actual = false } = {}) {
   const paths = [];
-  for (const relativePath of APPLICATION_ROOTS) {
+  for (const relativePath of actual ? await readdir(root) : APPLICATION_ROOTS) {
     try {
       const entries = await readdir(path.join(root, relativePath), { withFileTypes: true });
-      if (entries.length) await visit(root, relativePath, paths);
+      if (entries.length) await visit(root, relativePath, paths, actual);
     } catch (error) {
       if (error.code === "ENOTDIR") paths.push(relativePath);
       else if (error.code !== "ENOENT") throw error;
@@ -84,4 +75,13 @@ export function getGitProvenance(root) {
 
 export function canPromoteRelease({ workingTreeDirty, candidateOnly = false }) {
   return workingTreeDirty === false && candidateOnly === false;
+}
+
+export async function verifyCandidateArtifacts(directory, artifacts) {
+  if (!Array.isArray(artifacts) || !artifacts.length) throw new Error("候选包缺少校验清单。");
+  for (const artifact of artifacts) {
+    if (typeof artifact.name !== "string" || path.basename(artifact.name) !== artifact.name) throw new Error("候选文件名无效。");
+    const content = await readFile(path.join(directory, artifact.name));
+    if (content.length !== artifact.sizeBytes || createHash("sha256").update(content).digest("hex") !== artifact.sha256) throw new Error(`候选文件与清单不一致：${artifact.name}`);
+  }
 }

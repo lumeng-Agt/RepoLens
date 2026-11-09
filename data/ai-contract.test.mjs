@@ -1,8 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { AiPreviewResponseSchema, AiQuestionAnswerSchema, AiRouteSchema, createAiGenerationEnvelope } from "./ai-contract.mjs";
+import { AiGenerationEnvelopeSchema, AiStreamEventSchema, AiPreviewResponseSchema, AiQuestionAnswerSchema, AiRouteSchema, createAiGenerationEnvelope } from "./ai-contract.mjs";
 
 const context = { repositoryId: "repo-a", revision: "rev-a", entryFileId: "src/main.ts", mode: "explanation" };
+
+test('only source-free conversation previews allow an absent entry file', () => {
+  const preview = {id:'p',repositoryId:'repo',revision:'r',entryFileId:'',mode:'question',conversation:true,baseUrl:'https://mock.example',model:'mock',files:[],characters:2,expiresAt:1};
+  assert.equal(AiPreviewResponseSchema.safeParse({scopeRequired:false,preview}).success,true);
+  for(const change of [{conversation:false},{mode:'explanation'},{files:[{fileId:'a.ts',startLine:1,endLine:1,contentHash:'h'}]}]) assert.equal(AiPreviewResponseSchema.safeParse({scopeRequired:false,preview:{...preview,...change}}).success,false);
+  assert.equal(AiGenerationEnvelopeSchema.safeParse({...context,entryFileId:'',mode:'question',result:{answer:'hello'},cached:false}).success,true);
+  assert.equal(AiGenerationEnvelopeSchema.safeParse({...context,entryFileId:'',result:{},cached:false}).success,false);
+});
 
 test("cached and generated AI results share one strict response envelope", () => {
   const generated = createAiGenerationEnvelope({ role: "说明", keyPoints: [], references: [] }, context, false);
@@ -47,4 +55,13 @@ test("question claim evidence indices must refer to the returned reference list"
   assert.equal(AiQuestionAnswerSchema.safeParse(answer).success, true);
   assert.equal(AiQuestionAnswerSchema.safeParse({ ...answer, claims: [{ text: "Unsupported claim", referenceIndices: [1] }] }).success, false);
   assert.equal(AiQuestionAnswerSchema.safeParse({ ...answer, insufficientEvidence: true, references: [], claims: answer.claims }).success, false);
+});
+
+
+test("route and transcript persistence are separate in JSON and SSE completion envelopes", () => {
+  const envelope = { ...createAiGenerationEnvelope({ title: "Route", steps: [] }, { ...context, mode: "route" }, false), chatPersisted: true, routePersisted: false, warning: "Route capacity reached" };
+  assert.equal(AiGenerationEnvelopeSchema.parse(envelope).routePersisted, false);
+  const event = AiStreamEventSchema.parse({ type: "complete", requestId: "preview", repositoryId: context.repositoryId, revision: context.revision, result: envelope });
+  assert.equal(event.result.chatPersisted, true);
+  assert.equal(event.result.routePersisted, false);
 });

@@ -1,0 +1,426 @@
+{
+  "algorithmSha256": "a1c59a2798b49baa5a4e9909f3332fb2a34cd4fd6301ff03ba35ef6f7c90c728",
+  "review": [
+    {
+      "id": "undici-1",
+      "required": [
+        {
+          "path": "lib/api/abort-signal.js",
+          "startLine": 9,
+          "endLine": 16
+        }
+      ],
+      "auxiliary": [
+        {
+          "path": "lib/api/abort-signal.js",
+          "startLine": 41,
+          "endLine": 54,
+          "reason": "目标定义包含该标识符的调用表达式；辅助理解，不代表已验证运行时调用。"
+        }
+      ],
+      "note": "完整本地定义按源码核对；未列出的分派与外部依赖不计完整行为覆盖。",
+      "sourceSha256": "46ac3527affb69036384c8baec5bf34ba567adb336921c7a62e8f471bb827f37"
+    },
+    {
+      "id": "undici-2",
+      "required": [
+        {
+          "path": "lib/api/abort-signal.js",
+          "startLine": 18,
+          "endLine": 39
+        }
+      ],
+      "auxiliary": [
+        {
+          "path": "lib/api/abort-signal.js",
+          "startLine": 9,
+          "endLine": 16,
+          "reason": "目标定义包含该标识符的调用表达式；辅助理解，不代表已验证运行时调用。"
+        }
+      ],
+      "note": "完整本地定义按源码核对；未列出的分派与外部依赖不计完整行为覆盖。",
+      "sourceSha256": "46ac3527affb69036384c8baec5bf34ba567adb336921c7a62e8f471bb827f37"
+    },
+    {
+      "id": "undici-3",
+      "required": [
+        {
+          "path": "lib/api/abort-signal.js",
+          "startLine": 41,
+          "endLine": 54
+        }
+      ],
+      "auxiliary": [],
+      "note": "完整本地定义按源码核对；未列出的分派与外部依赖不计完整行为覆盖。",
+      "sourceSha256": "46ac3527affb69036384c8baec5bf34ba567adb336921c7a62e8f471bb827f37"
+    },
+    {
+      "id": "undici-4",
+      "required": [
+        {
+          "path": "lib/api/api-request.js",
+          "startLine": 221,
+          "endLine": 241
+        }
+      ],
+      "auxiliary": [],
+      "note": "完整本地定义按源码核对；未列出的分派与外部依赖不计完整行为覆盖。",
+      "sourceSha256": "f655a12aab11d2463cd947eff9b483fdaa22992a607b3c733479535c4ce6e662"
+    },
+    {
+      "id": "undici-5",
+      "required": [
+        {
+          "path": "lib/api/api-stream.js",
+          "startLine": 248,
+          "endLine": 268
+        }
+      ],
+      "auxiliary": [],
+      "note": "完整本地定义按源码核对；未列出的分派与外部依赖不计完整行为覆盖。",
+      "sourceSha256": "1fe980698a643db9f228137c46fe07751bdd021bc5a1feafae88c51cc107d356"
+    },
+    {
+      "id": "undici-6",
+      "required": [
+        {
+          "path": "lib/core/util.js",
+          "startLine": 161,
+          "endLine": 233
+        }
+      ],
+      "auxiliary": [
+        {
+          "path": "lib/core/util.js",
+          "startLine": 125,
+          "endLine": 132,
+          "reason": "目标定义包含该标识符的调用表达式；辅助理解，不代表已验证运行时调用。"
+        }
+      ],
+      "note": "完整本地定义按源码核对；未列出的分派与外部依赖不计完整行为覆盖。",
+      "sourceSha256": "f66443ee69b3ae34ea7ebfab4df71a0b87ac990769aaf76b278739dee8aedb7c"
+    },
+    {
+      "id": "undici-7",
+      "required": [
+        {
+          "path": "lib/core/util.js",
+          "startLine": 332,
+          "endLine": 347
+        }
+      ],
+      "auxiliary": [
+        {
+          "path": "lib/core/util.js",
+          "startLine": 79,
+          "endLine": 81,
+          "reason": "目标定义包含该标识符的调用表达式；辅助理解，不代表已验证运行时调用。"
+        },
+        {
+          "path": "lib/core/util.js",
+          "startLine": 87,
+          "endLine": 89,
+          "reason": "目标定义包含该标识符的调用表达式；辅助理解，不代表已验证运行时调用。"
+        }
+      ],
+      "note": "完整本地定义按源码核对；未列出的分派与外部依赖不计完整行为覆盖。",
+      "sourceSha256": "f66443ee69b3ae34ea7ebfab4df71a0b87ac990769aaf76b278739dee8aedb7c"
+    },
+    {
+      "id": "undici-8",
+      "required": [
+        {
+          "path": "lib/core/util.js",
+          "startLine": 362,
+          "endLine": 388
+        }
+      ],
+      "auxiliary": [
+        {
+          "path": "lib/core/util.js",
+          "startLine": 79,
+          "endLine": 81,
+          "reason": "目标定义包含该标识符的调用表达式；辅助理解，不代表已验证运行时调用。"
+        },
+        {
+          "path": "lib/core/util.js",
+          "startLine": 353,
+          "endLine": 355,
+          "reason": "目标定义包含该标识符的调用表达式；辅助理解，不代表已验证运行时调用。"
+        }
+      ],
+      "note": "完整本地定义按源码核对；未列出的分派与外部依赖不计完整行为覆盖。",
+      "sourceSha256": "f66443ee69b3ae34ea7ebfab4df71a0b87ac990769aaf76b278739dee8aedb7c"
+    },
+    {
+      "id": "requests-1",
+      "required": [
+        {
+          "path": "src/requests/sessions.py",
+          "startLine": 134,
+          "endLine": 152
+        }
+      ],
+      "auxiliary": [],
+      "note": "完整本地定义按源码核对；未列出的分派与外部依赖不计完整行为覆盖。",
+      "sourceSha256": "3d2089736ced93b2b405624a943f866d22652b17df06a85eb010f86272fc3e7d"
+    },
+    {
+      "id": "requests-2",
+      "required": [
+        {
+          "path": "src/requests/sessions.py",
+          "startLine": 511,
+          "endLine": 555
+        }
+      ],
+      "auxiliary": [
+        {
+          "path": "src/requests/sessions.py",
+          "startLine": 76,
+          "endLine": 105,
+          "reason": "目标定义包含该标识符的调用表达式；辅助理解，不代表已验证运行时调用。"
+        },
+        {
+          "path": "src/requests/sessions.py",
+          "startLine": 108,
+          "endLine": 124,
+          "reason": "目标定义包含该标识符的调用表达式；辅助理解，不代表已验证运行时调用。"
+        }
+      ],
+      "note": "完整本地定义按源码核对；未列出的分派与外部依赖不计完整行为覆盖。",
+      "sourceSha256": "3d2089736ced93b2b405624a943f866d22652b17df06a85eb010f86272fc3e7d"
+    },
+    {
+      "id": "requests-3",
+      "required": [
+        {
+          "path": "src/requests/sessions.py",
+          "startLine": 76,
+          "endLine": 105
+        }
+      ],
+      "auxiliary": [],
+      "note": "完整本地定义按源码核对；未列出的分派与外部依赖不计完整行为覆盖。",
+      "sourceSha256": "3d2089736ced93b2b405624a943f866d22652b17df06a85eb010f86272fc3e7d"
+    },
+    {
+      "id": "requests-4",
+      "required": [
+        {
+          "path": "src/requests/models.py",
+          "startLine": 483,
+          "endLine": 563
+        }
+      ],
+      "auxiliary": [
+        {
+          "path": "src/requests/utils.py",
+          "startLine": 704,
+          "endLine": 723,
+          "reason": "目标定义包含该标识符的调用表达式；辅助理解，不代表已验证运行时调用。"
+        }
+      ],
+      "note": "完整本地定义按源码核对；未列出的分派与外部依赖不计完整行为覆盖。",
+      "sourceSha256": "a3351c3c12a86bf5ed211533875350bc4791e9327a685f8c19ba54343e471e26"
+    },
+    {
+      "id": "requests-5",
+      "required": [
+        {
+          "path": "src/requests/models.py",
+          "startLine": 1144,
+          "endLine": 1171
+        }
+      ],
+      "auxiliary": [],
+      "note": "完整本地定义按源码核对；未列出的分派与外部依赖不计完整行为覆盖。",
+      "sourceSha256": "a3351c3c12a86bf5ed211533875350bc4791e9327a685f8c19ba54343e471e26"
+    },
+    {
+      "id": "requests-6",
+      "required": [
+        {
+          "path": "src/requests/adapters.py",
+          "startLine": 634,
+          "endLine": 748
+        }
+      ],
+      "auxiliary": [
+        {
+          "path": "src/requests/adapters.py",
+          "startLine": 455,
+          "endLine": 510,
+          "reason": "目标定义包含该标识符的调用表达式；辅助理解，不代表已验证运行时调用。"
+        }
+      ],
+      "note": "完整本地定义按源码核对；未列出的分派与外部依赖不计完整行为覆盖。",
+      "sourceSha256": "cc9b1b02694fee0353481fbad84fe3ddbedec4441dba54df7914c63f2aa85937"
+    },
+    {
+      "id": "requests-7",
+      "required": [
+        {
+          "path": "src/requests/utils.py",
+          "startLine": 873,
+          "endLine": 882
+        }
+      ],
+      "auxiliary": [
+        {
+          "path": "src/requests/utils.py",
+          "startLine": 810,
+          "endLine": 870,
+          "reason": "目标定义包含该标识符的调用表达式；辅助理解，不代表已验证运行时调用。"
+        }
+      ],
+      "note": "完整本地定义按源码核对；未列出的分派与外部依赖不计完整行为覆盖。",
+      "sourceSha256": "b879cb3f671cf1c28e8ff9b2b02151bcdb8974b4820a514cfdd1f5a038443cd2"
+    },
+    {
+      "id": "requests-8",
+      "required": [
+        {
+          "path": "src/requests/cookies.py",
+          "startLine": 494,
+          "endLine": 528
+        }
+      ],
+      "auxiliary": [],
+      "note": "完整本地定义按源码核对；未列出的分派与外部依赖不计完整行为覆盖。",
+      "sourceSha256": "05d12b965c76f229803e17aef1c9969d712e4f4d0f6a06c05e0a47212fd5b417"
+    },
+    {
+      "id": "cobra-1",
+      "required": [
+        {
+          "path": "command.go",
+          "startLine": 1084,
+          "endLine": 1170
+        }
+      ],
+      "auxiliary": [
+        {
+          "path": "command.go",
+          "startLine": 757,
+          "endLine": 779,
+          "reason": "目标定义包含该标识符的调用表达式；辅助理解，不代表已验证运行时调用。"
+        }
+      ],
+      "note": "完整本地定义按源码核对；未列出的分派与外部依赖不计完整行为覆盖。",
+      "sourceSha256": "f79613721ad04c9b438dfb30fe0ac3deca85c487658b0aa04a1ae6e4395bfd90"
+    },
+    {
+      "id": "cobra-2",
+      "required": [
+        {
+          "path": "command.go",
+          "startLine": 757,
+          "endLine": 779
+        }
+      ],
+      "auxiliary": [
+        {
+          "path": "command.go",
+          "startLine": 674,
+          "endLine": 710,
+          "reason": "目标定义包含该标识符的调用表达式；辅助理解，不代表已验证运行时调用。"
+        }
+      ],
+      "note": "完整本地定义按源码核对；未列出的分派与外部依赖不计完整行为覆盖。",
+      "sourceSha256": "f79613721ad04c9b438dfb30fe0ac3deca85c487658b0aa04a1ae6e4395bfd90"
+    },
+    {
+      "id": "cobra-3",
+      "required": [
+        {
+          "path": "command.go",
+          "startLine": 275,
+          "endLine": 277
+        }
+      ],
+      "auxiliary": [],
+      "note": "完整本地定义按源码核对；未列出的分派与外部依赖不计完整行为覆盖。",
+      "sourceSha256": "f79613721ad04c9b438dfb30fe0ac3deca85c487658b0aa04a1ae6e4395bfd90"
+    },
+    {
+      "id": "cobra-4",
+      "required": [
+        {
+          "path": "command.go",
+          "startLine": 1172,
+          "endLine": 1177
+        }
+      ],
+      "auxiliary": [
+        {
+          "path": "args.go",
+          "startLine": 82,
+          "endLine": 84,
+          "reason": "目标定义包含该标识符的调用表达式；辅助理解，不代表已验证运行时调用。"
+        }
+      ],
+      "note": "完整本地定义按源码核对；未列出的分派与外部依赖不计完整行为覆盖。",
+      "sourceSha256": "f79613721ad04c9b438dfb30fe0ac3deca85c487658b0aa04a1ae6e4395bfd90"
+    },
+    {
+      "id": "cobra-5",
+      "required": [
+        {
+          "path": "args.go",
+          "startLine": 87,
+          "endLine": 94
+        }
+      ],
+      "auxiliary": [],
+      "note": "完整本地定义按源码核对；未列出的分派与外部依赖不计完整行为覆盖。",
+      "sourceSha256": "15b870d1e8a0a10341675ddee8e20bef92a21883257b6b3b11110944a573a2e7"
+    },
+    {
+      "id": "cobra-6",
+      "required": [
+        {
+          "path": "flag_groups.go",
+          "startLine": 33,
+          "endLine": 45
+        }
+      ],
+      "auxiliary": [],
+      "note": "完整本地定义按源码核对；未列出的分派与外部依赖不计完整行为覆盖。",
+      "sourceSha256": "3b0572e1fc2fc6e8ef62319b4294cdda86259fb0b1afebc18b03fa643e431251"
+    },
+    {
+      "id": "cobra-7",
+      "required": [
+        {
+          "path": "completions.go",
+          "startLine": 186,
+          "endLine": 197
+        }
+      ],
+      "auxiliary": [
+        {
+          "path": "command.go",
+          "startLine": 1844,
+          "endLine": 1852,
+          "reason": "目标定义包含该标识符的调用表达式；辅助理解，不代表已验证运行时调用。"
+        }
+      ],
+      "note": "完整本地定义按源码核对；未列出的分派与外部依赖不计完整行为覆盖。",
+      "sourceSha256": "b28a4f6c509acde7367323e835cfb4f4939fe656dd3214320d76f53e91743c89"
+    },
+    {
+      "id": "cobra-8",
+      "required": [
+        {
+          "path": "cobra.go",
+          "startLine": 99,
+          "endLine": 101
+        }
+      ],
+      "auxiliary": [],
+      "note": "完整本地定义按源码核对；未列出的分派与外部依赖不计完整行为覆盖。",
+      "sourceSha256": "aae7502e789e42469bcb2fc110af87fd02451d3b509c5b0bed782ada17338c5f"
+    }
+  ]
+}

@@ -1,3 +1,27 @@
+import ts from "typescript";
+
+function definitionRanges(file, source) {
+  const existing = file.symbolDetails ?? [];
+  if (!/\.[cm]?[jt]sx?$/.test(file.path)) return existing;
+  const tree = ts.createSourceFile(file.path, source, ts.ScriptTarget.Latest, true);
+  const definitions = [...existing];
+  const visit = node => {
+    if (ts.isFunctionExpression(node) || ts.isArrowFunction(node) || ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node)) {
+      let name = node.name?.getText(tree);
+      if (ts.isBinaryExpression(node.parent) && node.parent.right === node) name = node.parent.left.getText(tree).split('.').at(-1);
+      if (!name && ts.isVariableDeclaration(node.parent)) name = node.parent.name.getText(tree);
+      if (name) {
+        const startLine = tree.getLineAndCharacterOfPosition(node.getStart(tree)).line + 1;
+        const endLine = tree.getLineAndCharacterOfPosition(node.end).line + 1;
+        if (!existing.some(d => d.name === name) && !definitions.some(d => d.name === name && d.startLine === startLine)) definitions.push({name, startLine, endLine});
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(tree);
+  return definitions;
+}
+
 // Small, reviewed query expansions. These are retrieval hints, never semantic evidence.
 const TERMS = [
   ["取消", "cancel", "abort"], ["超时", "timeout", "deadline"],
@@ -51,7 +75,7 @@ export function rankQuestionCandidates({ files, dependencies, sourceById, entryF
     }
     if (terms.some(t => t.kind !== "expansion" && metadata.includes(t.term))) reasons.push("路径、说明或符号匹配问题");
     if (terms.some(t => t.kind !== "expansion" && source.toLowerCase().includes(t.term))) reasons.push("源码包含问题关键词");
-    const ranges = (file.symbolDetails ?? []).map(symbol => {
+    const ranges = definitionRanges(file, source).map(symbol => {
       const name = `${symbol.name.toLowerCase()} ${splitIdentifier(symbol.name).join(" ")}`;
       const body = lines.slice(symbol.startLine - 1, symbol.endLine).join("\n").toLowerCase();
       const nameMatch = terms.some(t => t.kind === "exact" && symbol.name.toLowerCase() === t.term);
@@ -71,7 +95,7 @@ export function rankQuestionCandidates({ files, dependencies, sourceById, entryF
     }
     if (direct.has(file.id)) reasons.push(direct.get(file.id));
     if (!reasons.length) reasons.push("未发现直接匹配，可手动确认");
-    return { id: file.id, score: matchScore + (file.id === entryFileId ? 3 : direct.has(file.id) ? 1 : 0), matchScore, reasons: [...new Set(reasons)], matches, ...(suggestedRange ? { suggestedRange } : {}), rangeRequired: ambiguous, alternativeRanges: ranges.filter(r => r !== best).map(({ startLine, endLine, name }) => ({ startLine, endLine, name })) };
+    return { id: file.id, score: matchScore + (ranges.some(r => r.exactCase) ? 25 : 0) + (file.id === entryFileId ? 3 : direct.has(file.id) ? 1 : 0), matchScore, reasons: [...new Set(reasons)], matches, ...(suggestedRange ? { suggestedRange } : {}), rangeRequired: ambiguous, alternativeRanges: ranges.filter(r => r !== best).map(({ startLine, endLine, name }) => ({ startLine, endLine, name })) };
   });
   const byId = new Map(files.map(f => [f.id, f.path ?? f.id]));
   candidates.sort((a, b) => b.score - a.score || byId.get(a.id).localeCompare(byId.get(b.id)));

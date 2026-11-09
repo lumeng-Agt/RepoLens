@@ -1,0 +1,10 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {mkdtemp,mkdir,writeFile,access,rm} from 'node:fs/promises';
+import os from 'node:os';import path from 'node:path';
+import {createModelSettingsStore} from '../desktop/model-settings.mjs';
+import {hashBuildInputs,hashPackagedApplication} from '../scripts/release-provenance.mjs';
+import {searchRepositoryContent} from './repository-search.mjs';
+test('clear encrypted settings does not require encryption availability',async()=>{const dir=await mkdtemp(path.join(os.tmpdir(),'rl-clear-'));try{await writeFile(path.join(dir,'model-settings.enc'),'fake');await writeFile(path.join(dir,'model-settings.enc.tmp'),'fake pending key');await createModelSettingsStore(dir,{isEncryptionAvailable:()=>false}).save(null);await assert.rejects(access(path.join(dir,'model-settings.enc')));await assert.rejects(access(path.join(dir,'model-settings.enc.tmp')));}finally{await rm(dir,{recursive:true,force:true});}});
+test('provenance detects hook and packaged editor changes',async()=>{const dir=await mkdtemp(path.join(os.tmpdir(),'rl-hash-'));try{await mkdir(path.join(dir,'hooks'));await mkdir(path.join(dir,'desktop'));await writeFile(path.join(dir,'hooks/a.ts'),'1');await writeFile(path.join(dir,'desktop/editor-preference.mjs'),'1');const a=await hashBuildInputs(dir),p=await hashPackagedApplication(dir);await writeFile(path.join(dir,'hooks/a.ts'),'2');await writeFile(path.join(dir,'desktop/editor-preference.mjs'),'2');assert.notEqual(a.sourceInputsSha256,(await hashBuildInputs(dir)).sourceInputsSha256);assert.notEqual(p.sourceTreeSha256,(await hashPackagedApplication(dir)).sourceTreeSha256);}finally{await rm(dir,{recursive:true,force:true});}});
+test('search cap reports visited files rather than candidate count',async()=>{const files=Array.from({length:60},(_,i)=>({id:String(i).padStart(2,'0'),path:String(i).padStart(2,'0')}));const r=await searchRepositoryContent({files,sourceById:new Map(files.map(f=>[f.id,'hit\n'.repeat(250)])),input:{query:'hit',revision:'r'}});assert.equal(r.filesSearched,40);assert.equal(r.candidateFiles,60);});

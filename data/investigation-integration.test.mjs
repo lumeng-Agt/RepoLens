@@ -7,6 +7,8 @@ import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { createInvestigation } from "./investigation.mjs";
+import { prepareAiContext } from "./ai-context.mjs";
+import { scanRepository } from "./localRepository.mjs";
 import { rankInvestigationCandidates } from "./question-retrieval.mjs";
 
 test("requirement retrieval uses real matches across JS/TS, Python and Go, with stable explicit reasons", () => {
@@ -52,6 +54,15 @@ test("real service prepares investigation without calling model, validates outpu
   assert.equal(chinesePreview.status, 200, JSON.stringify(chineseScope));
   assert.ok(chineseScope.preview.files.some(file => file.fileId === "src/store.ts"));
   assert.equal(modelCalls, 0, "Chinese question preview only retrieves local source");
+  const scan = await scanRepository(repo);
+  const question = "给 cancelTask 增加超时";
+  const ranking = rankInvestigationCandidates({files:scan.snapshot.files,dependencies:scan.snapshot.dependencies,sourceById:scan.sourceCache,question,excludedFileIds:["cleanup.ts"]});
+  const prepared = prepareAiContext({candidates:ranking.candidates.map(c=>c.id),rankedCandidates:ranking.candidates,sourceById:scan.sourceCache,question,retrievalInsufficient:ranking.retrievalInsufficient});
+  const actualResponse = await request("/api/ai/preview", {repositoryId:opened.id,fileId:"cleanup.ts",mode:"investigation",question,excludedFileIds:["cleanup.ts"]});
+  const actual = await actualResponse.json();
+  assert.equal(actualResponse.status, prepared.scopeRequired ? 413 : 200);
+  assert.deepEqual(actual.preview.files.map(({fileId,startLine,endLine})=>({fileId,startLine,endLine})), prepared.sources.map(({fileId,startLine,endLine})=>({fileId,startLine,endLine})));
+  assert.equal(modelCalls, 0);
   const previewResponse = await request("/api/ai/preview", { repositoryId: opened.id, fileId: "cleanup.ts", mode: "investigation", question: "给 cancelTask 增加超时", excludedFileIds: ["cleanup.ts"], fileIds: ["cancel.ts"] });
   const value = await previewResponse.json(); assert.equal(previewResponse.status, 200, JSON.stringify(value)); assert.equal(modelCalls, 0);
   assert.deepEqual(value.preview.files.map(file => file.fileId), ["cancel.ts"]); assert.equal(value.preview.mode, "investigation");

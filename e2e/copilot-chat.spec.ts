@@ -48,7 +48,7 @@ test("chat streams into its own scroll area, freezes context, preserves drafts a
     await page.getByRole("treeitem", { name: "main.ts", exact: true }).click();
     await page.getByRole("button", { name: "打开 AI 聊天", exact: true }).click();
     const input = page.getByLabel("提问或追问", { exact: true }); const send = page.getByRole("button", { name: "发送", exact: true });
-    await expect(page.getByText("想了解这份代码的哪一部分？")).toBeVisible();
+    await expect(page.getByText("有什么想问的？")).toBeVisible();
     await expect.poll(async () => (await input.boundingBox())!.height).toBeLessThanOrEqual(80);
     await page.screenshot({ path: ".artifacts/copilot-chat/empty-1440.png" });
     await input.fill("解释 answer"); await expect(send).toBeEnabled(); expect(calls).toBe(0);

@@ -5,6 +5,8 @@ export type WorkspaceLayoutPreferences = {
 };
 
 export const DEFAULT_WORKSPACE_LAYOUT: WorkspaceLayoutPreferences;
+export function afterLayoutMeasurements(callback: () => void): () => void;
+export function observeWorkspacePanelSizes(targets: Map<Element, () => void>): () => void;
 export function normalizeWorkspaceLayout(value: unknown): WorkspaceLayoutPreferences | null;
 export function workspaceOuterLayout(preferences: unknown, mode: "structure" | "reading"): Record<"files" | "content", number>;
 export function workspaceInnerLayout(preferences: unknown, mode: "structure" | "reading"): Record<"graph" | "details", number>;

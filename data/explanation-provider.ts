@@ -5,11 +5,12 @@ import { localApiOrigin } from "./runtime-config";
 
 const LOCAL_API_ORIGIN = localApiOrigin();
 
+export type AiRefinement = { original: object; instruction: string };
 export type AiMode = "explanation" | "route" | "question" | "investigation";
 export type AiScopeCandidate = { fileId: string; characters: number; lineCount: number; oversizedLines: number[]; reasons?: string[]; alternativeRanges?: { startLine: number; endLine: number; name: string }[]; suggestedRange?: { startLine: number; endLine: number } };
 export type AiLineRange = { startLine: number; endLine: number };
-export type AiPreviewResponse = { scopeRequired: false; preview: AiPreview } | { scopeRequired: true; candidates: AiScopeCandidate[]; maxFiles: number; maxCharacters: number; retrievalInsufficient?: boolean; searchSuggestions?: string[] };
-export type AiGenerationResult = { result: Record<string, unknown>; cached: boolean; revision: string; repositoryId: string; entryFileId: string; mode: AiMode; chatPersisted?: boolean; warning?: string };
+export type AiPreviewResponse = { scopeRequired: false; preview: AiPreview } | { scopeRequired: true; candidates: AiScopeCandidate[]; maxFiles: number; maxCharacters: number; blockers?: string[]; retrievalInsufficient?: boolean; searchSuggestions?: string[] };
+export type AiGenerationResult = { result: Record<string, unknown>; cached: boolean; revision: string; repositoryId: string; entryFileId: string; mode: AiMode; chatPersisted?: boolean; routePersisted?: boolean; warning?: string };
 export type AiChatCompletion = { conversationId: string; userMessageId: string; answerMessageId: string };
 export type AiQuestionHistoryItem = { role: "user" | "assistant"; content: string };
 export type AiStreamEvent = { type: "status" | "text" | "replace" | "complete" | "error"; text?: string; status?: string };
@@ -37,23 +38,23 @@ async function requestPreview(url: string, init?: RequestInit): Promise<AiPrevie
 }
 
 export interface ExplanationProvider {
-  preview(repository: RepositorySnapshot, fileId: string, mode: AiMode, fileIds?: string[], scopePrefix?: string, ranges?: Record<string, AiLineRange>, signal?: AbortSignal, goal?: string): Promise<AiPreviewResponse>;
+  preview(repository: RepositorySnapshot, fileId: string, mode: AiMode, fileIds?: string[], scopePrefix?: string, ranges?: Record<string, AiLineRange>, signal?: AbortSignal, goal?: string, refinement?: AiRefinement): Promise<AiPreviewResponse>;
   generate(preview: AiPreview, signal: AbortSignal, chat?: AiChatCompletion): Promise<AiGenerationResult>;
-  saveSettings(settings: { baseUrl: string; model: string; apiKey: string }): Promise<{ baseUrl: string; model: string; configured: boolean }>;
-  getSettings(): Promise<{ baseUrl: string; model: string; configured: boolean }>;
-  previewInvestigation(repository: RepositorySnapshot, fileId: string, question: string, fileIds: string[] | undefined, ranges: Record<string, AiLineRange>, excludedFileIds: string[], signal?: AbortSignal): Promise<AiPreviewResponse>;
-  previewQuestion(repository: RepositorySnapshot, fileId: string, question: string, history: AiQuestionHistoryItem[], fileIds?: string[], ranges?: Record<string, AiLineRange>, signal?: AbortSignal): Promise<AiPreviewResponse>;
+  saveSettings(settings: { baseUrl: string; model: string; apiKey: string; authMode?: string }): Promise<{ baseUrl: string; model: string; configured: boolean; authMode?: string }>;
+  getSettings(): Promise<{ baseUrl: string; model: string; configured: boolean; authMode?: string }>;
+  previewInvestigation(repository: RepositorySnapshot, fileId: string, question: string, fileIds: string[] | undefined, ranges: Record<string, AiLineRange>, excludedFileIds: string[], signal?: AbortSignal, refinement?: AiRefinement): Promise<AiPreviewResponse>;
+  previewQuestion(repository: RepositorySnapshot, fileId: string, question: string, history: AiQuestionHistoryItem[], fileIds?: string[], ranges?: Record<string, AiLineRange>, signal?: AbortSignal, conversation?: boolean): Promise<AiPreviewResponse>;
 }
 
 export const localExplanationProvider: ExplanationProvider = {
-  preview(repository, fileId, mode, fileIds, scopePrefix, ranges, signal, goal) {
-    return requestPreview(`${LOCAL_API_ORIGIN}/api/ai/preview`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repositoryId: repository.id, fileId, mode, fileIds, scopePrefix, ranges, goal }), signal });
+  preview(repository, fileId, mode, fileIds, scopePrefix, ranges, signal, goal, refinement) {
+    return requestPreview(`${LOCAL_API_ORIGIN}/api/ai/preview`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repositoryId: repository.id, fileId, mode, fileIds, scopePrefix, ranges, goal, refinement }), signal });
   },
-  previewInvestigation(repository, fileId, question, fileIds, ranges, excludedFileIds, signal) {
-    return requestPreview(`${LOCAL_API_ORIGIN}/api/ai/preview`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repositoryId: repository.id, fileId, mode: "investigation", question, fileIds, ranges, excludedFileIds }), signal });
+  previewInvestigation(repository, fileId, question, fileIds, ranges, excludedFileIds, signal, refinement) {
+    return requestPreview(`${LOCAL_API_ORIGIN}/api/ai/preview`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repositoryId: repository.id, fileId, mode: "investigation", question, fileIds, ranges, excludedFileIds, refinement }), signal });
   },
-  previewQuestion(repository, fileId, question, history, fileIds, ranges, signal) {
-    return requestPreview(`${LOCAL_API_ORIGIN}/api/ai/question/preview`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repositoryId: repository.id, fileId, question, history, fileIds, ranges }), signal });
+  previewQuestion(repository, fileId, question, history, fileIds, ranges, signal, conversation = false) {
+    return requestPreview(`${LOCAL_API_ORIGIN}/api/ai/question/preview`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repositoryId: repository.id, fileId, question, history, fileIds, ranges, ...(conversation ? { conversation: true } : {}) }), signal });
   },
   generate(preview, signal, chat) {
     return request(`${LOCAL_API_ORIGIN}/api/ai/generate`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ previewId: preview.id, ...(chat ? { chat } : {}) }), signal })

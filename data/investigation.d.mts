@@ -3,6 +3,7 @@ import type { Investigation, InvestigationItem, InvestigationResult, RepositoryS
 export const InvestigationSchema: z.ZodTypeAny;
 export const InvestigationItemSchema: z.ZodTypeAny;
 export const InvestigationResultSchema: z.ZodTypeAny;
+export function replaceInvestigationResult(latest: Investigation, replacement: Investigation, now?: number): Investigation;
 export function createInvestigation(input: { result: InvestigationResult; question: string; repository: RepositorySnapshot; contextFiles: Investigation["contextFiles"]; excludedFileIds?: string[]; id?: string; now?: number }): Investigation;
 export function investigationItemIsStale(item: InvestigationItem, investigation: Investigation, files: FileRecord[]): boolean;
 export function appendInvestigationResult(latest: Investigation, result: InvestigationResult, contextFiles: Investigation["contextFiles"], exclusions: string[], selectionReasons?: Record<string, string[]>, createId?: () => string): Investigation;

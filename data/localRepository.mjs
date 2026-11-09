@@ -4,12 +4,12 @@ import path from "node:path";
 import ts from "typescript";
 import ignore from "ignore";
 import { parsePolyglot } from "./polyglot-parser.mjs";
-import { createRepositoryFileAccess, repositoryPathIsBlocked } from "./repository-files.mjs";
+import { createRepositoryFileAccess, repositoryPathIsBlocked, REPOSITORY_MAX_SOURCE_BYTES, REPOSITORY_MAX_SOURCE_FILES, REPOSITORY_SOURCE_EXTENSIONS } from "./repository-files.mjs";
 
-const SOURCE_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs", ".css", ".scss", ".sass", ".less", ".py", ".pyi", ".go"]);
+const SOURCE_EXTENSIONS = REPOSITORY_SOURCE_EXTENSIONS;
 const TS_RESOLUTION_EXTENSIONS = [".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs", ".css", ".scss", ".sass", ".less"];
-const MAX_FILES = 5000;
-const MAX_BYTES = 1024 * 1024;
+const MAX_FILES = REPOSITORY_MAX_SOURCE_FILES;
+const MAX_BYTES = REPOSITORY_MAX_SOURCE_BYTES;
 const PYTHON_STDLIB = new Set("abc argparse array asyncio base64 bisect builtins calendar cmath collections concurrent contextlib copy csv ctypes dataclasses datetime decimal difflib dis email enum errno faulthandler fnmatch fractions functools gc getpass glob hashlib heapq hmac html http importlib inspect io itertools json logging math multiprocessing numbers operator os pathlib pdb pickle platform pprint queue random re shutil signal socket sqlite3 statistics string subprocess sys tempfile threading time tkinter traceback typing unittest urllib uuid warnings weakref xml zipfile zoneinfo".split(" "));
 const GO_STDLIB = new Set("archive bufio bytes cmp compress container context crypto database debug embed encoding errors expvar flag fmt go hash html image index io log maps math mime net os path reflect regexp runtime slices sort strconv strings sync syscall testing text time unicode unique unsafe iter structs version".split(" "));
 const DEFAULT_COMPILER_OPTIONS = Object.freeze({ allowJs: true, jsx: ts.JsxEmit.Preserve, moduleResolution: ts.ModuleResolutionKind.Bundler, target: ts.ScriptTarget.Latest });

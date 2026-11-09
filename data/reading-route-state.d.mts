@@ -1,0 +1,1 @@
+export function getReadingTourStatus(route: unknown, files: ReadonlyMap<string, { contentHash?: string }>): { state: "legacy" | "unknown" | "stale" | "current"; readable: boolean; editable: boolean };

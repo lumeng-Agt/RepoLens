@@ -5,21 +5,31 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const arguments_ = new Set(process.argv.slice(2));
+for (const argument of arguments_) {
+  if (!["--package-desktop", "--list"].includes(argument)) throw new Error(`未知验收参数：${argument}`);
+}
+const includeDesktopPackage = arguments_.has("--package-desktop");
 const stamp = new Date().toISOString().replaceAll(/[:.]/g, "-");
 const evidenceDirectory = path.join(root, ".artifacts", "verify", stamp);
-await mkdir(evidenceDirectory, { recursive: true });
 
 const steps = [
   ["typecheck", ["run", "typecheck"]],
   ["lint", ["run", "lint"]],
   ["node", ["test"]],
-  ["desktop-candidate-package-and-smoke", ["run", "package:desktop"]],
+  // Browser regressions use this renderer even when no desktop package is built.
+  ["desktop-renderer-build", ["run", "build:desktop"]],
+  ...(includeDesktopPackage ? [["desktop-candidate-package-and-smoke", ["run", "package:desktop"]]] : []),
   ["browser-and-service", ["run", "test:e2e"]],
   ["browser-build", ["run", "build"]],
-  ["desktop-renderer-build", ["run", "build:desktop"]],
   ["startup-matrix", ["run", "check:startup"]],
   ["restore-default-browser-build", ["run", "build"]],
 ];
+if (arguments_.has("--list")) {
+  console.log(JSON.stringify({ desktopPackageIncluded: includeDesktopPackage, steps: steps.map(([name, args]) => ({ name, command: `npm ${args.join(" ")}` })) }, null, 2));
+  process.exit(0);
+}
+await mkdir(evidenceDirectory, { recursive: true });
 const results = [];
 const npmCli = process.env.npm_execpath;
 const npmCommand = npmCli ? process.execPath : process.platform === "win32" ? "npm.cmd" : "npm";
@@ -65,7 +75,15 @@ try {
     const environment = name === "browser-build" || name === "startup-matrix" ? productionBuildEnvironment
       : name === "desktop-candidate-package-and-smoke" ? { ...process.env, REPOLENS_CANDIDATE_ONLY: "1" } : process.env;
     const result = await runStep(args, path.join(evidenceDirectory, `${name}.log`), environment);
-    const record = { name, command: `npm ${args.join(" ")}`, startedAt, finishedAt: new Date().toISOString(), exitCode: result.code, ...(result.signal ? { signal: result.signal } : {}) };
+    let layoutWarningCount;
+    if (name === "browser-and-service") {
+      layoutWarningCount = (result.output.match(/\[RepoLens resize\]|ResizeObserver loop completed with undelivered notifications|The parent container needs a width and a height/g) ?? []).length;
+      if (layoutWarningCount) {
+        result.code = 1;
+        console.error(`发现 ${layoutWarningCount} 条原始布局告警；浏览器流程不能记为通过。`);
+      }
+    }
+    const record = { ...(layoutWarningCount === undefined ? {} : { layoutWarningCount }), name, command: `npm ${args.join(" ")}`, startedAt, finishedAt: new Date().toISOString(), exitCode: result.code, ...(result.signal ? { signal: result.signal } : {}) };
     results.push(record);
     if (name === "restore-default-browser-build") defaultBuildRestored = result.code === 0;
     await writeFile(path.join(evidenceDirectory, "summary.json"), JSON.stringify({ node: process.version, platform: process.platform, productionApiOrigin: productionBuildEnvironment.NEXT_PUBLIC_REPOLENS_API_ORIGIN, defaultApiOriginRestored: results.some((step) => step.name === "restore-default-browser-build" && step.exitCode === 0), steps: results }, null, 2), "utf8");

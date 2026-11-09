@@ -15,5 +15,23 @@ export default defineConfig({
     outDir: path.join(root, "desktop", "renderer"),
     emptyOutDir: true,
     sourcemap: false,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes("node_modules/react/") || id.includes("node_modules/react-dom/")) {
+            return "vendor-react";
+          }
+          if (id.includes("@xyflow") || id.includes("@dagrejs")) {
+            return "vendor-flow";
+          }
+          if (id.includes("radix-ui") || id.includes("@radix-ui") || id.includes("cmdk")) {
+            return "vendor-ui";
+          }
+          if (id.includes("lucide-react")) {
+            return "vendor-icons";
+          }
+        },
+      },
+    },
   },
 });

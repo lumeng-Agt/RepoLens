@@ -84,6 +84,7 @@ const apiOrigin = "http://127.0.0.1:" + apiPort;
 const wrapper = path.join(projectRoot, "scripts", "with-local-service.mjs");
 const framework = path.join(projectRoot, "scripts", "run-framework.mjs");
 const serviceOutput = [];
+const startupEvents = [{ stage: "service-spawn", at: Date.now() }];
 const service = spawn(process.execPath, [wrapper, framework, "dev", "--port", String(uiPort)], {
   cwd: projectRoot,
   env: { ...process.env, REPOLENS_PORT: String(apiPort), REPOLENS_UI_PORT: String(uiPort), NEXT_PUBLIC_REPOLENS_API_ORIGIN: apiOrigin, REPOLENS_TEMP_ROOT: temporaryRoot, REPOLENS_USER_DATA_PATH: path.join(runDirectory, "user-data") },
@@ -110,7 +111,9 @@ const cleanupErrors = [];
 let successResult;
 try {
   await waitForApi(apiOrigin, service);
+  startupEvents.push({ stage: "backend-ready", at: Date.now() });
   await waitForTcp(uiPort, service);
+  startupEvents.push({ stage: "ui-listening", at: Date.now() });
   browser = await chromium.launch({ headless: true });
   browserContext = await browser.newContext({
     viewport: { width: 1440, height: 900 },
@@ -118,6 +121,7 @@ try {
   });
   await browserContext.tracing.start({ screenshots: true, snapshots: true, sources: false });
   const page = await browserContext.newPage();
+  startupEvents.push({ stage: "browser-page-created", at: Date.now() });
   activePage = page;
   page.setDefaultTimeout(120_000);
   await page.addInitScript(() => localStorage.setItem("repolens:usage-guide:v1", JSON.stringify({ version: 1, welcomeHandled: true, completedTaskIds: [], checklistOpen: false, noticeDismissed: true })));
@@ -147,8 +151,11 @@ try {
     });
   }
   const initialWorkspace = page.waitForResponse((response) => response.url().includes("/api/workspace?") && response.request().method() === "GET", { timeout: 120_000 });
+  startupEvents.push({ stage: "first-navigation-start", at: Date.now() });
   await page.goto(uiOrigin, { waitUntil: "domcontentloaded", timeout: 120_000 });
+  startupEvents.push({ stage: "first-document-loaded", at: Date.now() });
   await initialWorkspace;
+  startupEvents.push({ stage: "initial-workspace-read", at: Date.now() });
   await openRepositoryHome(page);
   await page.getByLabel("本地路径或 GitHub 仓库链接").fill(url);
   assert.equal(await page.getByRole("button", { name: "打开仓库" }).isEnabled(), true, "the repository URL should enable opening");
@@ -259,6 +266,7 @@ try {
       apiResponses,
       failedRequests,
       runtimeErrors,
+      startupEvents,
       serviceOutput: serviceOutput.join("").slice(-50_000),
       temporaryRoot,
       shutdownResult,

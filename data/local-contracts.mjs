@@ -1,3 +1,5 @@
+import { ChatPreferencesSchema } from "./chat-preferences.mjs";
+import { MAX_CONVERSATIONS } from "./persistence-limits.mjs";
 import { z } from "zod";
 import { InvestigationSchema, InvestigationResultSchema } from "./investigation.mjs";
 
@@ -77,18 +79,26 @@ const savedAiRouteSchema = z.object({
   contextFiles: z.array(z.object({ fileId: z.string(), contentHash: z.string() }).passthrough()).optional(),
 }).passthrough();
 
+// Imports become editable state, so every rendered/saved field must already be
+// valid. Keep the looser storage schema for legitimate legacy records.
+export const ReadingTourImportSchema = savedAiRouteSchema.required({
+  repositoryId: true, entryFileId: true, revision: true, title: true,
+  signature: true, steps: true, contextFiles: true,
+}).refine(route => route.steps.every(step => step.reference.fileId === step.focusFileId));
+
 export const LocalWorkspaceStateSchema = z.object({
   version: z.number().int().positive(), recentRepositories: z.array(recentRepositorySchema),
   aiResults: z.record(z.string(), savedAiResultSchema), aiRoute: savedAiRouteSchema.nullable(),
   progress: z.record(z.string(), z.string()), nodePositions: z.record(z.string(), z.object({ x: z.number(), y: z.number() }).passthrough()),
   conversations: z.array(conversationSchema), warning: z.string().optional(), persistenceReady: z.boolean().optional(),
+  chatPreferences: z.unknown().optional(),
   investigations: z.array(InvestigationSchema).optional(), readingNotes: z.array(readingNoteSchema).optional(), savedTours: z.array(savedAiRouteSchema).optional(),
   guidePreferences: UsageGuidePreferencesSchema.nullable().optional(),
   layoutPreferences: WorkspaceLayoutPreferencesSchema.nullable().optional(),
 }).passthrough();
 
 export const SourceResponseSchema = z.object({ source: z.string(), repositoryId: z.string().optional(), revision: z.string().optional() }).passthrough();
-export const WorkspaceSaveResponseSchema = z.object({ ok: z.boolean(), warning: z.string().optional() }).passthrough();
+export const WorkspaceSaveResponseSchema = z.object({ ok: z.boolean(), warning: z.string().optional(), cleared: z.object({model: z.boolean().optional(), workspace: z.boolean(), copies: z.boolean()}).optional() }).passthrough();
 export const RepositoryRevisionEventSchema = z.object({ repositoryId: z.string().min(1), revision: z.string().min(1), sequence: z.number().int().nonnegative() }).passthrough();
 export const RepositoryDiagnosticEventSchema = z.object({ message: z.string().min(1) }).passthrough();
 export const LocalHealthResponseSchema = z.object({ ok: z.literal(true) }).passthrough();
@@ -107,21 +117,25 @@ export const WorkspaceMutationRequestSchema = z.discriminatedUnion("action", [
   workspaceRequestBase.extend({ action: z.literal("node-positions"), positions: z.record(z.string(), z.object({ x: z.number().finite(), y: z.number().finite() }).passthrough()) }),
   workspaceRequestBase.extend({ action: z.literal("ai-result"), fileId: z.string().min(1), record: savedAiResultSchema }),
   workspaceRequestBase.extend({ action: z.literal("ai-route"), record: savedAiRouteSchema.nullable() }),
-  workspaceRequestBase.extend({ action: z.literal("conversations"), conversations: z.array(conversationSchema) }),
+  workspaceRequestBase.extend({ action: z.literal("conversations"), conversations: z.array(conversationSchema).max(MAX_CONVERSATIONS) }),
+  workspaceRequestBase.extend({ action: z.literal("chat-preferences"), preferences: ChatPreferencesSchema }),
   workspaceRequestBase.extend({ action: z.literal("reading-notes"), notes: z.array(readingNoteSchema).max(10_000) }),
   workspaceRequestBase.extend({ action: z.literal("investigations"), records: z.array(InvestigationSchema).max(100) }),
   workspaceRequestBase.extend({ action: z.literal("saved-tours"), tours: z.array(savedAiRouteSchema).max(100) }),
-  workspaceRequestBase.extend({ action: z.literal("clear-repository") }),
+  workspaceRequestBase.extend({ action: z.literal("clear-repository"), operationId: z.string().min(1).max(160).optional() }),
   z.object({ action: z.literal("guide-preferences"), preferences: UsageGuidePreferencesSchema }).passthrough(),
   z.object({ action: z.literal("layout-preferences"), preferences: WorkspaceLayoutPreferencesSchema }).passthrough(),
-  z.object({ action: z.literal("clear-all"), repositoryId: z.string().max(160) }).passthrough(),
+  z.object({ action: z.literal("clear-all"), operationId: z.string().min(1).max(160).optional(), repositoryId: z.string().max(160) }).passthrough(),
 ]);
-export const AiSettingsRequestSchema = z.object({ baseUrl: z.string().max(4_096), model: z.string().max(500), apiKey: z.string().max(10_000).optional(), clearKey: z.boolean().optional() }).passthrough();
+export const AiSettingsRequestSchema = z.object({ baseUrl: z.string().max(4_096), model: z.string().max(500), apiKey: z.string().max(10_000).optional(), authMode: z.enum(["key", "none"]).optional(), clearKey: z.boolean().optional() }).passthrough();
 export const AiGenerationRequestSchema = z.object({ previewId: z.string().min(1).max(200), stream: z.boolean().optional(), chat: z.object({ conversationId: z.string().min(1).max(160), userMessageId: z.string().min(1).max(160), answerMessageId: z.string().min(1).max(160) }).strict().optional() }).passthrough();
-export const AiPreviewRequestSchema = z.object({ repositoryId: z.string().min(1).max(160), fileId: z.string().min(1).max(4_096), mode: z.enum(["explanation", "route", "investigation"]), question: z.string().min(1).max(12000).optional(), excludedFileIds: z.array(z.string().max(4096)).max(5000).optional(), goal: z.string().max(300).optional(), fileIds: z.array(z.string().min(1).max(4_096)).max(5_000).optional(), scopePrefix: z.string().max(4_096).optional(), ranges: z.record(z.string(), z.object({ startLine: z.number().int().positive(), endLine: z.number().int().positive() }).passthrough()).optional() }).passthrough();
-export const AiQuestionPreviewRequestSchema = z.object({ repositoryId: z.string().min(1).max(160), fileId: z.string().min(1).max(4_096), question: z.string().min(1).max(12_000), history: z.array(z.object({ role: z.enum(["user", "assistant"]), content: z.string().max(12_000) }).passthrough()).max(6).optional(), fileIds: z.array(z.string().min(1).max(4_096)).max(5_000).optional(), ranges: z.record(z.string(), z.object({ startLine: z.number().int().positive(), endLine: z.number().int().positive() }).passthrough()).optional() }).passthrough();
+const refinementSchema = z.object({ original: z.record(z.string(), z.unknown()), instruction: z.string().trim().min(1).max(12000) }).passthrough();
+export const AiPreviewRequestSchema = z.object({ refinement: refinementSchema.optional(), repositoryId: z.string().min(1).max(160), fileId: z.string().min(1).max(4_096), mode: z.enum(["explanation", "route", "investigation"]), question: z.string().min(1).max(12000).optional(), excludedFileIds: z.array(z.string().max(4096)).max(5000).optional(), goal: z.string().max(300).optional(), fileIds: z.array(z.string().min(1).max(4_096)).max(5_000).optional(), scopePrefix: z.string().max(4_096).optional(), ranges: z.record(z.string(), z.object({ startLine: z.number().int().positive(), endLine: z.number().int().positive() }).passthrough()).optional() }).passthrough();
+export const AiQuestionPreviewRequestSchema = z.object({ conversation: z.boolean().optional(), repositoryId: z.string().min(1).max(160), fileId: z.string().max(4_096), question: z.string().min(1).max(12_000), history: z.array(z.object({ role: z.enum(["user", "assistant"]), content: z.string().max(60_000) }).passthrough()).max(6).optional(), fileIds: z.array(z.string().min(1).max(4_096)).max(5_000).optional(), ranges: z.record(z.string(), z.object({ startLine: z.number().int().positive(), endLine: z.number().int().positive() }).passthrough()).optional() }).passthrough().superRefine((value, context) => {
+  if (!value.fileId && !value.conversation) context.addIssue({ code: "custom", path: ["fileId"], message: "源码问答需要入口文件" });
+});
 export const SearchRequestSchema = z.object({ repositoryId: z.string().min(1).max(160), revision: z.string().min(1).max(200), query: z.string().min(1).max(256), offset: z.number().int().min(0).max(10_000).optional(), pathPrefix: z.string().max(4_096).optional(), language: z.string().max(24).optional(), matchCase: z.boolean().optional(), wholeWord: z.boolean().optional(), regex: z.boolean().optional(), excludeTests: z.boolean().optional() }).passthrough();
-export const SearchResponseSchema = z.object({ revision: z.string().min(1), filesSearched: z.number().int().nonnegative(), offset: z.number().int().nonnegative(), pageSize: z.number().int().positive(), total: z.number().int().nonnegative(), results: z.array(z.object({ fileId: z.string(), path: z.string(), language: z.string(), line: z.number().int().positive(), text: z.string(), contextStartColumn: z.number().int().positive(), contextEndColumn: z.number().int().nonnegative(), lineLength: z.number().int().nonnegative(), matchStartColumn: z.number().int().positive(), matchEndColumn: z.number().int().positive() }).passthrough()), hasMore: z.boolean(), capped: z.boolean() }).passthrough();
+export const SearchResponseSchema = z.object({ revision: z.string().min(1), filesSearched: z.number().int().nonnegative(), candidateFiles: z.number().int().nonnegative().optional(), offset: z.number().int().nonnegative(), pageSize: z.number().int().positive(), total: z.number().int().nonnegative(), results: z.array(z.object({ fileId: z.string(), path: z.string(), language: z.string(), line: z.number().int().positive(), text: z.string(), contextStartColumn: z.number().int().positive(), contextEndColumn: z.number().int().nonnegative(), lineLength: z.number().int().nonnegative(), matchStartColumn: z.number().int().positive(), matchEndColumn: z.number().int().positive() }).passthrough()), hasMore: z.boolean(), capped: z.boolean() }).passthrough();
 export const RepositoryOverviewSchema = z.object({ revision: z.string(), readme: z.object({ path: z.string(), summary: z.string().nullable() }).nullable(), manifests: z.array(z.string()), candidates: z.array(z.object({ fileId: z.string(), path: z.string(), reason: z.string() }).passthrough()), directories: z.array(z.object({ name: z.string(), files: z.number().int().nonnegative() }).passthrough()), languages: z.array(z.object({ name: z.string(), files: z.number().int().nonnegative() }).passthrough()), tests: z.array(z.string()), testCount: z.number().int().nonnegative(), diagnosticCount: z.number().int().nonnegative(), limitations: z.string() }).passthrough();
 export const RevisionComparisonRequestSchema = z.object({ repositoryId: z.string().min(1).max(160), revision: z.string().min(1).max(200), mode: z.enum(["working-tree", "commits"]), baseRef: z.string().max(200).optional(), headRef: z.string().max(200).optional() }).strict().superRefine((value, context) => { if (value.mode === "commits" && (!value.baseRef || !value.headRef)) context.addIssue({ code: "custom", message: "提交比较需要起始和目标提交。" }); });
 export const RevisionComparisonResponseSchema = z.object({ revision: z.string(), mode: z.enum(["working-tree", "commits"]), baseCommit: z.string(), headCommit: z.string(), files: z.array(z.object({ status: z.enum(["added", "modified", "deleted", "renamed"]), path: z.string(), oldPath: z.string().optional() }).passthrough()), diff: z.string(), limits: z.object({ maxFiles: z.number().int().positive(), maxDiffBytes: z.number().int().positive() }).passthrough() }).passthrough();

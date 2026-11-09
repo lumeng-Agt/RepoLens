@@ -67,10 +67,10 @@ function GraphFlowCanvas({ nodes, edges, onNodesChange, onNodeClick, onInit, sho
   </div>;
 }
 
-export function GraphPanel({
+export function GraphPanel({ onAnalyze, highlightedFileIds = [],
   mobileView, directory, directories, graphLabel, scopedFileCount, hiddenCount, showAll,
   graphReady, graphActive, canvasRef, nodes, edges, repository, currentFileId, onOpenReference, onNodesChange, onNodeClick, onInit, onDirectoryChange, onToggleScope, onLocateCurrent, onResetLayout, disabled = false,
-}: {
+}: { onAnalyze?: (ids: string[], label: string) => void; highlightedFileIds?: string[];
   mobileView: "files" | "graph" | "details";
   directory: string;
   directories: string[];
@@ -108,11 +108,11 @@ export function GraphPanel({
     : scopedFiles.some((file) => file.id === currentFileId) ? currentFileId : scopedFiles[0]?.id ?? "";
   const currentQueryResult = queryResult?.revision === (repository.revision ?? repository.version) && queryResult.directory === directory ? queryResult : null;
   const publishQueryResult = (value: { fileIds: string[]; edgeIds: string[]; label: string; edges: DependencyEdge[] }) => setQueryResult({ ...value, revision: repository.revision ?? repository.version, directory });
-  const graphNodes = useMemo(() => nodes.map((node) => ({ ...node, data: { ...node.data, queryHighlighted: Boolean(currentQueryResult?.fileIds.includes(node.id)) } })), [nodes, currentQueryResult]);
+  const graphNodes = useMemo(() => nodes.map((node) => ({ ...node, data: { ...node.data, queryHighlighted: Boolean(currentQueryResult?.fileIds.includes(node.id) || highlightedFileIds.includes(node.id)) } })), [nodes, currentQueryResult, highlightedFileIds]);
   const graphEdges = useMemo(() => edges.map((edge) => {
-    const active = Boolean(currentQueryResult?.edgeIds.includes(edge.id));
+    const active = Boolean(currentQueryResult?.edgeIds.includes(edge.id) || highlightedFileIds.includes(edge.source) && highlightedFileIds.includes(edge.target));
     return { ...edge, style: { ...edge.style, stroke: active ? "var(--accent)" : edge.style?.stroke, strokeWidth: active ? 3 : edge.style?.strokeWidth, opacity: currentQueryResult ? active ? 1 : 0.08 : edge.style?.opacity } };
-  }), [edges, currentQueryResult]);
+  }), [edges, currentQueryResult, highlightedFileIds]);
   const runQuery = () => {
     if (queryMode === "path") {
       const result = findDependencyPath(scopedSnapshot, fromId, toId, direction);
@@ -142,13 +142,13 @@ export function GraphPanel({
         <button disabled={disabled} onClick={onResetLayout} aria-label="重置布局" title="重置布局"><RotateCcw size={15} /></button>
       </div>
     </div>
-    <div className="graph-query" aria-label="依赖查询">
+    <div className="graph-query" aria-label="依赖查询">{highlightedFileIds.length > 0 && <p role="status">聊天引用 {highlightedFileIds.length} 个文件 · 当前显示 {nodes.filter(node => highlightedFileIds.includes(node.id)).length} 个</p>}
       <div className="graph-query-controls">
         <select aria-label="依赖查询类型" value={queryMode} disabled={disabled} onChange={(event) => { setQueryMode(event.target.value as typeof queryMode); setQueryResult(null); }}><option value="path">查找依赖路径</option><option value="impact">潜在影响范围</option><option value="cycle">循环依赖</option></select>
         {queryMode === "path" ? <><select aria-label="路径起点" value={fromId} onChange={(event) => setFromSelection({ currentFileId, value: event.target.value })}>{scopedFiles.map((file) => <option key={file.id} value={file.id}>{file.path}</option>)}</select><ArrowDownUp size={14} aria-hidden="true" /><select aria-label="路径终点" value={toId} onChange={(event) => setToId(event.target.value)}><option value="">选择终点</option>{scopedFiles.map((file) => <option key={file.id} value={file.id}>{file.path}</option>)}</select><button type="button" aria-label={direction === "imports" ? "查询导入方向" : "查询被导入方向"} title="切换依赖方向" onClick={() => setDirection((value) => value === "imports" ? "imported-by" : "imports")}><ArrowDownUp size={15} /></button></> : <select aria-label="查询文件" value={fromId} onChange={(event) => setFromSelection({ currentFileId, value: event.target.value })}>{scopedFiles.map((file) => <option key={file.id} value={file.id}>{file.path}</option>)}</select>}
         <button type="button" className="graph-query-run" disabled={disabled || !fromId || queryMode === "path" && !toId} onClick={runQuery}><Search size={14} />查询</button>
       </div>
-      {currentQueryResult && <div className="graph-query-result" aria-live="polite"><strong>{currentQueryResult.label}</strong>{currentQueryResult.edges.map((edge) => <button key={edge.id} type="button" onClick={() => onOpenReference(edge.reference)}><span>{repository.files.find((file) => file.id === edge.fromId)?.path} → {repository.files.find((file) => file.id === edge.toId)?.path}</span><small>第 {edge.reference.line} 行 · {resolutionBasisLabels[edge.resolutionBasis ?? ""] ?? "静态引用关系"}{edge.typeOnly ? " · 类型引用" : ""}</small></button>)}</div>}
+      {currentQueryResult && <div className="graph-query-result" aria-live="polite"><strong>{currentQueryResult.label}</strong>{currentQueryResult.fileIds.length > 0 && <button type="button" disabled={disabled} onClick={() => onAnalyze?.(currentQueryResult.fileIds, currentQueryResult.label)}>在聊天中分析</button>}{currentQueryResult.edges.map((edge) => <button key={edge.id} type="button" onClick={() => onOpenReference(edge.reference)}><span>{repository.files.find((file) => file.id === edge.fromId)?.path} → {repository.files.find((file) => file.id === edge.toId)?.path}</span><small>第 {edge.reference.line} 行 · {resolutionBasisLabels[edge.resolutionBasis ?? ""] ?? "静态引用关系"}{edge.typeOnly ? " · 类型引用" : ""}</small></button>)}</div>}
     </div>
     <div ref={canvasRef} className="graph-canvas" aria-label="文件依赖关系图">
       {shouldRenderFlow && <div className="graph-flow-mount" aria-hidden={!graphActive} style={{ visibility: graphActive ? "visible" : "hidden", pointerEvents: graphActive ? "auto" : "none" }}><ReactFlowProvider><GraphFlowCanvas nodes={graphNodes} edges={graphEdges} onNodesChange={onNodesChange} onNodeClick={onNodeClick} onInit={onInit} showAll={showAll} /></ReactFlowProvider></div>}

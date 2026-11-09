@@ -31,3 +31,4 @@ export type RepositoryEventParseResult =
 export function parseRepositoryEvent(type: string, data: string): RepositoryEventParseResult;
 
 export const readingNoteSchema: import("zod").ZodType<import("./model").ReadingNote>;
+export const ReadingTourImportSchema: import("zod").ZodType<import("./model").AiRouteRecord>;

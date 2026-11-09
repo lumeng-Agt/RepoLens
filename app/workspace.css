@@ -362,6 +362,8 @@ kbd { font-family: var(--font-mono); }
 .detail-tab-list [role="tab"] { flex: 0 0 auto; justify-content: flex-start; height: 100%; gap: 6px; padding: 0 2px; color: var(--muted-foreground); border-radius: 0; font-size: 12px; transition: color 140ms; }
 .detail-tab-list [role="tab"][data-state="active"] { color: var(--primary); font-weight: 550; }
 .detail-tab-list [role="tab"]::after { bottom: -1px !important; background: var(--primary) !important; }
+.detail-tab-action { display: inline-flex; align-items: center; gap: 5px; height: 100%; margin-left: auto; padding: 0 4px; color: var(--muted-foreground); background: transparent; border: 0; font-size: 12px; cursor: pointer; transition: color 140ms; }
+.detail-tab-action:hover { color: var(--primary); }
 .detail-tabs [role="tabpanel"], .detail-scroll { flex: 1; min-width: 0; min-height: 0; overflow: auto; }
 .guide-scroll { padding: 22px 20px; }
 .section-overline { display: flex; align-items: center; gap: 6px; color: var(--primary); font-size: 10px; font-weight: 550; letter-spacing: .05em; }
@@ -1108,3 +1110,15 @@ dialog::backdrop { background: #15231f55; }
 .ai-chat-sidebar .question-messages { flex: 1 0 auto; overflow: visible; }
 .ai-chat-sidebar .question-consent { scroll-margin-top: 12px; }
 .question-generating { padding: 12px; color: var(--primary); }
+
+/* CSS must apply the narrow geometry before resize listeners run. The panel
+   library's percentage wrappers otherwise keep hidden panes in the flex row. */
+@media (max-width: 1279px) {
+  .workspace-chat-columns > [data-slot="resizable-panel-group"] > #reader { flex: 1 1 100% !important; width: 100%; }
+  .workspace-chat-columns > [data-slot="resizable-panel-group"] > #assistant { flex: 0 0 0 !important; width: 0; min-width: 0; }
+}
+@media (max-width: 860px) {
+  .workspace-panels > [data-panel]:has(> .workspace-panel-content > .files-pane.mobile-hidden),
+  .workspace-details-panels > [data-panel]:has(> .workspace-panel-content > .graph-pane.mobile-hidden),
+  .workspace-details-panels > [data-panel]:has(> .workspace-panel-content > .details-pane.mobile-hidden) { display: none !important; }
+}

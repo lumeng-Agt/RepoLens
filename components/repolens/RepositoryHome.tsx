@@ -8,8 +8,10 @@ import type { LocalWorkspaceState } from "@/data/providers";
 type RecentRepository = LocalWorkspaceState["recentRepositories"][number];
 
 export function RepositoryHome({
-  path, busy, desktop, message, recentRepositories, guideButtonRef, ready, onPathChange, onPickDirectory, onOpen, onOpenRecent, onRemoveRecent, onTryExample, onOpenGuide, onOpenSettings,
+  path, busy, desktop, message, onRetryClear, clearBlocked = false, recentRepositories, guideButtonRef, ready, onPathChange, onPickDirectory, onOpen, onOpenRecent, onRemoveRecent, onTryExample, onOpenGuide, onOpenSettings,
 }: {
+  onRetryClear?: () => void;
+  clearBlocked?: boolean;
   path: string;
   busy: boolean;
   desktop: boolean;
@@ -30,7 +32,7 @@ export function RepositoryHome({
   return <main className="repository-home" data-app-ready={ready ? "true" : "false"} aria-labelledby="repository-home-title">
     <header className="home-topbar">
       <div className="brand-lockup"><span className="brand-mark" aria-hidden="true"><GitBranch size={17} /></span><span className="brand-name">Repo<span>Lens</span></span></div>
-      <div className="home-header-actions"><button ref={guideButtonRef} type="button" className="home-guide-link" onClick={onOpenGuide}><BookOpen size={15} />使用指南</button><button type="button" className="home-guide-link" onClick={onOpenSettings}><Settings2 size={15} />模型设置</button></div>
+      <div className="home-header-actions"><button ref={guideButtonRef} type="button" className="home-guide-link" onClick={onOpenGuide}><BookOpen size={15} />使用指南</button><button type="button" className="home-guide-link" disabled={clearBlocked} onClick={onOpenSettings}><Settings2 size={15} />模型设置</button></div>
     </header>
     <div className="home-content">
       <section className="home-open-section">
@@ -41,7 +43,8 @@ export function RepositoryHome({
           <button type="submit" className="home-primary-button" disabled={busy || !path.trim()}>{busy ? "正在打开…" : <><FolderOpen size={16} />打开仓库</>}</button>
         </form>
         {message && <p className="home-feedback" role="status">{message}</p>}
-        <div className="home-secondary-links"><button type="button" onClick={onTryExample}>打开示例</button><span aria-hidden="true">·</span><button type="button" onClick={onOpenGuide}>查看使用指南</button></div>
+        {onRetryClear && <button type="button" className="home-secondary-button" onClick={onRetryClear}>重试清除</button>}
+        <div className="home-secondary-links"><button type="button" disabled={clearBlocked} onClick={onTryExample}>打开示例</button><span aria-hidden="true">·</span><button type="button" onClick={onOpenGuide}>查看使用指南</button></div>
       </section>
       <section className="home-recent-section" aria-labelledby="recent-repositories-title">
         <div className="home-section-heading"><div><History size={16} /><h2 id="recent-repositories-title">最近打开</h2></div><span>{recentRepositories.length}/20</span></div>
@@ -53,6 +56,6 @@ export function RepositoryHome({
         </li>)}</ul> : <p className="home-empty-recent">打开过的仓库会显示在这里。</p>}
       </section>
     </div>
-    <footer className="home-footer">仓库内容只在本机分析。发送代码前会显示范围并要求确认。</footer>
+    <footer className="home-footer">源码在本地索引；点击发送时，仅发送当前显示的范围。</footer>
   </main>;
 }

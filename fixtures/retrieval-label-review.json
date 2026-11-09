@@ -1,0 +1,338 @@
+[
+  {
+    "id": "express-1",
+    "before": {
+      "path": "lib/application.js",
+      "startLine": 59,
+      "endLine": 66
+    },
+    "after": {
+      "path": "lib/application.js",
+      "startLine": 59,
+      "endLine": 83
+    },
+    "reason": "复核目标定义边界，排除相邻定义；会话读写标注具体实现而非抽象接口"
+  },
+  {
+    "id": "express-2",
+    "before": {
+      "path": "lib/application.js",
+      "startLine": 152,
+      "endLine": 159
+    },
+    "after": {
+      "path": "lib/application.js",
+      "startLine": 152,
+      "endLine": 178
+    },
+    "reason": "复核目标定义边界，排除相邻定义；会话读写标注具体实现而非抽象接口"
+  },
+  {
+    "id": "express-3",
+    "before": {
+      "path": "lib/application.js",
+      "startLine": 598,
+      "endLine": 605
+    },
+    "after": {
+      "path": "lib/application.js",
+      "startLine": 598,
+      "endLine": 632
+    },
+    "reason": "复核目标定义边界，排除相邻定义；会话读写标注具体实现而非抽象接口"
+  },
+  {
+    "id": "express-4",
+    "before": {
+      "path": "lib/application.js",
+      "startLine": 522,
+      "endLine": 529
+    },
+    "after": {
+      "path": "lib/application.js",
+      "startLine": 522,
+      "endLine": 575
+    },
+    "reason": "复核目标定义边界，排除相邻定义；会话读写标注具体实现而非抽象接口"
+  },
+  {
+    "id": "express-5",
+    "before": {
+      "path": "lib/response.js",
+      "startLine": 126,
+      "endLine": 133
+    },
+    "after": {
+      "path": "lib/response.js",
+      "startLine": 126,
+      "endLine": 222
+    },
+    "reason": "复核目标定义边界，排除相邻定义；会话读写标注具体实现而非抽象接口"
+  },
+  {
+    "id": "express-6",
+    "before": {
+      "path": "lib/response.js",
+      "startLine": 236,
+      "endLine": 243
+    },
+    "after": {
+      "path": "lib/response.js",
+      "startLine": 236,
+      "endLine": 250
+    },
+    "reason": "复核目标定义边界，排除相邻定义；会话读写标注具体实现而非抽象接口"
+  },
+  {
+    "id": "express-7",
+    "before": {
+      "path": "lib/response.js",
+      "startLine": 815,
+      "endLine": 822
+    },
+    "after": {
+      "path": "lib/response.js",
+      "startLine": 815,
+      "endLine": 867
+    },
+    "reason": "复核目标定义边界，排除相邻定义；会话读写标注具体实现而非抽象接口"
+  },
+  {
+    "id": "express-8",
+    "before": {
+      "path": "lib/response.js",
+      "startLine": 375,
+      "endLine": 382
+    },
+    "after": {
+      "path": "lib/response.js",
+      "startLine": 375,
+      "endLine": 417
+    },
+    "reason": "复核目标定义边界，排除相邻定义；会话读写标注具体实现而非抽象接口"
+  },
+  {
+    "id": "flask-1",
+    "before": {
+      "path": "src/flask/app.py",
+      "startLine": 1566,
+      "endLine": 1573
+    },
+    "after": {
+      "path": "src/flask/app.py",
+      "startLine": 1566,
+      "endLine": 1567
+    },
+    "reason": "复核目标定义边界，排除相邻定义；会话读写标注具体实现而非抽象接口"
+  },
+  {
+    "id": "flask-2",
+    "before": {
+      "path": "src/flask/app.py",
+      "startLine": 897,
+      "endLine": 904
+    },
+    "after": {
+      "path": "src/flask/app.py",
+      "startLine": 897,
+      "endLine": 948
+    },
+    "reason": "复核目标定义边界，排除相邻定义；会话读写标注具体实现而非抽象接口"
+  },
+  {
+    "id": "flask-3",
+    "before": {
+      "path": "src/flask/app.py",
+      "startLine": 1224,
+      "endLine": 1231
+    },
+    "after": {
+      "path": "src/flask/app.py",
+      "startLine": 1224,
+      "endLine": 1364
+    },
+    "reason": "复核目标定义边界，排除相邻定义；会话读写标注具体实现而非抽象接口"
+  },
+  {
+    "id": "flask-4",
+    "before": {
+      "path": "src/flask/app.py",
+      "startLine": 1394,
+      "endLine": 1401
+    },
+    "after": {
+      "path": "src/flask/app.py",
+      "startLine": 1394,
+      "endLine": 1418
+    },
+    "reason": "复核目标定义边界，排除相邻定义；会话读写标注具体实现而非抽象接口"
+  },
+  {
+    "id": "flask-5",
+    "before": {
+      "path": "src/flask/config.py",
+      "startLine": 187,
+      "endLine": 194
+    },
+    "after": {
+      "path": "src/flask/config.py",
+      "startLine": 187,
+      "endLine": 188
+    },
+    "reason": "复核目标定义边界，排除相邻定义；会话读写标注具体实现而非抽象接口"
+  },
+  {
+    "id": "flask-6",
+    "before": {
+      "path": "src/flask/config.py",
+      "startLine": 102,
+      "endLine": 109
+    },
+    "after": {
+      "path": "src/flask/config.py",
+      "startLine": 102,
+      "endLine": 124
+    },
+    "reason": "复核目标定义边界，排除相邻定义；会话读写标注具体实现而非抽象接口"
+  },
+  {
+    "id": "flask-7",
+    "before": {
+      "path": "src/flask/sessions.py",
+      "startLine": 249,
+      "endLine": 256
+    },
+    "after": {
+      "path": "src/flask/sessions.py",
+      "startLine": 323,
+      "endLine": 335
+    },
+    "reason": "复核目标定义边界，排除相邻定义；会话读写标注具体实现而非抽象接口"
+  },
+  {
+    "id": "flask-8",
+    "before": {
+      "path": "src/flask/sessions.py",
+      "startLine": 263,
+      "endLine": 270
+    },
+    "after": {
+      "path": "src/flask/sessions.py",
+      "startLine": 337,
+      "endLine": 338
+    },
+    "reason": "复核目标定义边界，排除相邻定义；会话读写标注具体实现而非抽象接口"
+  },
+  {
+    "id": "gin-1",
+    "before": {
+      "path": "context.go",
+      "startLine": 216,
+      "endLine": 223
+    },
+    "after": {
+      "path": "context.go",
+      "startLine": 216,
+      "endLine": 218
+    },
+    "reason": "复核目标定义边界，排除相邻定义；会话读写标注具体实现而非抽象接口"
+  },
+  {
+    "id": "gin-2",
+    "before": {
+      "path": "context.go",
+      "startLine": 197,
+      "endLine": 204
+    },
+    "after": {
+      "path": "context.go",
+      "startLine": 197,
+      "endLine": 205
+    },
+    "reason": "复核目标定义边界，排除相邻定义；会话读写标注具体实现而非抽象接口"
+  },
+  {
+    "id": "gin-3",
+    "before": {
+      "path": "context.go",
+      "startLine": 563,
+      "endLine": 570
+    },
+    "after": {
+      "path": "context.go",
+      "startLine": 563,
+      "endLine": 568
+    },
+    "reason": "复核目标定义边界，排除相邻定义；会话读写标注具体实现而非抽象接口"
+  },
+  {
+    "id": "gin-4",
+    "before": {
+      "path": "context.go",
+      "startLine": 889,
+      "endLine": 896
+    },
+    "after": {
+      "path": "context.go",
+      "startLine": 889,
+      "endLine": 891
+    },
+    "reason": "复核目标定义边界，排除相邻定义；会话读写标注具体实现而非抽象接口"
+  },
+  {
+    "id": "gin-5",
+    "before": {
+      "path": "context.go",
+      "startLine": 1259,
+      "endLine": 1266
+    },
+    "after": {
+      "path": "context.go",
+      "startLine": 1259,
+      "endLine": 1261
+    },
+    "reason": "复核目标定义边界，排除相邻定义；会话读写标注具体实现而非抽象接口"
+  },
+  {
+    "id": "gin-6",
+    "before": {
+      "path": "context.go",
+      "startLine": 733,
+      "endLine": 740
+    },
+    "after": {
+      "path": "context.go",
+      "startLine": 733,
+      "endLine": 768
+    },
+    "reason": "复核目标定义边界，排除相邻定义；会话读写标注具体实现而非抽象接口"
+  },
+  {
+    "id": "gin-7",
+    "before": {
+      "path": "context.go",
+      "startLine": 1158,
+      "endLine": 1165
+    },
+    "after": {
+      "path": "context.go",
+      "startLine": 1158,
+      "endLine": 1172
+    },
+    "reason": "复核目标定义边界，排除相邻定义；会话读写标注具体实现而非抽象接口"
+  },
+  {
+    "id": "gin-8",
+    "before": {
+      "path": "context.go",
+      "startLine": 1143,
+      "endLine": 1150
+    },
+    "after": {
+      "path": "context.go",
+      "startLine": 1143,
+      "endLine": 1148
+    },
+    "reason": "复核目标定义边界，排除相邻定义；会话读写标注具体实现而非抽象接口"
+  }
+]

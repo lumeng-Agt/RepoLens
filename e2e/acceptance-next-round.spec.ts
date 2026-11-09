@@ -1,3 +1,4 @@
+import { completedGeneration, startGeneratedRoute } from "./helpers/chat-generation";
 import { enterRepositoryLocation, returnToSample, openModelSettings, closeModelSettings, openRepositoryMenu, openTourSteps, test, expect, type Page } from './fixtures';
 import { installResizeObserverProbe } from './helpers/resize-observer-probe';
 import { createServer, type Server } from 'node:http';
@@ -67,10 +68,12 @@ async function open(page: Page, root: string) {
 
 async function generate(page: Page, mode: string) {
   await page.getByRole('button', { name: mode, exact: true }).click();
-  await expect(page.getByText('发送前确认', { exact: true })).toBeVisible();
+  await expect(page.getByRole('form', { name: '聊天输入' })).toBeVisible();
   const result = page.waitForResponse(`${api}/api/ai/generate`);
-  await page.getByRole('button', { name: '确认发送并生成' }).click();
-  expect((await result).status()).toBe(200);
+  await page.getByRole('button', { name: '发送', exact: true }).click();
+  const response = await result; expect(response.status()).toBe(200); await completedGeneration(response);
+  if (mode === "生成阅读路线") await startGeneratedRoute(page);
+  await page.getByRole("complementary", { name: "AI 聊天", exact: true }).getByRole("button", { name: "收起 AI 面板", exact: true }).click();
 }
 
 test('B1 narrowing to a directory containing the current file must retain selection', async ({ page }) => {
@@ -88,16 +91,16 @@ test('B2 a valid line range excluding an oversized line must be previewable', as
   await page.getByRole('button', { name: '生成当前文件讲解', exact: true }).click();
   await expect(page.getByText('选择发送范围', { exact: true })).toBeVisible();
   await expect(page.getByText('所选范围包含超长单行，需调整起止行将其排除。')).toBeVisible();
-  await expect(page.getByRole('button', { name: '预览发送范围' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: '应用范围' })).toBeDisabled();
   await page.getByLabel('main.ts 结束行').fill('1');
-  await expect(page.getByRole('button', { name: '预览发送范围' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: '应用范围' })).toBeEnabled();
   await page.getByLabel('main.ts 结束行').fill('2');
-  await expect(page.getByRole('button', { name: '预览发送范围' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: '应用范围' })).toBeDisabled();
   await page.getByLabel('main.ts 结束行').fill('1');
   const validPreview = page.waitForResponse(`${api}/api/ai/preview`);
-  await page.getByRole('button', { name: '预览发送范围' }).click();
+  await page.getByRole('button', { name: '应用范围' }).click();
   expect((await validPreview).status()).toBe(200);
-  await expect(page.getByText('发送前确认', { exact: true })).toBeVisible();
+  await expect(page.getByRole('form', { name: '聊天输入' })).toBeVisible();
   expect(modelCalls).toBe(calls);
 });
 
@@ -167,16 +170,16 @@ test('B4 route navigation should show an already saved explanation for its targe
   await open(page, await fixture({ 'a.ts': 'export const a = 1;\n', 'main.ts': "import { a } from './a';\nexport const main = a;\n" }));
   await page.getByRole('treeitem', { name: 'a.ts', exact: true }).click();
   await generate(page, '生成当前文件讲解');
-  await expect(page.getByText('已保存讲解:a.ts', { exact: true })).toBeVisible();
+  await expect(page.locator(".details-pane").getByText('已保存讲解:a.ts', { exact: true })).toBeVisible();
   await page.getByRole('treeitem', { name: 'main.ts', exact: true }).click();
   await generate(page, '生成当前文件讲解');
-  await expect(page.getByText('已保存讲解:main.ts', { exact: true })).toBeVisible();
+  await expect(page.locator(".details-pane").getByText('已保存讲解:main.ts', { exact: true })).toBeVisible();
   await generate(page, '生成阅读路线');
   await openTourSteps(page);
   await page.getByRole('button', { name: '第 2 步：a.ts' }).click();
   await page.getByRole('tab', { name: '讲解', exact: true }).click();
   await expect(page.locator('.detail-file-title strong')).toHaveText('a.ts');
-  await expect(page.getByText('已保存讲解:a.ts', { exact: true })).toBeVisible();
+  await expect(page.locator(".details-pane").getByText('已保存讲解:a.ts', { exact: true })).toBeVisible();
   expect(await resizeProbe.errors(), resizeProbe.logs.join('\n')).toEqual([]);
 });
 

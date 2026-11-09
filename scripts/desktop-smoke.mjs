@@ -6,7 +6,7 @@ import { access, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:f
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { chromium } from "@playwright/test";
+import { chromium, _electron } from "@playwright/test";
 import { LocalWorkspaceStateSchema } from "../data/local-contracts.mjs";
 import { waitForStableGraphGeometry } from "./graph-geometry.mjs";
 import { waitForChildExit } from "../desktop/process-exit.mjs";
@@ -138,10 +138,12 @@ async function closeTourSteps(page) {
   await page.waitForFunction(() => document.querySelector(".tour-step-disclosure")?.open === false);
 }
 
-async function launch({ gitExecutable, expectFirstUseGuide = false, expectTourHidden = false } = {}) {
+async function launch({ gitExecutable, hidden, expectFirstUseGuide = false, expectTourHidden = false } = {}) {
   const port = await reservePort();
   const developmentExecutable = process.env.REPOLENS_DESKTOP_DEV === "1";
-  const childEnvironment = { ...process.env, REPOLENS_USER_DATA_PATH: userDataPath, REPOLENS_SMOKE_HIDDEN: process.env.REPOLENS_SMOKE_HIDDEN ?? "1", ELECTRON_DISABLE_GPU: "1" };
+  // Screenshot capture needs a rendered window. Functional-only runs remain
+  // hidden; an explicitly requested hidden mode is still respected.
+  const childEnvironment = { ...process.env, REPOLENS_USER_DATA_PATH: userDataPath, REPOLENS_SMOKE_HIDDEN: hidden === undefined ? process.env.REPOLENS_SMOKE_HIDDEN ?? (process.env.REPOLENS_SMOKE_SCREENSHOTS ? "0" : "1") : hidden ? "1" : "0", ELECTRON_DISABLE_GPU: "1" };
   delete childEnvironment.REPOLENS_AI_BASE_URL;
   delete childEnvironment.REPOLENS_AI_MODEL;
   delete childEnvironment.REPOLENS_AI_API_KEY;
@@ -330,6 +332,31 @@ async function assertSingleInstance(first) {
   assert.equal((await fetch(await first.page.evaluate(() => window.__REPOLENS_RUNTIME__?.apiOrigin) + "/api/health")).ok, true, "the original backend remains the only active service");
 }
 
+async function crashRendererAndAssertExit() {
+  const env = { ...process.env, REPOLENS_USER_DATA_PATH: path.join(temporaryRoot, "renderer-crash-data"), REPOLENS_SMOKE_HIDDEN: "1", ELECTRON_DISABLE_GPU: "1" };
+  delete env.REPOLENS_AI_API_KEY; delete env.REPOLENS_AI_BASE_URL; delete env.REPOLENS_AI_MODEL;
+  const native = await _electron.launch({ executablePath: executable, args: [root], cwd: root, env, timeout: 30000 });
+  const child = native.process(), record = { child, output: [] }; children.push(record);
+  child.stdout.on("data", chunk => record.output.push(chunk.toString()));
+  child.stderr.on("data", chunk => record.output.push(chunk.toString()));
+  let timer;
+  try {
+    const page = await native.firstWindow();
+    await page.getByRole("heading", { name: "打开仓库，开始阅读" }).waitFor({ timeout: 20000 });
+    const apiOrigin = await page.evaluate(() => window.__REPOLENS_RUNTIME__.apiOrigin);
+    const exited = waitForChildExit(child);
+    await native.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.forcefullyCrashRenderer());
+    await native.evaluate(({ app }) => app.quit()).catch(() => {});
+    const exit = await Promise.race([exited, new Promise(resolve => { timer = setTimeout(() => resolve({ timeout: true }), 25000); timer.unref?.(); })]);
+    assert.deepEqual(exit, { code: 1, signal: null }, `a crashed renderer must exit with failure after service cleanup: ${record.output.join("")}`);
+    assert.equal(await fetch(`${apiOrigin}/api/health`, { signal: AbortSignal.timeout(500) }).then(() => true, () => false), false, "renderer-crash shutdown closes its owned backend");
+  } finally {
+    clearTimeout(timer);
+    if (child.exitCode === null) spawnSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], { windowsHide: true });
+    await native.close().catch(() => {});
+  }
+}
+
 async function crashBackendAndAssertFailure(app) {
   const apiOrigin = await app.page.evaluate(() => window.__REPOLENS_RUNTIME__?.apiOrigin ?? "");
   const port = new URL(apiOrigin).port;
@@ -421,11 +448,11 @@ try {
   await first.page.getByRole("dialog", { name: "模型设置" }).getByRole("button", { name: "关闭", exact: true }).click();
 
   await first.page.getByRole("button", { name: "生成当前文件讲解" }).click();
-  const explanationConsent = first.page.locator(".ai-consent");
+  const explanationConsent = first.page.locator(".copilot-composer");
   await explanationConsent.getByText("src/main.py", { exact: false }).waitFor({ state: "visible" });
   assert.equal(modelRequests.length, 0, "the explanation preview requires confirmation before a model call");
-  await explanationConsent.getByRole("button", { name: "确认发送并生成" }).click();
-  await first.page.getByText("桌面模拟讲解", { exact: true }).waitFor({ state: "visible", timeout: 20_000 });
+  await explanationConsent.getByRole("button", { name: "发送", exact: true }).click();
+  await first.page.locator(".details-pane").getByText("桌面模拟讲解", { exact: true }).waitFor({ state: "visible", timeout: 20_000 });
   assert.equal(modelRequests.length, 1);
   assert.equal(modelRequests[0].mode, "explanation");
   assert.equal(modelRequests[0].entryFileId, "src/main.py");
@@ -435,20 +462,19 @@ try {
 
   await first.page.getByRole("tab", { name: "讲解", exact: true }).click();
   await first.page.getByRole("button", { name: "生成当前文件讲解" }).click();
-  await first.page.locator(".ai-consent").getByRole("button", { name: "确认发送并生成" }).click();
-  await first.page.waitForFunction(() => {
-    const button = [...document.querySelectorAll("button")].find((item) => item.textContent?.trim() === "生成当前文件讲解");
-    return button && !button.disabled;
-  }, null, { timeout: 20_000 });
+  await first.page.locator(".copilot-composer").getByRole("button", { name: "发送", exact: true }).click();
+  await first.page.locator('.question-message.is-assistant').nth(1).waitFor({ state: "visible", timeout: 20000 });
+  await first.page.locator('.chat-send[aria-label="停止"]').waitFor({ state: "hidden", timeout: 20000 });
   assert.equal(modelRequests.length, 1, "a newly confirmed preview reuses the cached explanation for the same source context");
 
   await first.page.getByRole("button", { name: "生成阅读路线" }).click();
-  const routeConsent = first.page.locator(".ai-consent");
-  await routeConsent.getByText("src/main.py", { exact: false }).waitFor({ state: "visible" });
+  const routeConsent = first.page.locator(".copilot-composer");
+  await routeConsent.getByRole("button", { name: "发送", exact: true }).waitFor({ state: "visible" });
   assert.equal(modelRequests.length, 1, "route preview is also zero-call until confirmation");
-  await routeConsent.getByRole("button", { name: "确认发送并生成" }).click();
+  await routeConsent.getByRole("button", { name: "发送", exact: true }).click();
+  await first.page.locator(".chat-result-card").last().getByRole("button", { name: "开始阅读", exact: true }).click();
   await openTourSteps(first.page);
-  await first.page.getByRole("button", { name: "第 1 步：main.py" }).waitFor({ state: "visible", timeout: 20_000 });
+  await first.page.getByRole("button", { name: "第 1 步：src/main.py" }).waitFor({ state: "visible", timeout: 20_000 });
   assert.equal(modelRequests.length, 2);
   assert.equal(modelRequests[1].mode, "route");
   assert.equal(modelRequests[1].entryFileId, "src/main.py");
@@ -464,6 +490,7 @@ try {
   const stateContract = LocalWorkspaceStateSchema.safeParse(stateBeforeQuestions);
   assert.ok(stateContract.success, `saved workspace must remain readable before opening Q&A: ${stateContract.success ? "" : JSON.stringify(stateContract.error.issues)}`);
 
+  await first.page.getByRole("button", { name: "收起 AI 面板", exact: true }).click();
   // Exercise the overlay layout even on machines with a large desktop display.
   await first.page.setViewportSize({ width: 1024, height: 768 });
   await first.page.getByRole("tab", { name: "讲解", exact: true }).click();
@@ -471,6 +498,7 @@ try {
   await first.page.locator(".question-panel").waitFor({ state: "visible" });
   const initialQuestionAlert = first.page.locator(".question-panel [role='alert']");
   await initialQuestionAlert.waitFor({ state: "hidden", timeout: 20_000 });
+  await first.page.getByRole("button", { name: "新对话", exact: true }).click();
   const firstQuestion = "main.py 如何得到并打印 answer？";
   await first.page.getByLabel("提问或追问", { exact: true }).fill(firstQuestion);
   await first.page.getByRole("button", { name: "发送", exact: true }).waitFor({ state: "visible" });
@@ -515,14 +543,15 @@ try {
     }));
     throw new Error(`依赖图节点未就绪：${JSON.stringify(graphState)}\n${error.message}`);
   }
-  const nodeBox = await mainNode.boundingBox();
   const dependencyNode = first.page.locator('.react-flow__node[data-id="src/pkg/core.py"]');
   await dependencyNode.waitFor({ state: "visible", timeout: 12_000 });
+  await waitForStableGraph(first.page);
+  const nodeBox = await mainNode.boundingBox();
   const dependencyBox = await dependencyNode.boundingBox();
   assert.ok(nodeBox && dependencyBox && nodeBox.width > 0 && nodeBox.height > 0 && dependencyBox.width > 0 && dependencyBox.height > 0,
     "the selected repository entry and its dependency are represented in the dependency graph");
-  await waitForStableGraph(first.page);
   const initialMainTransform = await mainNode.evaluate((node) => (node.getAttribute("style") ?? "").match(/translate\(([-\d.]+)px,\s*([-\d.]+)px\)/)?.[0]);
+  const initialDependencyTransform = await dependencyNode.evaluate(node => (node.getAttribute("style") ?? "").match(/translate\(([-\d.]+)px,\s*([-\d.]+)px\)/)?.[0]);
   await first.page.mouse.move(nodeBox.x + nodeBox.width / 2, nodeBox.y + nodeBox.height / 2);
   await first.page.mouse.down();
   await first.page.mouse.move(dependencyBox.x + dependencyBox.width / 2, dependencyBox.y + dependencyBox.height / 2, { steps: 8 });
@@ -536,6 +565,7 @@ try {
   const mainGraphNode = draggedGraph.find((node) => node.id === "src/main.py");
   const dependencyGraphNode = draggedGraph.find((node) => node.id === "src/pkg/core.py");
   assert.ok(mainGraphNode && dependencyGraphNode && mainGraphNode.transform !== initialMainTransform, "the entry node moved to the dragged position");
+  assert.notEqual(dependencyGraphNode.transform, initialDependencyTransform, "the drag actually collided with the dependency and moved its neighbor");
   assert.ok(mainGraphNode.right <= dependencyGraphNode.left || dependencyGraphNode.right <= mainGraphNode.left
     || mainGraphNode.bottom <= dependencyGraphNode.top || dependencyGraphNode.bottom <= mainGraphNode.top, "overlapping nodes are separated after the drag settles");
   const draggedTransforms = Object.fromEntries(draggedGraph.map((node) => [node.id, node.transform]));
@@ -562,6 +592,11 @@ try {
   const expectedDependencyPosition = persistedRecords.nodePositions["src/pkg/core.py"];
   assert.ok(Number.isFinite(expectedDependencyPosition?.x) && Number.isFinite(expectedDependencyPosition?.y), "the nudged neighbor has a persisted coordinate pair");
 
+  const draftMarker = "DESKTOP_UNSENT_DRAFT_RESTART_CHECK";
+  const firstDraftInput = first.page.locator(".ai-chat-workspace:not([hidden])").getByLabel("提问或追问", { exact: true });
+  if (!await firstDraftInput.isVisible()) await first.page.getByRole("button", { name: "打开 AI 聊天", exact: true }).click();
+  await firstDraftInput.fill(draftMarker);
+  // Changing workspaces must flush the original session before it closes.
   const sampleCloseResponse = first.page.waitForResponse((response) => response.url().endsWith("/api/close"));
   await openSampleFromCurrentPage(first.page);
   assert.equal((await sampleCloseResponse).status(), 200, "returning to the sample waits for local repository cleanup");
@@ -602,6 +637,7 @@ try {
     const progress = JSON.parse(value);
     return progress.stepIndex === 4 && progress.completedSteps?.includes("service");
   }), "completed sample route persists before shutdown");
+  const firstUiOrigin = new URL(first.page.url()).origin;
   await quit(first);
 
   const stateText = await readFile(path.join(userDataPath, "workspace-v1.json"), "utf8");
@@ -620,6 +656,8 @@ try {
   const encryptedModelSettings = await readFile(path.join(userDataPath, "model-settings.enc"));
   assert.equal(encryptedModelSettings.includes(Buffer.from(testApiKey)), false, "the saved API key is never plaintext");
   const second = await launch({ expectTourHidden: true });
+  assert.notEqual(new URL(second.page.url()).origin, firstUiOrigin, "desktop uses a new isolated UI origin");
+
   const rememberedSettings = await second.page.evaluate(async () => fetch(window.__REPOLENS_RUNTIME__.apiOrigin + "/api/ai/settings").then((response) => response.json()));
   assert.equal(rememberedSettings.configured, true, "restart restores the encrypted model and key");
   assert.equal(rememberedSettings.apiKey, undefined, "the renderer never receives the remembered key");
@@ -658,6 +696,12 @@ try {
     return { id: snapshot.id, workspaceId: snapshot.workspaceId, persistenceSessionId: snapshot.persistenceSessionId, positions: saved.nodePositions };
   }, recentEntry.id);
   assert.equal(reopenedIdentity.workspaceId, diskWorkspaceId, `reopening a local repository preserves its workspace identity: ${JSON.stringify(reopenedIdentity)}`);
+  const secondDraftInput = second.page.locator(".ai-chat-workspace:not([hidden])").getByLabel("提问或追问", { exact: true });
+  if (!await secondDraftInput.isVisible()) await second.page.getByRole("button", { name: "打开 AI 聊天", exact: true }).click();
+  await second.page.waitForFunction(marker => [...document.querySelectorAll(".ai-chat-workspace:not([hidden]) textarea")].some(input => input.value === marker), draftMarker);
+  assert.equal(await secondDraftInput.inputValue(), draftMarker, "unsent draft restores despite changing desktop ports");
+  await secondDraftInput.fill("");
+  await second.page.getByRole("button", { name: "收起 AI 面板", exact: true }).click();
   assert.deepEqual(reopenedIdentity.positions?.["src/main.py"], expectedNodePosition, "opening a local repository does not switch the workspace position record");
   assert.deepEqual(reopenedIdentity.positions?.["src/pkg/core.py"], expectedDependencyPosition, "opening a local repository preserves the adjusted neighbor coordinate");
   await second.page.getByRole("treeitem", { name: "main.py" }).click();
@@ -714,9 +758,9 @@ try {
   await second.page.getByText("引用关联的源码已变化，结果已过期，无法跳转。", { exact: true }).waitFor({ state: "visible" });
   await assertDisabled(second.page.locator(".ai-result [aria-label='AI 源码引用'] .reference-row").first(), "expired explanation references cannot navigate");
   await openTourSteps(second.page);
-  await assertDisabled(second.page.getByRole("button", { name: "第 1 步：main.py" }), "expired route steps cannot navigate");
+  await assertDisabled(second.page.getByRole("button", { name: "第 1 步：src/main.py" }), "expired route steps cannot navigate");
   await closeTourSteps(second.page);
-  await second.page.getByRole("tab", { name: "问答", exact: true }).click();
+  await second.page.getByRole("button", { name: "打开聊天", exact: true }).click();
   await second.page.locator(".question-message.is-stale").first().waitFor({ state: "visible" });
   await assertDisabled(second.page.locator(".question-message.is-stale .question-references button").first(), "expired question references cannot navigate");
   await second.page.getByRole("button", { name: "导览已完成" }).waitFor({ state: "visible" });
@@ -776,13 +820,21 @@ try {
   }
   await third.page.getByRole("heading", { name: "打开仓库，开始阅读" }).waitFor({ state: "visible" });
   await quit(third);
-  const fourth = await launch();
+  // The fault-exit check asserts the existing noninteractive test-mode exit;
+  // visible-window screenshots are captured by the earlier launches.
+  const fourth = await launch({ hidden: true });
   await openRepositoryHome(fourth.page);
   await fourth.page.locator("#repository-path").fill(repositoryPath);
   await fourth.page.getByRole("button", { name: "打开仓库", exact: true }).click();
   await fourth.page.getByRole("treeitem", { name: "main.py" }).waitFor({ state: "visible", timeout: 20_000 });
   await crashBackendAndAssertFailure(fourth);
-  process.stdout.write("Desktop smoke passed: single-instance launch; backend crash notification and failure exit; real UI AI previews, cached explanation, route and two-turn cited Q&A; persistence and stale-reference checks across restart; Python/Go indexing; damaged-store recovery; missing-Git guidance; data clearing; graceful exit.\n");
+  if (process.env.REPOLENS_DESKTOP_DEV === "1") await crashRendererAndAssertExit();
+  process.stdout.write("Desktop smoke passed: single-instance launch; backend crash notification and failure exit; source renderer-crash exit when requested; real UI AI previews, cached explanation, route and two-turn cited Q&A; persistence and stale-reference checks across restart; Python/Go indexing; damaged-store recovery; missing-Git guidance; data clearing; graceful exit.\n");
+} catch (error) {
+  if (process.env.REPOLENS_SMOKE_SCREENSHOTS) for (const record of children) {
+    try { if (record.page && record.child.exitCode === null) await record.page.screenshot({ path: path.join(process.env.REPOLENS_SMOKE_SCREENSHOTS, "failure.png"), timeout: 5000 }); } catch { /* Preserve the original failure. */ }
+  }
+  throw error;
 } finally {
   for (const record of children) {
     if (record.child.exitCode !== null) continue;

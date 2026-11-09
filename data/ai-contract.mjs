@@ -11,16 +11,30 @@ export const AiQuestionAnswerSchema = z.object({ answer: z.string().min(1), insu
   for (const claim of value.claims ?? []) if (claim.referenceIndices.some((index) => index >= value.references.length)) context.addIssue({ code: "custom", message: "claim reference index is invalid" });
 });
 
+// Conversation can use general knowledge. Any citations it does include still
+// pass the same immutable source-range checks as grounded repository answers.
+export const AiConversationAnswerSchema = z.object({
+  answer: z.string().min(1), insufficientEvidence: z.boolean().default(false),
+  references: z.array(AiSourceReferenceSchema).default([]),
+  claims: z.array(z.object({ text: z.string().min(1), referenceIndices: z.array(z.number().int().nonnegative()).min(1) }).strict()).optional(),
+}).strict().superRefine((value, context) => {
+  if (value.insufficientEvidence && (value.references.length || value.claims?.length)) context.addIssue({ code: "custom", message: "insufficient evidence cannot claim source support" });
+  for (const claim of value.claims ?? []) if (claim.referenceIndices.some(index => index >= value.references.length)) context.addIssue({ code: "custom", message: "claim reference index is invalid" });
+});
+
 export const AiGenerationEnvelopeSchema = z.object({
   result: z.record(z.string(), z.unknown()),
   cached: z.boolean(),
   revision: z.string().min(1),
   repositoryId: z.string().min(1),
-  entryFileId: z.string().min(1),
+  entryFileId: z.string(),
   mode: z.enum(["explanation", "route", "question", "investigation"]),
   chatPersisted: z.boolean().optional(),
+  routePersisted: z.boolean().optional(),
   warning: z.string().optional(),
-}).strict();
+}).strict().superRefine((value, context) => {
+  if (!value.entryFileId && value.mode !== "question") context.addIssue({ code: "custom", path: ["entryFileId"], message: "生成结果缺少入口文件" });
+});
 
 export const AiStreamEventSchema = z.object({
   type: z.enum(["status", "text", "replace", "complete", "error"]),
@@ -45,7 +59,7 @@ export const AiScopeCandidateSchema = z.object({
 });
 
 export const AiPreviewScopeRequiredSchema = z.object({
-  scopeRequired: z.literal(true), searchSuggestions: z.array(z.string()).optional(),
+  scopeRequired: z.literal(true), blockers: z.array(z.enum(["insufficient_evidence", "file_limit", "character_limit", "ambiguous_definition", "invalid_range"])).optional(), searchSuggestions: z.array(z.string()).optional(),
   candidates: z.array(AiScopeCandidateSchema),
   maxFiles: z.number().int().positive(),
   maxCharacters: z.number().int().positive(),
@@ -56,8 +70,8 @@ export const AiPreviewSuccessSchema = z.object({
   scopeRequired: z.literal(false),
   preview: z.object({
     id: z.string().min(1), repositoryId: z.string().min(1), revision: z.string().min(1),
-    entryFileId: z.string().min(1), mode: z.enum(["explanation", "route", "question", "investigation"]),
-    goal: z.string().max(300).optional(),
+    entryFileId: z.string(), mode: z.enum(["explanation", "route", "question", "investigation"]),
+    goal: z.string().max(300).optional(), conversation: z.boolean().optional(), contextNotice: z.string().optional(),
     baseUrl: z.string().min(1), model: z.string().min(1),
     files: z.array(z.object({ fileId: z.string().min(1), startLine: z.number().int().positive(), endLine: z.number().int().positive(), contentHash: z.string().min(1), reasons: z.array(z.string().min(1)).optional(), alternativeRanges: z.array(z.object({ startLine: z.number().int().positive(), endLine: z.number().int().positive(), name: z.string() })).optional() }).strict()),
     characters: z.number().int().nonnegative(), tokenEstimate: z.number().int().nonnegative().optional(), expiresAt: z.number().int().positive(),
@@ -65,7 +79,9 @@ export const AiPreviewSuccessSchema = z.object({
     history: z.array(z.object({ role: z.enum(["user", "assistant"]), content: z.string() }).strict()).max(6).optional(),
     retrievalInsufficient: z.boolean().optional(),
   }).strict(),
-}).strict();
+}).strict().superRefine(({ preview }, context) => {
+  if (!preview.entryFileId && !(preview.mode === "question" && preview.conversation && !preview.files.length)) context.addIssue({ code: "custom", path: ["preview", "entryFileId"], message: "源码任务需要入口文件" });
+});
 
 export const AiPreviewResponseSchema = z.union([AiPreviewSuccessSchema, AiPreviewScopeRequiredSchema]);
 

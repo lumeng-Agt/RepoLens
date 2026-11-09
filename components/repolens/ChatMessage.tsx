@@ -1,4 +1,4 @@
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import { MoreHorizontal, Pencil, X, FileCode2 } from "lucide-react";
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { ChatMarkdown, ChatCopyButton } from "./ChatMarkdown";
@@ -11,18 +11,23 @@ export function ChatEvidence({ evidence, onClose, onOpen }: { evidence: ChatEvid
   </aside>;
 }
 
-export function ChatMessage({ entry, stale, busy, evidence, onEvidence, onCloseEvidence, onOpen, onEdit, onSupplement, onTour }: {
+export function ChatMessage({ entry, stale, busy, evidence, onEvidence, onCloseEvidence, onOpen, onEdit, onSupplement, onTour, routeSaved, onSaveTour, onRefine, onShowGraph }: {
+  onShowGraph?: (ids: string[]) => void;
+  onRefine?: (entry: QaMessage) => void;
   entry: QaMessage; stale: boolean; busy: boolean; evidence: ChatEvidenceState | null;
   onEvidence: (entry: QaMessage, reference: QaReference, index: number) => void;
   onCloseEvidence: () => void; onOpen: (reference: SourceReference) => void;
+  routeSaved?: boolean; onSaveTour?: (route: AiRouteRecord) => Promise<boolean>;
   onEdit: (text: string) => void; onSupplement: (entry: QaMessage) => void; onTour?: (route: AiRouteRecord) => void;
 }) {
+  const [routeSaveBusy, setRouteSaveBusy] = useState(false);
+  const [routeSaveMessage, setRouteSaveMessage] = useState("");
   const supplementAfterClose = useRef(false);
   const references = entry.references;
   const referenceButton = (reference: QaReference, index: number) => <button key={`${reference.fileId}:${reference.startLine}:${index}`} type="button" disabled={stale} title={stale ? "源码已变化，引用需要重新核对" : reference.fileId} onClick={() => onEvidence(entry, reference, index)}><FileCode2 size={12}/>{reference.fileId.split("/").pop()}:{reference.startLine}{reference.endLine && reference.endLine !== reference.startLine ? `–${reference.endLine}` : ""}</button>;
   return <article className={`question-message is-${entry.role}${stale ? " is-stale" : ""}`}>
     <div className="question-message-heading"><strong>{entry.role === "user" ? "你" : "RepoLens"}</strong>{stale && <span>源码已变化 · 回答过期</span>}</div>
-    {entry.route ? <section className="chat-result-card"><strong>{entry.route.title}</strong><details><summary>{entry.route.steps.length} 个阅读步骤</summary><ol>{entry.route.steps.map(step => <li key={step.id}><button type="button" disabled={stale} onClick={() => onOpen(step.reference)}>{step.title}</button><p>{step.description}</p></li>)}</ol></details><button type="button" disabled={stale} onClick={() => onTour?.(entry.route!)}>开始阅读</button></section>
+    {entry.route ? <section className="chat-result-card"><strong>{entry.route.title}</strong><button type="button" disabled={busy || stale} onClick={() => onRefine?.(entry)}>调整这份结果</button><details><summary>{entry.route.steps.length} 个阅读步骤</summary><ol>{entry.route.steps.map(step => <li key={step.id}><button type="button" disabled={stale} onClick={() => onOpen(step.reference)}>{step.title}</button><p>{step.description}</p></li>)}</ol></details><button type="button" disabled={stale} onClick={() => onTour?.(entry.route!)}>开始阅读</button>{entry.routePersisted === false && !routeSaved && <p role="status">本次路线未加入已保存路线；完整内容已保留在这条回答中。</p>}{onSaveTour && !routeSaved && <button type="button" disabled={busy || routeSaveBusy || stale} onClick={async () => { setRouteSaveBusy(true); try { const saved = await onSaveTour(entry.route!); setRouteSaveMessage(saved ? "路线已保存。" : "路线尚未保存，请查看保存提示后重试。"); } catch { setRouteSaveMessage("路线尚未保存，请重试。"); } finally { setRouteSaveBusy(false); } }}>{routeSaveBusy ? "正在保存…" : "保存路线"}</button>}{routeSaveMessage && <p role="status">{routeSaveMessage}</p>}</section>
       : entry.explanation ? <section className="chat-result-card"><strong>{String(entry.explanation.role ?? entry.explanation.title ?? "文件讲解")}</strong><ul>{(Array.isArray(entry.explanation.keyPoints) ? entry.explanation.keyPoints as string[] : []).map((point, index) => <li key={index}><ChatMarkdown text={point}/></li>)}</ul></section>
       : <ChatMarkdown text={entry.content}/>}
     {!!entry.claims?.length && <details className="chat-claims"><summary>结论与依据</summary>{entry.claims.map((claim, index) => <div key={index}><p>{claim.text}</p><div className="question-references">{claim.referenceIndices.map(i => references[i] && referenceButton(references[i], i))}</div></div>)}</details>}
@@ -30,7 +35,7 @@ export function ChatMessage({ entry, stale, busy, evidence, onEvidence, onCloseE
     {entry.role === "assistant" && !!references.length && <div className="question-references" aria-label="回答引用">{references.map(referenceButton)}</div>}
     {evidence?.messageId === entry.id && <ChatEvidence evidence={evidence} onClose={onCloseEvidence} onOpen={onOpen}/>}
     <div className="chat-message-tools"><ChatCopyButton text={entry.content} label={entry.role === "user" ? "复制问题" : "复制回答"}/><button type="button" disabled={busy} aria-label="编辑为新问题" title="编辑为新问题" onClick={() => onEdit(entry.content)}><Pencil size={13}/></button>
-      {entry.role === "assistant" && <DropdownMenu><DropdownMenuTrigger asChild><button type="button" aria-label="回答菜单" title="更多"><MoreHorizontal size={15}/></button></DropdownMenuTrigger><DropdownMenuContent align="start" onCloseAutoFocus={event => { if (supplementAfterClose.current) { event.preventDefault(); supplementAfterClose.current = false; requestAnimationFrame(() => onSupplement(entry)); } }}><DropdownMenuItem disabled={busy} onSelect={() => { supplementAfterClose.current = true; }}>补充文件</DropdownMenuItem></DropdownMenuContent></DropdownMenu>}
+      {entry.role === "assistant" && <DropdownMenu><DropdownMenuTrigger asChild><button type="button" aria-label="回答菜单" title="更多"><MoreHorizontal size={15}/></button></DropdownMenuTrigger><DropdownMenuContent align="start" onCloseAutoFocus={event => { if (supplementAfterClose.current) { event.preventDefault(); supplementAfterClose.current = false; requestAnimationFrame(() => onSupplement(entry)); } }}><DropdownMenuItem disabled={stale} onSelect={() => onShowGraph?.([...new Set(entry.contextFiles.map(file => file.fileId))])}>在图谱中查看相关文件</DropdownMenuItem><DropdownMenuItem disabled={busy} onSelect={() => { supplementAfterClose.current = true; }}>补充文件</DropdownMenuItem></DropdownMenuContent></DropdownMenu>}
     </div>
   </article>;
 }

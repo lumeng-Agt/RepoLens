@@ -1,10 +1,17 @@
+import { waitForRendererDrafts } from "./renderer-close.mjs";
 import { createModelSettingsStore } from "./model-settings.mjs";
+import {
+  readEditorPreference,
+  validateCodeExecutable,
+  findDefaultCodeExecutable,
+  saveEditorPreference,
+  launchCodeEditor,
+} from "./editor-preference.mjs";
 import { app, BrowserWindow, dialog, ipcMain, shell, safeStorage } from "electron";
-import { fork, spawn } from "node:child_process";
+import { fork } from "node:child_process";
 import { createServer } from "node:http";
-import { access, readFile, writeFile, lstat } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
-import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { isTrustedDesktopSender, isTrustedDesktopUrl, isAllowedExternalLink } from "./security-policy.mjs";
@@ -26,6 +33,7 @@ let mainWindow;
 let quitting = false;
 let shutdownPromise;
 let backendFailure = null;
+let rendererFailure = null;
 const logs = [];
 
 // Allow isolated desktop smoke runs without touching a user's normal AppData.
@@ -47,22 +55,6 @@ function log(message) {
   process.stdout.write(`[RepoLens] ${message}\n`);
 }
 
-function reservePort() {
-  return new Promise((resolve, reject) => {
-    const probe = net.createServer();
-    probe.once("error", reject);
-    probe.listen(0, "127.0.0.1", () => {
-      const address = probe.address();
-      if (!address || typeof address === "string") {
-        probe.close();
-        reject(new Error("无法为本地索引服务分配端口。"));
-        return;
-      }
-      probe.close((error) => error ? reject(error) : resolve(address.port));
-    });
-  });
-}
-
 function safeUiPath(requestUrl) {
   const pathname = new URL(requestUrl, "http://127.0.0.1").pathname;
   let decoded;
@@ -73,7 +65,8 @@ function safeUiPath(requestUrl) {
   return absolute.startsWith(rendererRoot + path.sep) || absolute === path.join(rendererRoot, "index.html") ? absolute : null;
 }
 
-async function startUiServer(apiOrigin) {
+async function startUiServer() {
+  let targetApiOrigin = null;
   const server = createServer(async (request, response) => {
     if (request.method !== "GET" && request.method !== "HEAD") {
       response.writeHead(405, { Allow: "GET, HEAD" }).end();
@@ -84,6 +77,10 @@ async function startUiServer(apiOrigin) {
       response.writeHead(400).end();
       return;
     }
+    if (!targetApiOrigin) {
+      response.writeHead(503, { "Content-Type": "text/plain; charset=utf-8" }).end("本地索引服务尚未就绪。");
+      return;
+    }
     try {
       let contents = await readFile(target);
       const extension = path.extname(target).toLowerCase();
@@ -92,9 +89,9 @@ async function startUiServer(apiOrigin) {
       response.setHeader("Referrer-Policy", "no-referrer");
       response.setHeader("Cache-Control", extension === ".html" ? "no-store" : "public, max-age=31536000, immutable");
       const nonce = randomBytes(18).toString("base64");
-      response.setHeader("Content-Security-Policy", `default-src 'self'; script-src 'self' 'nonce-${nonce}'; style-src 'self' 'unsafe-inline'; connect-src 'self' ${apiOrigin}; img-src 'self' data: blob:; font-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'`);
+      response.setHeader("Content-Security-Policy", `default-src 'self'; script-src 'self' 'nonce-${nonce}'; style-src 'self' 'unsafe-inline'; connect-src 'self' ${targetApiOrigin}; img-src 'self' data: blob:; font-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'`);
       if (extension === ".html") {
-        const runtime = `<script nonce="${nonce}">globalThis.__REPOLENS_RUNTIME__=${JSON.stringify({ apiOrigin, desktop: true })}</script>`;
+        const runtime = `<script nonce="${nonce}">globalThis.__REPOLENS_RUNTIME__=${JSON.stringify({ apiOrigin: targetApiOrigin, desktop: true })}</script>`;
         contents = Buffer.from(contents.toString("utf8").replace("</head>", `${runtime}</head>`));
       }
       response.writeHead(200, { "Content-Length": contents.length });
@@ -107,7 +104,11 @@ async function startUiServer(apiOrigin) {
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("无法启动桌面界面服务。");
   uiServer = server;
-  return `http://127.0.0.1:${address.port}`;
+  const origin = `http://127.0.0.1:${address.port}`;
+  return {
+    origin,
+    setTargetApiOrigin(origin) { targetApiOrigin = origin; },
+  };
 }
 
 async function waitForBackend(origin, child) {
@@ -126,7 +127,6 @@ async function waitForBackend(origin, child) {
 function stopBackend() {
   if (shutdownPromise) return shutdownPromise;
   shutdownPromise = (async () => {
-
     if (backend && backend.exitCode === null) {
       const exited = new Promise((resolve) => backend.once("exit", (code, signal) => resolve({ code, signal })));
       const timer = new Promise((resolve) => setTimeout(() => resolve({ timeout: true }), 20_000));
@@ -151,7 +151,7 @@ async function createMainWindow(uiOrigin) {
     height: 900,
     minWidth: 375,
     minHeight: 600,
-    backgroundColor: "#0b1015",
+    backgroundColor: "#f6f7f8",
     show: false,
     webPreferences: {
       preload: path.join(here, "preload.cjs"),
@@ -170,6 +170,10 @@ async function createMainWindow(uiOrigin) {
   });
   mainWindow.once("ready-to-show", () => { if (process.env.REPOLENS_SMOKE_HIDDEN !== "1") mainWindow?.show(); });
   await mainWindow.loadURL(`${uiOrigin}/`);
+  mainWindow.on("close", (event) => {
+    event.preventDefault();
+    if (!quitting) app.quit();
+  });
   mainWindow.on("closed", () => { mainWindow = undefined; });
 }
 
@@ -179,9 +183,8 @@ async function start() {
   const rendererIndex = path.join(rendererRoot, "index.html");
   await access(rendererIndex);
   await access(backendPath);
-  const apiPort = await reservePort();
-  const apiOrigin = `http://127.0.0.1:${apiPort}`;
-  const uiOrigin = await startUiServer(apiOrigin);
+  const uiService = await startUiServer();
+  const uiOrigin = uiService.origin;
   ipcMain.handle("repository:select-directory", async (event) => {
     if (!isTrustedDesktopSender(event, mainWindow?.webContents, uiOrigin)) throw new Error("未授权的桌面目录选择请求。");
     const result = await dialog.showOpenDialog(mainWindow, { title: "打开本地仓库", properties: ["openDirectory"] });
@@ -194,24 +197,27 @@ async function start() {
     editorBusy = true;
     try {
       if (!input || typeof input !== "object" || Object.keys(input).some(key => !["repositoryId", "revision", "persistenceSessionId", "fileId", "contentHash", "line"].includes(key))) throw new Error("源码位置无效。");
-      const preferencePath = path.join(app.getPath("userData"), "editor-v1.json");
-      let executable;
-      try { executable = JSON.parse(await readFile(preferencePath, "utf8")).executable; } catch { /* Ask for an executable if none was saved. */ }
-      const valid = async value => {
-        if (typeof value !== "string" || !path.isAbsolute(value) || path.basename(value).toLowerCase() !== "code.exe") return false;
-        try { const info = await lstat(value); return info.isFile() && !info.isSymbolicLink(); } catch { return false; }
-      };
-      if (!await valid(executable)) {
-        const candidates = [path.join(process.env.LOCALAPPDATA ?? "", "Programs", "Microsoft VS Code", "Code.exe"), path.join(process.env.ProgramFiles ?? "", "Microsoft VS Code", "Code.exe")];
-        executable = null;
-        for (const candidate of candidates) if (await valid(candidate)) { executable = candidate; break; }
+      const pref = await readEditorPreference(app.getPath("userData"));
+      let executable = null;
+      if (pref.status === "configured") {
+        const check = await validateCodeExecutable(pref.executable);
+        if (check.ok) executable = pref.executable;
+      }
+      if (!executable) {
+        executable = await findDefaultCodeExecutable();
         if (!executable) {
-          const selected = await dialog.showOpenDialog(mainWindow, { title: "选择 VS Code 程序 Code.exe", filters: [{ name: "VS Code", extensions: ["exe"] }], properties: ["openFile"] });
+          const selected = await dialog.showOpenDialog(mainWindow, {
+            title: "选择 VS Code 程序 Code.exe",
+            filters: [{ name: "VS Code", extensions: ["exe"] }],
+            properties: ["openFile"],
+          });
           if (selected.canceled) return false;
-          executable = selected.filePaths[0];
-          if (!await valid(executable)) throw new Error("请选择 VS Code 的 Code.exe 程序。");
+          const chosen = selected.filePaths[0];
+          const check = await validateCodeExecutable(chosen);
+          if (!check.ok) throw new Error(check.reason);
+          executable = chosen;
         }
-        await writeFile(preferencePath, JSON.stringify({ version: 1, executable }), "utf8");
+        await saveEditorPreference(app.getPath("userData"), executable);
       }
       const target = await new Promise((resolve, reject) => {
         const id = randomBytes(16).toString("hex"); const child = backend;
@@ -222,10 +228,7 @@ async function start() {
         child?.on("message", onMessage); child?.once("exit", onExit);
         if (!child?.connected) { cleanup(); reject(new Error("本地服务已停止。")); } else child.send({ type: "editor:resolve", id, input });
       });
-      await new Promise((resolve, reject) => {
-        const child = spawn(executable, ["--reuse-window", "--goto", `${target.path}:${target.line}:1`], { shell: false, windowsHide: true, detached: true, stdio: "ignore", cwd: app.getPath("userData") });
-        child.once("error", reject); child.once("spawn", () => { child.unref(); resolve(); });
-      });
+      await launchCodeEditor(executable, target, { cwd: app.getPath("userData") });
       return true;
     } finally { editorBusy = false; }
   });
@@ -239,9 +242,10 @@ async function start() {
     env: {
       ...process.env,
       ELECTRON_RUN_AS_NODE: "1",
+      REPOLENS_DESKTOP: "1",
+      REPOLENS_PORT: "0",
       REPOLENS_DESKTOP_SETTINGS: "1",
-      ...(restoredModelSettings ? { REPOLENS_AI_BASE_URL: restoredModelSettings.baseUrl, REPOLENS_AI_MODEL: restoredModelSettings.model, REPOLENS_AI_API_KEY: restoredModelSettings.apiKey } : {}),
-      REPOLENS_PORT: String(apiPort),
+      ...(restoredModelSettings ? { REPOLENS_AI_AUTH_MODE: restoredModelSettings.authMode ?? "key", REPOLENS_AI_BASE_URL: restoredModelSettings.baseUrl, REPOLENS_AI_MODEL: restoredModelSettings.model, REPOLENS_AI_API_KEY: restoredModelSettings.apiKey } : {}),
       REPOLENS_UI_PORT: new URL(uiOrigin).port,
       REPOLENS_ALLOWED_ORIGINS: uiOrigin,
       REPOLENS_USER_DATA_PATH: app.getPath("userData"),
@@ -270,7 +274,40 @@ async function start() {
       reportBackendFailure("本地服务意外停止。请重新启动 RepoLens 后继续操作。");
     }
   });
+
+  const apiPort = await new Promise((resolve, reject) => {
+    const child = backend;
+    const cleanup = () => {
+      clearTimeout(timer);
+      child?.off("message", onMessage);
+      child?.off("exit", onExit);
+    };
+    const onExit = (code, signal) => {
+      cleanup();
+      reject(new Error(`本地索引服务在就绪前退出（code: ${code}, signal: ${signal}）。`));
+    };
+    const onMessage = (message) => {
+      if (message?.type !== "backend:ready") return;
+      const port = Number(message.port);
+      if (Number.isInteger(port) && port > 0 && port <= 65535) {
+        cleanup();
+        resolve(port);
+      } else {
+        cleanup();
+        reject(new Error(`本地索引服务报告的端口无效：${message?.port}。`));
+      }
+    };
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error("等待本地索引服务就绪超时。"));
+    }, 20_000);
+    child?.on("message", onMessage);
+    child?.once("exit", onExit);
+  });
+
+  const apiOrigin = `http://127.0.0.1:${apiPort}`;
   await waitForBackend(apiOrigin, backend);
+  uiService.setTargetApiOrigin(apiOrigin);
   await createMainWindow(uiOrigin);
   if (settingsWarning) await dialog.showMessageBox(mainWindow, { type: "warning", message: "无法恢复上次的模型配置，请重新配置。原文件已保留。" });
   if (secondInstancePendingFocus) { secondInstancePendingFocus = false; focusMainWindow(); }
@@ -290,11 +327,28 @@ function reportBackendFailure(message) {
   log(message);
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("desktop:backend-status", { available: false, message });
 }
+async function flushRendererDrafts() {
+  const uiOrigin = uiServer?.address()?.port ? `http://127.0.0.1:${uiServer.address().port}` : "";
+  return waitForRendererDrafts({ window: mainWindow, ipc: ipcMain, uiOrigin, requestId: randomBytes(24).toString("hex"), isTrustedSender: isTrustedDesktopSender });
+}
 app.on("before-quit", (event) => {
-  if (quitting) return;
   event.preventDefault();
+  if (quitting) return;
   quitting = true;
-  void stopBackend().then(() => app.exit(0), async (error) => {
+  void (async () => {
+    try { await flushRendererDrafts(); }
+    catch (error) {
+      if (error.code === "RENDERER_UNAVAILABLE") rendererFailure ??= error.message;
+      if (!backendFailure && !rendererFailure) {
+        quitting = false;
+        if (process.env.REPOLENS_SMOKE_HIDDEN === "1") { log(error.message); return; }
+        await dialog.showMessageBox(mainWindow, { type: "error", title: "草稿尚未保存", message: error.message });
+        return;
+      }
+    }
+    await stopBackend();
+    app.exit(rendererFailure ? 1 : 0);
+  })().catch(async (error) => {
     if (process.env.REPOLENS_SMOKE_HIDDEN === "1") { log(error.message); app.exit(1); return; }
     await dialog.showMessageBox({ type: "error", title: backendFailure ? "RepoLens 服务异常" : "RepoLens 清理失败", message: backendFailure ? "本地索引服务曾意外停止。请重新启动 RepoLens。" : "RepoLens 未能完成退出清理。请检查应用日志后重试。", detail: error.message });
     app.exit(1);
@@ -304,7 +358,10 @@ app.on("window-all-closed", () => app.quit());
 app.on("activate", () => {
   if (!mainWindow && !quitting) void createMainWindow(`http://127.0.0.1:${uiServer.address().port}`);
 });
-app.on("render-process-gone", (_event, _webContents, details) => log(`渲染页面退出：${JSON.stringify(details)}`));
+app.on("render-process-gone", (_event, contents, details) => {
+  log(`渲染页面退出：${JSON.stringify(details)}`);
+  if (contents === mainWindow?.webContents && details.reason !== "clean-exit") rendererFailure = "窗口页面曾意外停止。";
+});
 app.on("child-process-gone", (_event, details) => log(`子进程退出：${JSON.stringify(details)}`));
 app.on("will-quit", () => { ipcMain.removeHandler("repository:select-directory"); });
 app.on("ready", () => {

@@ -27,6 +27,7 @@ export type QuestionRecoveryOperation =
 export function restoreQuestionConversations(workspaceId: string, saved: QuestionRecoveryConversation[]): QuestionRecoveryConversation[];
 export function failQuestionConversationRead(workspaceId: string, message: string): QuestionRecoveryConversation[];
 export function getQuestionConversationView(workspaceId: string): QuestionRecoveryConversation[];
+export function getQuestionConversationReadVersion(workspaceId: string): number;
 export function getQuestionConversationReadError(workspaceId: string): string;
 export function getQuestionConversationSaveError(workspaceId: string): string;
 export function recordQuestionConversationChanges(workspaceId: string, value: QuestionRecoveryConversation[]): QuestionRecoveryConversation[];

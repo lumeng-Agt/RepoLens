@@ -21,16 +21,25 @@ async function waitFile(file) {
   });
 }
 async function fixture(context, { wrapper = false, refuse = false } = {}) {
+  const startedAt = performance.now();
+  const timeline = [];
+  const mark = phase => timeline.push({ phase, elapsedMs: Math.round(performance.now() - startedAt) });
+  if (refuse) context.after(() => context.diagnostic(JSON.stringify({ shutdownTimeline: timeline })));
   const root = await mkdtemp(path.join(os.tmpdir(), "repolens-close-lifecycle-"));
   const working = path.join(root, "working"), remote = path.join(root, "remote.git"), local = path.join(root, "local");
   await mkdir(working); await mkdir(local);
   await writeFile(path.join(working, "index.ts"), "export const value = 1;\n");
   await writeFile(path.join(local, "local.ts"), "export const local = true;\n");
   const git = (cwd, ...args) => { const r = spawnSync("git", args, { cwd, encoding: "utf8", windowsHide: true }); assert.equal(r.status, 0, r.stderr); };
+  // The refusal test never opens a repository; Git setup would consume its
+  // 30-second budget before the actual 20-second shutdown assertion starts.
+  if (!refuse) {
   git(working, "init"); git(working, "config", "user.name", "Test"); git(working, "config", "user.email", "test@example.invalid");
   git(working, "add", "."); git(working, "commit", "-m", "fixture"); git(working, "branch", "-M", "main");
   git(root, "init", "--bare", remote); git(working, "remote", "add", "origin", remote); git(working, "push", "origin", "main");
   git(root, "--git-dir", remote, "symbolic-ref", "HEAD", "refs/heads/main");
+  }
+  mark("fixture-prepared");
   const listener = net.createServer(); listener.listen(0, "127.0.0.1"); await once(listener, "listening");
   const port = listener.address().port; await new Promise(r => listener.close(r));
   const arm = path.join(root, "arm"), entered = path.join(root, "entered"), release = path.join(root, "release"), block = path.join(root, "block");
@@ -44,6 +53,8 @@ async function fixture(context, { wrapper = false, refuse = false } = {}) {
       GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: `url.${pathToFileURL(remote).href}.insteadOf`, GIT_CONFIG_VALUE_0: url },
   });
   let output = ""; child.stdout.on("data", x => { output += x; }); child.stderr.on("data", x => { output += x; });
+  mark("wrapper-spawned");
+  child.once("exit", () => mark("wrapper-exited"));
   const exited = once(child, "exit");
   const api = async (route, body, probe) => {
     const response = await fetch(`http://127.0.0.1:${port}${route}`, { method: body ? "POST" : "GET", signal: AbortSignal.timeout(10000),
@@ -65,6 +76,7 @@ async function fixture(context, { wrapper = false, refuse = false } = {}) {
   let ready = false;
   for (let i = 0; i < 250 && !ready; i++) { try { await api("/api/health"); ready = true; } catch { await new Promise(r => setTimeout(r, 30)); } }
   assert.ok(ready, `本地服务未在 7.5 秒内就绪：${output}`);
+  mark("service-ready");
   return { root, local, url, api, child, exited, message, output: () => output,
     command: (n, clientId = "test") => ({ clientId, intentSequence: n }),
     directories: async () => (await readdir(root)).filter(n => n.startsWith("repolens-github-")),

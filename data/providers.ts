@@ -1,3 +1,6 @@
+import { flushChatPreferences } from "./chat-preference-lifecycle.mjs";
+import type { ChatPreferences } from "./chat-preferences.mjs";
+import { serializeWorkspaceMutation, assertConversationCapacity } from "./persistence-limits.mjs";
 import type { Investigation, AiQuestionConversation, AiRouteRecord, AiSavedResult, ReadingNote, RepositoryOverview, RepositorySnapshot, RevisionComparison, SearchRequest, SearchResponse } from "./model";
 import type { z } from "zod";
 import type { UsageGuidePreferences } from "./usage-guide.mjs";
@@ -54,6 +57,7 @@ export type LocalWorkspaceState = {
   progress: Record<string, string>;
   nodePositions: Record<string, { x: number; y: number }>;
   conversations: AiQuestionConversation[];
+  chatPreferences?: unknown;
   investigations?: Investigation[];
   readingNotes?: ReadingNote[];
   savedTours?: AiRouteRecord[];
@@ -74,13 +78,14 @@ export interface WorkspacePersistenceProvider {
   saveAiResult(session: WorkspaceSession, fileId: string, record: AiSavedResult): Promise<void>;
   saveAiRoute(session: WorkspaceSession, record: AiRouteRecord): Promise<void>;
   saveConversations(session: WorkspaceSession, conversations: AiQuestionConversation[]): Promise<void>;
+  saveChatPreferences(session: WorkspaceSession, preferences: ChatPreferences): Promise<void>;
   saveReadingNotes(session: WorkspaceSession, notes: ReadingNote[]): Promise<void>;
   saveTours(session: WorkspaceSession, tours: AiRouteRecord[]): Promise<void>;
   saveInvestigations(session: WorkspaceSession, records: Investigation[]): Promise<void>;
-  clearRepository(session: WorkspaceSession): Promise<void>;
+  clearRepository(session: WorkspaceSession): Promise<ClearResult>;
   saveGuidePreferences(preferences: UsageGuidePreferences): Promise<void>;
   saveLayoutPreferences(preferences: WorkspaceLayoutPreferences): Promise<void>;
-  clearAll(): Promise<void>;
+  clearAll(): Promise<ClearResult>;
 }
 
 async function request<T>(url: string, schema: z.ZodTypeAny, fallback: string, init?: RequestInit): Promise<T> {
@@ -99,18 +104,45 @@ async function request<T>(url: string, schema: z.ZodTypeAny, fallback: string, i
   return parseLocalApiResponse(value, response.status, schema, fallback) as T;
 }
 
+type ClearResult = { preserveMemory?: boolean; ok: boolean; warning?: string; cleared?: { model?: boolean; workspace: boolean; copies: boolean } };
+const clearOperations = new Map<string, string>();
+const appliedClears = new Set<string>();
+const notifiedModelClears = new Set<string>();
+// Only an acknowledged main-record clear permits a nondestructive copy-only retry.
+export function isWorkspaceCopyCleanupPending(session?: WorkspaceSession): boolean {
+  const operationId = clearOperations.get(session?.workspaceId ?? "clear-all");
+  return operationId !== undefined && appliedClears.has(operationId);
+}
+async function clearSavedData(input: Record<string, unknown>): Promise<ClearResult> {
+  const scope = String(input.workspaceId ?? input.action);
+  const operationId = clearOperations.get(scope) ?? crypto.randomUUID();
+  clearOperations.set(scope, operationId);
+  let result: ClearResult;
+  try {
+    const response = await fetch(`${LOCAL_API_ORIGIN}/api/workspace`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...input, operationId }) });
+    if (!response.ok) throw new Error(`清除结果未知（${response.status}），请重试清除。`);
+    result = WorkspaceSaveResponseSchema.parse(await response.json()) as ClearResult;
+  } catch (cause) { throw Object.assign(new Error("尚未确认清除结果，自动保存已暂停。请重试清除。", { cause }), { clearUnknown: true }); }
+  result.preserveMemory = appliedClears.has(operationId);
+  if (result.cleared?.model && !notifiedModelClears.has(operationId)) { notifiedModelClears.add(operationId); window.dispatchEvent(new Event("repolens:model-cleared")); }
+  if (result.cleared?.workspace) appliedClears.add(operationId);
+  if (result.ok) { clearOperations.delete(scope); appliedClears.delete(operationId); notifiedModelClears.delete(operationId); }
+  if (!result.ok && !result.cleared?.workspace) throw new Error(result.warning ?? "清除失败，请重试。");
+  return result;
+}
+
 async function persist(url: string, value: unknown): Promise<void> {
   const result = await request<{ ok: boolean; warning?: string }>(url, WorkspaceSaveResponseSchema, "本地保存结果格式无效。", {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(value),
+    method: "POST", headers: { "Content-Type": "application/json" }, body: serializeWorkspaceMutation(value),
   });
   if (!result.ok) throw new Error(result.warning ?? "本地保存未能写入磁盘。");
 }
 
 export const localRepositoryProvider: LocalRepositoryProvider = {
   async getSnapshot(repositoryId, signal) { return request(`${LOCAL_API_ORIGIN}/api/snapshot?repositoryId=${encodeURIComponent(repositoryId ?? "")}`, RepositorySnapshotSchema, "仓库快照格式无效。", { signal }) as Promise<RepositorySnapshot>; },
-  async openRepository(path, command, signal) { return request(`${LOCAL_API_ORIGIN}/api/open`, RepositorySnapshotSchema, "仓库快照格式无效。", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path, command }), signal }) as Promise<RepositorySnapshot>; },
+  async openRepository(path, command, signal) { await flushChatPreferences(signal); return request(`${LOCAL_API_ORIGIN}/api/open`, RepositorySnapshotSchema, "仓库快照格式无效。", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path, command }), signal }) as Promise<RepositorySnapshot>; },
   async rescan(repositoryId, signal) { return request(`${LOCAL_API_ORIGIN}/api/rescan`, RepositorySnapshotSchema, "仓库快照格式无效。", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repositoryId }), signal }) as Promise<RepositorySnapshot>; },
-  async closeRepository(command, signal) { await request(`${LOCAL_API_ORIGIN}/api/close`, WorkspaceSaveResponseSchema, "关闭结果格式无效。", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ command }), signal }); },
+  async closeRepository(command, signal) { await flushChatPreferences(signal); await request(`${LOCAL_API_ORIGIN}/api/close`, WorkspaceSaveResponseSchema, "关闭结果格式无效。", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ command }), signal }); },
   async getSource(repositoryId, revision, fileId, signal) { const query = new URLSearchParams({ repositoryId, file: fileId, ...(revision ? { revision } : {}) }); const value = await request<{ source: string }>(`${LOCAL_API_ORIGIN}/api/source?${query}`, SourceResponseSchema, "源码响应格式无效。", { signal }); return value.source; },
   async searchContent(input, signal) { return request(`${LOCAL_API_ORIGIN}/api/search`, SearchResponseSchema, "源码搜索结果格式无效。", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input), signal }) as Promise<SearchResponse>; },
   async getOverview(repositoryId, revision, signal) { const query = new URLSearchParams({ repositoryId, revision }); return request(`${LOCAL_API_ORIGIN}/api/overview?${query}`, RepositoryOverviewSchema, "仓库概览格式无效。", { signal }) as Promise<RepositoryOverview>; },
@@ -143,12 +175,13 @@ export const localWorkspaceProvider: WorkspacePersistenceProvider = {
   async saveNodePositions(session, positions) { await persist(`${LOCAL_API_ORIGIN}/api/workspace`, { action: "node-positions", ...session, positions }); },
   async saveAiResult(session, fileId, record) { await persist(`${LOCAL_API_ORIGIN}/api/workspace`, { action: "ai-result", ...session, fileId, record }); },
   async saveAiRoute(session, record) { await persist(`${LOCAL_API_ORIGIN}/api/workspace`, { action: "ai-route", ...session, record }); },
-  async saveConversations(session, conversations) { await persist(`${LOCAL_API_ORIGIN}/api/workspace`, { action: "conversations", ...session, conversations }); },
+  async saveConversations(session, conversations) { assertConversationCapacity(conversations); await persist(`${LOCAL_API_ORIGIN}/api/workspace`, { action: "conversations", ...session, conversations }); },
+  async saveChatPreferences(session, preferences) { await persist(`${LOCAL_API_ORIGIN}/api/workspace`, { action: "chat-preferences", ...session, preferences }); },
   async saveReadingNotes(session, notes) { await persist(`${LOCAL_API_ORIGIN}/api/workspace`, { action: "reading-notes", ...session, notes }); },
   async saveInvestigations(session, records) { await persist(`${LOCAL_API_ORIGIN}/api/workspace`, { action: "investigations", ...session, records }); },
   async saveTours(session, tours) { await persist(`${LOCAL_API_ORIGIN}/api/workspace`, { action: "saved-tours", ...session, tours }); },
   async saveGuidePreferences(preferences) { await persist(`${LOCAL_API_ORIGIN}/api/workspace`, { action: "guide-preferences", preferences }); },
   async saveLayoutPreferences(preferences) { await persist(`${LOCAL_API_ORIGIN}/api/workspace`, { action: "layout-preferences", preferences }); },
-  async clearRepository(session) { await persist(`${LOCAL_API_ORIGIN}/api/workspace`, { action: "clear-repository", ...session }); },
-  async clearAll() { await persist(`${LOCAL_API_ORIGIN}/api/workspace`, { action: "clear-all", repositoryId: "" }); },
+  async clearRepository(session) { return clearSavedData({ action: "clear-repository", ...session }); },
+  async clearAll() { return clearSavedData({ action: "clear-all", repositoryId: "" }); },
 };

@@ -90,6 +90,8 @@ export type RepositorySnapshot = {
 };
 
 export type AiPreview = {
+  conversation?: boolean;
+  contextNotice?: string;
   id: string;
   repositoryId: string;
   revision: string;
@@ -108,6 +110,7 @@ export type AiPreview = {
 };
 
 export type AiRouteRecord = {
+  importOrigin?: { repositoryId: string; revision: string; workspaceId?: string; ref?: string };
   repositoryId: string;
   entryFileId: string;
   revision: string;
@@ -193,6 +196,7 @@ export type SearchResult = {
 export type SearchResponse = {
   revision: string;
   filesSearched: number;
+  candidateFiles?: number;
   offset: number;
   pageSize: number;
   total: number;

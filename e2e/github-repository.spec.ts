@@ -76,7 +76,7 @@ test("GitHub link opens the selected tree, confirms only a previewed AI scope, a
     if (url.pathname === "/api/ai/generate") {
       modelCalls += 1;
       const body = request.postDataJSON() as { previewId: string };
-      expect(body).toEqual({ previewId: "preview-one" });
+      expect(body).toEqual({ previewId: "preview-one", stream: true, chat: { conversationId: expect.any(String), userMessageId: expect.any(String), answerMessageId: expect.any(String) } });
       return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ result: { role: "页面入口", keyPoints: ["读取任务数据"], references: [{ fileId: "src/main.ts", startLine: 2 }] }, cached: false, revision: snapshot.revision, repositoryId: snapshot.id, entryFileId: "src/main.ts", mode: "explanation" }) });
     }
     if (url.pathname === "/api/rescan") {
@@ -129,12 +129,13 @@ test("GitHub link opens the selected tree, confirms only a previewed AI scope, a
   await expect(page.getByRole("treeitem", { name: "main.ts" })).toBeVisible();
   await page.getByRole("treeitem", { name: "main.ts" }).click();
   await page.getByRole("button", { name: "生成当前文件讲解" }).click();
-  await expect(page.getByText("发送前确认")).toBeVisible();
-  expect(previewCalls).toBe(1);
+  await expect(page.getByRole("form", { name: "聊天输入" })).toBeVisible();
+  await expect.poll(() => previewCalls).toBe(1);
   expect(modelCalls).toBe(0);
-  await page.getByRole("button", { name: "确认发送并生成" }).click();
+  await page.getByRole("button", { name: "发送", exact: true }).click();
   await expect.poll(() => modelCalls).toBe(1);
-  await expect(page.getByRole("tabpanel", { name: "讲解" }).getByText("页面入口", { exact: true })).toBeVisible();
+  await expect(page.locator(".chat-result-card").getByText("页面入口", { exact: true })).toBeVisible();
+  await page.getByRole("complementary", { name: "AI 聊天", exact: true }).getByRole("button", { name: "收起 AI 面板", exact: true }).click();
 
   const refresh = page.waitForResponse((response) => response.url() === apiOrigin + "/api/rescan");
   await setDisclosureOpen(".overview-disclosure", false);

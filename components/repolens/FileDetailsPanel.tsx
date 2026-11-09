@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type RefObject, type ReactNode } from "react";
+import { useEffect, useMemo, useState, useRef, type RefObject, type ReactNode } from "react";
 import Prism, { type Token, type TokenStream } from "prismjs";
 import "prismjs/components/prism-javascript";
 import "prismjs/components/prism-jsx";
@@ -7,10 +7,9 @@ import "prismjs/components/prism-tsx";
 import "prismjs/components/prism-css";
 import "prismjs/components/prism-python";
 import "prismjs/components/prism-go";
-import { BookOpenText, ChevronRight, Code2, FileCode2, FileText, Waypoints, X } from "lucide-react";
+import { BookOpenText, ChevronRight, Code2, FileCode2, FileText, MessageSquare, Waypoints, X } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { AiResultView, type AiResultRecord } from "@/components/repolens/AiResultView";
-import { QuestionPanel } from "@/components/repolens/QuestionPanel";
 import { ReadingArtifactsPanel } from "@/components/repolens/ReadingArtifactsPanel";
 import type { AiLineRange, AiMode, AiScopeCandidate } from "@/data/explanation-provider";
 import type { AiPreview, AiRouteRecord, FileRecord, ReadingNote, RepositorySnapshot, SourceReference } from "@/data/model";
@@ -62,13 +61,21 @@ function cachedHighlightedLines(source: string, language: string) {
   return lines;
 }
 
-function SourceCodeView({ lines, path, sourceText, focusedLine, viewportRef }: {
+function SourceCodeView({ lines, path, sourceText, focusedLine, viewportRef, onSelection }: {
   lines: ReturnType<typeof highlightedLines>;
   path: string;
   sourceText: string;
   focusedLine: SourceReference | null;
-  viewportRef: RefObject<HTMLDivElement | null>;
+  viewportRef: RefObject<HTMLDivElement | null>; onSelection?: (start: number, end: number) => void;
 }) {
+  const [selection, setSelection] = useState<{ start: number; end: number } | null>(null);
+  const anchor = useRef(1);
+  const capture = () => {
+    const selected = window.getSelection();
+    const lineFor = (node: Node | null) => (node instanceof Element ? node : node?.parentElement)?.closest<HTMLElement>("[data-source-line]");
+    const first = lineFor(selected?.anchorNode ?? null); const last = lineFor(selected?.focusNode ?? null);
+    if (!selected?.isCollapsed && first && last && viewportRef.current?.contains(first) && viewportRef.current.contains(last)) setSelection({ start: Math.min(Number(first.dataset.sourceLine), Number(last.dataset.sourceLine)), end: Math.max(Number(first.dataset.sourceLine), Number(last.dataset.sourceLine)) });
+  };
   const [scrollState, setScrollState] = useState({ top: 0, height: 0 });
   useEffect(() => {
     const viewport = viewportRef.current;
@@ -88,29 +95,38 @@ function SourceCodeView({ lines, path, sourceText, focusedLine, viewportRef }: {
     return () => { cancelAnimationFrame(frame); observer.disconnect(); viewport.removeEventListener("scroll", update); };
   }, [viewportRef]);
 
+  useEffect(() => {
+    const handle = (event: KeyboardEvent) => {
+      if (event.ctrlKey && event.key.toLowerCase() === "l" && selection && viewportRef.current?.contains(document.activeElement)) { event.preventDefault(); onSelection?.(selection.start, selection.end); }
+    };
+    window.addEventListener("keydown", handle); return () => window.removeEventListener("keydown", handle);
+  }, [selection, onSelection, viewportRef]);
   const virtualized = lines.length > 1_200;
   const range = virtualized ? visibleLineWindow({ lineCount: lines.length, scrollTop: scrollState.top, viewportHeight: scrollState.height }) : { start: 0, end: lines.length, top: 0, bottom: 0 };
   const visibleLines = lines.slice(range.start, range.end);
-  return <>{virtualized && <pre className="source-accessible-copy" tabIndex={0} aria-label={`${path} 完整源码，${lines.length} 行`}>{sourceText}</pre>}<pre className={`source-code${virtualized ? " is-virtualized" : ""}`} aria-hidden={virtualized} aria-label={`${path} 源码`}><code>
+  return <><div className="source-selection-actions" onMouseUp={capture}>
+    {selection && <div role="toolbar" aria-label="源码选段操作"><span>第 {selection.start}–{selection.end} 行</span><button type="button" onClick={() => onSelection?.(selection.start, selection.end)}>加入聊天</button><button type="button" onClick={() => onSelection?.(-selection.start, selection.end)}>解释这段代码</button><button type="button" onClick={() => onSelection?.(selection.start, -selection.end)}>添加笔记</button><button type="button" aria-label="取消选段" onClick={() => setSelection(null)}>×</button></div>}
+    {virtualized && <pre className="source-accessible-copy" tabIndex={0} aria-label={`${path} 完整源码，${lines.length} 行`}>{sourceText}</pre>}<pre className={`source-code${virtualized ? " is-virtualized" : ""}`} aria-hidden={virtualized} tabIndex={0} aria-label={`${path} 源码`}><code>
     {range.top > 0 && <span className="source-window-spacer" aria-hidden="true" style={{ height: range.top }} />}
     {visibleLines.map(({ number, segments }) => {
       const isFocused = focusedLine && number >= focusedLine.line && number <= (focusedLine.endLine ?? focusedLine.line);
-      return <span key={number} id={`source-line-${number}`} className={`source-line${isFocused ? " is-focused" : ""}`}><span className="line-number">{String(number).padStart(2, "0")}</span><span className="line-content">{segments.map((segment, index) => <span key={`${number}-${index}`} className={segment.tokens.length ? `token ${segment.tokens.join(" ")}` : undefined}>{segment.text}</span>)}</span></span>;
+      return <span key={number} id={`source-line-${number}`} data-source-line={number} className={`source-line${selection && number >= selection.start && number <= selection.end ? " is-selected" : ""}${isFocused ? " is-focused" : ""}`}><button type="button" className="line-number" aria-label={`选择第 ${number} 行`} onClick={event => { if (!event.shiftKey) anchor.current = number; setSelection({ start: Math.min(anchor.current, number), end: Math.max(anchor.current, number) }); }}>{String(number).padStart(2, "0")}</button><span className="line-content">{segments.map((segment, index) => <span key={`${number}-${index}`} className={segment.tokens.length ? `token ${segment.tokens.join(" ")}` : undefined}>{segment.text}</span>)}</span></span>;
     })}
     {range.bottom > 0 && <span className="source-window-spacer" aria-hidden="true" style={{ height: range.bottom }} />}
-  </code></pre></>;
+  </code></pre></div></>;
 }
 
 function ReferenceButton({ icon, title, caption, onClick }: { icon: ReactNode; title: string; caption: string; onClick: () => void }) {
   return <button className="reference-row" onClick={onClick}><span className="reference-icon">{icon}</span><span className="reference-copy"><strong>{title}</strong><small>{caption}</small></span><ChevronRight size={14} className="reference-arrow" /></button>;
 }
 
-export function FileDetailsPanel({ repository, currentFile, filesById, mobileView, detailTab, onDetailTabChange, onOpenAi, onOpenReference, backendAvailable = true, questionStorageBusy = false, questionClearVersion = 0, questionExtraFileIds = [], onClearQuestionExtraFiles,
+export function FileDetailsPanel({ repository, currentFile, filesById, mobileView, detailTab, onDetailTabChange, onOpenAi, onChatSelection, onOpenReference, backendAvailable = true,
   aiSettings, onOpenModelSettings, onOpenRepository, canOpenRepository, onPreviewAi, aiBusy, aiPreview, aiCandidates,
   pendingAiMode, selectedAiFiles, selectedAiRanges, onToggleAiFile, onAiRangeChange, onGenerateAi, onCancelAi, aiMessage, aiResult, aiStale,
   sourceText, sourceStatus, sourceError, focusedLine, onClearFocus, codeViewportRef, readingNotes, savedTours, sessionVersion, savedDataClearGeneration, savedDataClearBusy, onSaveReadingNotes, onSaveTours, onActivateTour, onGuideNoteCreated,
 }: {
-  repository: RepositorySnapshot; currentFile: FileRecord; filesById: Map<string, FileRecord>; mobileView: "files" | "graph" | "details"; detailTab: string; backendAvailable?: boolean; questionStorageBusy?: boolean; questionClearVersion?: number; questionExtraFileIds?: string[]; onClearQuestionExtraFiles?: () => void;
+  repository: RepositorySnapshot; currentFile: FileRecord; filesById: Map<string, FileRecord>; mobileView: "files" | "graph" | "details"; detailTab: string; backendAvailable?: boolean;
+  onChatSelection?: (start: number, end: number) => void;
   onDetailTabChange: (tab: string) => void; onOpenAi: () => void; onOpenReference: (reference: SourceReference) => void;
   aiSettings: { baseUrl: string; model: string; apiKey: string; configured: boolean };
   onOpenModelSettings: () => void; onOpenRepository: () => void; canOpenRepository: boolean; onPreviewAi: (mode: AiMode, fileIds?: string[], goal?: string) => void;
@@ -123,7 +139,7 @@ export function FileDetailsPanel({ repository, currentFile, filesById, mobileVie
   focusedLine: SourceReference | null; onClearFocus: () => void; codeViewportRef: RefObject<HTMLDivElement | null>;
   readingNotes: ReadingNote[]; savedTours: AiRouteRecord[]; sessionVersion: number; savedDataClearGeneration: number; savedDataClearBusy: boolean; onSaveReadingNotes: (notes: ReadingNote[], expected?: { repositoryId: string; workspaceId: string; sessionVersion: number; clearGeneration: number }) => Promise<boolean>; onSaveTours: (tours: AiRouteRecord[], expected?: { repositoryId: string; workspaceId: string; sessionVersion: number; clearGeneration: number }) => Promise<boolean>; onActivateTour: (route: AiRouteRecord) => void; onGuideNoteCreated?: () => void;
 }) {
-  const [routeGoal, setRouteGoal] = useState("");
+
   const outgoing = repository.dependencies.filter((edge) => edge.fromId === currentFile.id);
   const incoming = repository.dependencies.filter((edge) => edge.toId === currentFile.id);
   const unresolved = repository.unresolved?.filter((edge) => edge.fileId === currentFile.id) ?? [];
@@ -137,7 +153,7 @@ export function FileDetailsPanel({ repository, currentFile, filesById, mobileVie
       else void Promise.resolve().then(() => navigator.clipboard.writeText(`${repository.name} / ${currentFile.path}:${line} · ${repository.revision ?? repository.version}`)).catch(() => window.alert("未能复制源码位置，请检查剪贴板权限后重试。"));
     }}>{(typeof window !== "undefined" && window.repoLens) ? "VS Code" : "复制位置"}</button>}<span className={`detail-file-icon${currentFile.kind === "style" ? " is-style" : ""}`}>{currentFile.kind === "style" ? <FileText size={18} /> : <FileCode2 size={18} />}</span><div className="detail-file-title"><span>{currentFile.path}</span><strong>{currentFile.name}</strong></div></div>
     <Tabs value={detailTab} onValueChange={onDetailTabChange} className="detail-tabs">
-      <TabsList variant="line" aria-label="文件详情视图" className="detail-tab-list"><TabsTrigger value="guide"><BookOpenText size={14} />讲解</TabsTrigger><TabsTrigger value="source"><Code2 size={14} />源码</TabsTrigger>{repository.source === "local" && <TabsTrigger value="questions">问答</TabsTrigger>}</TabsList>
+      <TabsList variant="line" aria-label="文件详情视图" className="detail-tab-list"><TabsTrigger value="guide"><BookOpenText size={14} />讲解</TabsTrigger><TabsTrigger value="source"><Code2 size={14} />源码</TabsTrigger>{repository.source === "local" && <button type="button" className="detail-tab-action" onClick={() => onOpenAi()} aria-label="打开聊天"><MessageSquare size={13} />打开聊天</button>}</TabsList>
       <TabsContent value="guide" className="detail-scroll guide-scroll">
         {repository.source === "sample" && <section className="ai-panel ai-sample-panel" aria-label="AI 讲解">
           <div className="ai-panel-heading"><h3>AI 辅助阅读</h3></div>
@@ -148,34 +164,7 @@ export function FileDetailsPanel({ repository, currentFile, filesById, mobileVie
           <div className="ai-panel-heading"><h3>AI 辅助阅读</h3><span className="ai-panel-actions"><button type="button" className="ai-settings-link" onClick={() => onOpenAi()}>打开 AI 侧栏</button><button type="button" className="ai-settings-link" onClick={onOpenModelSettings}>模型设置</button></span></div>
           <p className="ai-model-summary" role="status">{aiSettings.configured ? `已配置 · ${aiSettings.model}` : "尚未配置模型"}</p>
           {!backendAvailable && <p role="alert" className="ai-feedback">本地服务已停止。重新启动 RepoLens 后可继续使用本地功能。</p>}
-          <label className="route-goal-field">本次阅读目标<input aria-label="阅读目标" maxLength={300} placeholder="例如：理解数据保存流程" value={routeGoal} onChange={(event) => { setRouteGoal(event.target.value); onCancelAi(); }} /></label>
-          <div className="ai-actions"><button type="button" onClick={() => onPreviewAi("explanation")} disabled={!backendAvailable || aiBusy || !repository.files.length}>生成当前文件讲解</button><button type="button" onClick={() => onPreviewAi("route", undefined, routeGoal.trim())} disabled={!backendAvailable || aiBusy || !repository.files.length}>生成阅读路线</button></div>
-          {aiCandidates.length > 0 && pendingAiMode && <div className="ai-scope-picker">
-            <strong>选择发送范围</strong><p>必须保留当前文件；最多 12 个文件、60,000 字符。可按行调整单个文件的发送范围。</p>
-            {aiCandidates.map((candidate) => {
-              const selected = selectedAiFiles.includes(candidate.fileId);
-              const range = selectedAiRanges[candidate.fileId] ?? candidate.suggestedRange ?? { startLine: 1, endLine: candidate.lineCount };
-              const selectedOversizedLines = candidate.oversizedLines.filter((line) => selected && Number.isInteger(range.startLine) && Number.isInteger(range.endLine) && line >= range.startLine && line <= range.endLine);
-              return <label key={candidate.fileId}>
-                <input type="checkbox" checked={selected} disabled={candidate.fileId === currentFile.id} onChange={(event) => onToggleAiFile(candidate.fileId, event.target.checked)} />
-                <span>{candidate.fileId}</span>
-                <small>{candidate.lineCount} 行{candidate.suggestedRange ? ` · 建议片段：第 ${candidate.suggestedRange.startLine}–${candidate.suggestedRange.endLine} 行` : ""}{candidate.oversizedLines.length ? ` · 超长行：${candidate.oversizedLines.join("、")}` : ""}{candidate.reasons?.length ? ` · ${candidate.reasons.join("、")}` : ""}</small>
-                {selected && <span className="ai-range-fields">
-                  <input aria-label={`${candidate.fileId} 起始行`} type="number" min={1} max={candidate.lineCount} value={range.startLine} onChange={(event) => onAiRangeChange(candidate.fileId, { ...range, startLine: Number(event.target.value) })} />
-                  <span>至</span>
-                  <input aria-label={`${candidate.fileId} 结束行`} type="number" min={range.startLine} max={candidate.lineCount} value={range.endLine} onChange={(event) => onAiRangeChange(candidate.fileId, { ...range, endLine: Number(event.target.value) })} />
-                </span>}
-                {selectedOversizedLines.length > 0 && <small role="alert">所选范围包含超长单行，需调整起止行将其排除。</small>}
-              </label>;
-            })}
-            <button type="button" onClick={() => onPreviewAi(pendingAiMode, selectedAiFiles, routeGoal.trim())} disabled={!backendAvailable || aiBusy || selectedAiFiles.length === 0 || aiCandidates.some((candidate) => {
-              if (!selectedAiFiles.includes(candidate.fileId)) return false;
-              const range = selectedAiRanges[candidate.fileId] ?? candidate.suggestedRange ?? { startLine: 1, endLine: candidate.lineCount };
-              return candidate.oversizedLines.some((line) => line >= range.startLine && line <= range.endLine);
-            })}>预览发送范围</button>
-          </div>}
-          {aiPreview && <div className="ai-consent"><strong>发送前确认</strong>{aiPreview.mode === "route" && aiPreview.goal && <p>阅读目标：{aiPreview.goal}</p>}<p>目标服务：{aiPreview.baseUrl} · 模型：{aiPreview.model}。将把 {aiPreview.files.length} 个文件、共 {aiPreview.characters.toLocaleString()} 个字符发送至该服务{aiPreview.tokenEstimate === undefined ? "" : `，约 ${aiPreview.tokenEstimate.toLocaleString()} 个 token`}：</p>{aiPreview.tokenEstimate !== undefined && <small>Token 数为粗略估算，因模型分词规则不同，不代表实际计费量。</small>}<ul>{aiPreview.files.map((file) => <li key={file.fileId}>{file.fileId}（第 {file.startLine}–{file.endLine} 行）{file.reasons?.length ? ` · ${file.reasons.join("、")}` : ""}</li>)}</ul>{!aiSettings.configured ? <p>请先应用完整的模型配置，再重新预览。</p> : <button onClick={onGenerateAi} disabled={!backendAvailable || aiBusy}>{aiBusy ? "正在请求…" : "确认发送并生成"}</button>}<button className="ai-cancel" onClick={onCancelAi}>{aiBusy ? "取消请求" : "取消"}</button></div>}
-          {aiMessage && <p className="ai-feedback" role="status">{aiMessage}</p>}
+          <div className="ai-actions"><button type="button" disabled={!backendAvailable} onClick={() => onPreviewAi("explanation")}>生成当前文件讲解</button><button type="button" disabled={!backendAvailable} onClick={() => onPreviewAi("route")}>生成阅读路线</button></div>
           {aiResult && aiResult.__repositoryId === repository.id && (aiResult.__mode === "route" || aiResult.__entryFileId === currentFile.id) && <AiResultView result={aiResult} files={filesById} stale={aiStale} onOpenReference={onOpenReference} />}
         </section>}
         <span className="section-overline">{repository.source === "sample" ? "示例导览" : "静态分析"} <span className="tiny-sparkle">✦</span></span>
@@ -201,10 +190,9 @@ export function FileDetailsPanel({ repository, currentFile, filesById, mobileVie
         </div>}
         <button className="show-source-link" onClick={() => onOpenReference({ fileId: currentFile.id, line: 1 })}><Code2 size={14} />查看完整源码<ChevronRight size={14} /></button>
       </TabsContent>
-      {repository.source === "local" && <TabsContent value="questions" className="detail-scroll question-scroll"><QuestionPanel repository={repository} currentFile={currentFile} filesById={filesById} onOpenReference={onOpenReference} backendAvailable={backendAvailable} active={detailTab === "questions"} storageBusy={questionStorageBusy} clearVersion={questionClearVersion} additionalFileIds={questionExtraFileIds} onClearAdditionalFiles={onClearQuestionExtraFiles} /></TabsContent>}
       <TabsContent value="source" className="detail-scroll source-scroll" ref={codeViewportRef}>
         <div className="source-meta"><span>{(currentFile.language ?? (currentFile.kind === "style" ? "css" : "text")).toUpperCase()} 源文件</span><span>{sourceStatus === "loading" ? "读取中" : sourceStatus === "error" ? "读取失败" : `${sourceLines.length} 行`}</span></div>
-        {sourceStatus === "loading" ? <div className="source-loading" role="status">正在从本地服务读取源码…</div> : sourceStatus === "error" ? <div className="source-loading" role="alert">{sourceError ?? "无法读取源码。"}</div> : sourceText.length === 0 ? <div className="source-loading">{repository.files.length ? "这是一个空源码文件。" : "仓库中没有可显示的源码文件。"}</div> : <SourceCodeView lines={sourceLines} path={currentFile.path} sourceText={sourceText} focusedLine={focusedLine?.fileId === currentFile.id ? focusedLine : null} viewportRef={codeViewportRef} />}
+        {sourceStatus === "loading" ? <div className="source-loading" role="status">正在从本地服务读取源码…</div> : sourceStatus === "error" ? <div className="source-loading" role="alert">{sourceError ?? "无法读取源码。"}</div> : sourceText.length === 0 ? <div className="source-loading">{repository.files.length ? "这是一个空源码文件。" : "仓库中没有可显示的源码文件。"}</div> : <SourceCodeView key={`${currentFile.id}:${currentFile.contentHash}`} onSelection={onChatSelection} lines={sourceLines} path={currentFile.path} sourceText={sourceText} focusedLine={focusedLine?.fileId === currentFile.id ? focusedLine : null} viewportRef={codeViewportRef} />}
         {focusedLine?.fileId === currentFile.id && <div className="source-focus-note"><span><span className="focus-note-dot" />源码定位 · 第 {focusedLine.line} 行</span><button onClick={onClearFocus} aria-label="清除源码定位"><X size={13} /></button></div>}
       </TabsContent>
     </Tabs>

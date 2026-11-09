@@ -1,5 +1,16 @@
-function recordKey(kind, record) {
-  return kind === "notes" ? record.id : record.signature;
+function keyedRecords(kind, records) {
+  const result = new Map();
+  const occurrences = new Map();
+  for (const record of records) {
+    const id = kind === "notes" ? record.id : record.signature;
+    if (typeof id === "string") { result.set(id, record); continue; }
+    // Opaque legacy records keep their raw data and multiplicity; do not invent persisted ids.
+    const base = `\0legacy:${JSON.stringify(record)}`;
+    const occurrence = occurrences.get(base) ?? 0;
+    occurrences.set(base, occurrence + 1);
+    result.set(`${base}:${occurrence}`, record);
+  }
+  return result;
 }
 
 function equalRecord(left, right) {
@@ -13,8 +24,8 @@ export function createReadingArtifactJournal() {
 export function stageReadingArtifactChanges(journal, kind, before, after) {
   if (kind !== "notes" && kind !== "tours") throw new Error("Unknown reading artifact kind.");
   const next = { ...journal, [kind]: new Map(journal[kind]) };
-  const oldById = new Map(before.map((record) => [recordKey(kind, record), record]));
-  const newById = new Map(after.map((record) => [recordKey(kind, record), record]));
+  const oldById = keyedRecords(kind, before);
+  const newById = keyedRecords(kind, after);
   for (const [key, value] of oldById) {
     if (!newById.has(key)) next[kind].set(key, { sequence: ++next.sequence, operation: "delete" });
     else if (!equalRecord(value, newById.get(key))) next[kind].set(key, { sequence: ++next.sequence, operation: "upsert", value: newById.get(key) });
@@ -26,8 +37,7 @@ export function stageReadingArtifactChanges(journal, kind, before, after) {
 }
 
 export function applyReadingArtifactJournal(records, journal, kind) {
-  const keyOf = (record) => recordKey(kind, record);
-  const merged = new Map(records.map((record) => [keyOf(record), record]));
+  const merged = keyedRecords(kind, records);
   for (const [key, entry] of [...journal[kind]].sort((left, right) => left[1].sequence - right[1].sequence)) {
     if (entry.operation === "delete") merged.delete(key);
     else {

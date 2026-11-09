@@ -1,9 +1,10 @@
+import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { access, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
-import { canPromoteRelease, getGitProvenance, hashBuildInputs } from "./release-provenance.mjs";
+import { canPromoteRelease, getGitProvenance, hashBuildInputs, verifyCandidateArtifacts } from "./release-provenance.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const runId = `${new Date().toISOString().replaceAll(/[:.]/g, "-")}-${randomUUID().slice(0, 8)}`;
@@ -58,9 +59,13 @@ try {
   const finalProvenance = { ...getGitProvenance(root), candidateOnly: provenance.candidateOnly };
   const finalInputs = await hashBuildInputs(root);
   const manifest = JSON.parse(await readFile(path.join(candidateDirectory, "BUILD-MANIFEST.json"), "utf8"));
+  await verifyCandidateArtifacts(candidateDirectory, manifest.artifacts);
   const inputsStayedStable = initialInputs.sourceInputsSha256 === finalInputs.sourceInputsSha256
     && manifest.sourceInputsSha256 === initialInputs.sourceInputsSha256
     && provenance.sourceCommit === finalProvenance.sourceCommit;
+  if (!inputsStayedStable) throw new Error("构建输入发生变化，候选来源不稳定，不能记为已验证。");
+  const archiveHash = createHash("sha256").update(await readFile(path.join(candidateDirectory, "win-unpacked", "resources", "app.asar"))).digest("hex");
+  if (!manifest.packagedArchiveSha256 || archiveHash !== manifest.packagedArchiveSha256) throw new Error("候选包内容与来源清单不一致，已拒绝推广。");
   if (!canPromoteRelease(provenance) || !canPromoteRelease(finalProvenance) || !inputsStayedStable) {
     const reasons = [provenance.candidateOnly ? "本次只验证候选包" : null, provenance.workingTreeDirty || finalProvenance.workingTreeDirty ? "构建使用了未提交源码" : null, !inputsStayedStable ? "构建期间源码输入发生变化" : null].filter(Boolean);
     await writeFile(path.join(workRoot, "CANDIDATE-ONLY.txt"), `此包仅作为候选，不会替换 release。\n提交：${provenance.sourceCommit}\n原因：${reasons.join("；")}\n参与文件哈希见 package/BUILD-MANIFEST.json。\n`, "utf8");

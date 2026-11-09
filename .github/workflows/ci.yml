@@ -49,6 +49,13 @@ jobs:
       - name: Run full local verification
         if: matrix.profile == 'full'
         run: npm run verify
+      - name: Check investigation quality independently
+        if: matrix.profile == 'full'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force .artifacts/quality | Out-Null
+          node scripts/check-retrieval-quality.mjs 2>&1 | Tee-Object -FilePath .artifacts/quality/result.json
+          exit $LASTEXITCODE
       - name: Verify clean committed source export
         if: matrix.profile == 'full'
         run: node scripts/verify-clean-source.mjs
@@ -68,6 +75,7 @@ jobs:
         with:
           name: repolens-ci-node-${{ matrix.node }}-evidence
           path: |
+            .artifacts/quality/**
             .artifacts/verify/**/*.log
             .artifacts/verify/**/summary.json
             .artifacts/browser-failures/**

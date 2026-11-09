@@ -4,6 +4,55 @@ export const DEFAULT_WORKSPACE_LAYOUT = Object.freeze({
   reading: Object.freeze({ files: 28, details: 72 }),
 });
 
+// Native-hidden Electron windows pause rAF even when visibilityState is visible.
+// Preserve the two measurement turns, with a task fallback and cancellation.
+export function afterLayoutMeasurements(callback, window = globalThis) {
+  let cancelled = false;
+  const cancellations = [];
+  const next = action => {
+    let frame = 0, timer = 0, completed = false;
+    const cancel = () => {
+      window.cancelAnimationFrame(frame);
+      window.clearTimeout(timer);
+    };
+    const run = () => {
+      if (completed || cancelled) return;
+      completed = true;
+      cancel();
+      action();
+    };
+    frame = window.requestAnimationFrame(run);
+    timer = window.setTimeout(run, 32);
+    cancellations.push(cancel);
+  };
+  next(() => next(callback));
+  return () => { cancelled = true; for (const cancel of cancellations) cancel(); };
+}
+
+/** Reapply preferences after the panel library has measured its new pixel limits. */
+export function observeWorkspacePanelSizes(targets, window = globalThis) {
+  const widths = new Map();
+  const replays = new Map();
+  const observer = new window.ResizeObserver(entries => {
+    for (const entry of entries) {
+      const apply = targets.get(entry.target);
+      const width = entry.contentRect.width;
+      if (!apply) continue;
+      if (width <= 0) {
+        widths.set(entry.target, 0);
+        replays.get(entry.target)?.(); replays.delete(entry.target);
+        continue;
+      }
+      if (Math.abs((widths.get(entry.target) ?? -1) - width) < 0.5) continue;
+      widths.set(entry.target, width);
+      replays.get(entry.target)?.();
+      replays.set(entry.target, afterLayoutMeasurements(() => { replays.delete(entry.target); apply(); }, window));
+    }
+  });
+  for (const element of targets.keys()) observer.observe(element);
+  return () => { observer.disconnect(); for (const cancel of replays.values()) cancel(); replays.clear(); };
+}
+
 function normalizeParts(parts, keys) {
   if (!parts || typeof parts !== "object") return null;
   const values = keys.map((key) => parts[key]);

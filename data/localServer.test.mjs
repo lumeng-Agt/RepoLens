@@ -178,9 +178,11 @@ test("local API protects source paths, streams file updates, and gates AI genera
 
   const generate = (previewId) => apiFetch(`${origin}/api/ai/generate`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ previewId }) });
   const changedSettings = await apiFetch(`${origin}/api/ai/settings`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ baseUrl: `http://127.0.0.1:${modelPort}/v1/`, model: "other-model" }) });
-  assert.equal((await changedSettings.json()).configured, false, "changing services without a replacement key clears the old key");
+  assert.equal((await changedSettings.json()).configured, true, "changing models on the same service retains its key");
   assert.equal((await generate(preview.id)).status, 409, "changing the model invalidates an earlier confirmation");
   assert.equal(modelCalls.length, 0, "an invalidated confirmation never reaches the model");
+  const changedService = await apiFetch(`${origin}/api/ai/settings`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ baseUrl: "https://other-model.test/v1", model: "other-model" }) });
+  assert.equal((await changedService.json()).configured, false, "a different service never inherits the old key");
   await apiFetch(`${origin}/api/ai/settings`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ baseUrl: `http://127.0.0.1:${modelPort}/v1/`, model: "mock-model", apiKey: "secret-test-only" }) });
   const refreshedPreview = (await (await apiFetch(`${origin}/api/ai/preview`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repositoryId: snapshot.id, fileId: "src/main.ts", mode: "explanation" }) })).json()).preview;
   const generated = await generate(refreshedPreview.id);

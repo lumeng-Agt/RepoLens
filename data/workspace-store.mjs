@@ -1,12 +1,16 @@
+import { assertReadingArtifactCapacity, MAX_SAVED_TOURS, MAX_CONVERSATIONS, CONVERSATION_CAPACITY_MESSAGE } from "./persistence-limits.mjs";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { normalizeWorkspaceLayout } from "./workspace-layout.mjs";
+import { ChatPreferencesSchema } from "./chat-preferences.mjs";
+import { isValidChatTimestamp } from "./chat-display.mjs";
+import { assertConversationPersistenceCapacity } from "./persistence-limits.mjs";
 
 const VERSION = 1;
 const MAX_STORE_BYTES = 64 * 1024 * 1024;
 const MAX_PROGRESS_BYTES = 16 * 1024;
-const emptyState = () => ({ version: VERSION, recentRepositories: [], aiResults: {}, aiRoutes: {}, progress: {}, nodePositions: {}, conversations: {}, readingNotes: {}, savedTours: {}, investigations: {}, guidePreferences: null, layoutPreferences: null });
+const emptyState = () => ({ version: VERSION, recentRepositories: [], aiResults: {}, aiRoutes: {}, progress: {}, nodePositions: {}, conversations: {}, chatPreferences: {}, readingNotes: {}, savedTours: {}, investigations: {}, guidePreferences: null, layoutPreferences: null });
 const clone = (value) => structuredClone(value);
 
 class UnsupportedStoreVersionError extends Error {}
@@ -15,7 +19,7 @@ function validateState(value) {
   if (!value || typeof value !== "object" || value.version !== VERSION) throw new UnsupportedStoreVersionError("工作区存储版本不受支持。");
   const state = { ...value, ...emptyState() };
   state.recentRepositories = Array.isArray(value.recentRepositories) ? value.recentRepositories.filter((item) => item && typeof item.id === "string" && typeof item.name === "string" && typeof item.location === "string").slice(0, 20) : [];
-  for (const key of ["aiResults", "aiRoutes", "progress", "nodePositions", "conversations", "readingNotes", "savedTours", "investigations"]) {
+  for (const key of ["aiResults", "aiRoutes", "progress", "nodePositions", "conversations", "chatPreferences", "readingNotes", "savedTours", "investigations"]) {
     if (value[key] && typeof value[key] === "object" && !Array.isArray(value[key])) state[key] = value[key];
   }
   if (Object.hasOwn(value, "guidePreferences")) state.guidePreferences = value.guidePreferences;
@@ -128,7 +132,7 @@ export function createWorkspaceStore(directory) {
   function removeRepositoryFromState(target, repositoryId) {
     target.recentRepositories = target.recentRepositories.filter((item) => (item.workspaceId ?? item.id) !== repositoryId);
     delete target.aiResults[repositoryId]; delete target.aiRoutes[repositoryId]; delete target.readingNotes[repositoryId]; delete target.savedTours[repositoryId]; delete target.investigations[repositoryId];
-    delete target.nodePositions[repositoryId]; delete target.conversations[repositoryId];
+    delete target.nodePositions[repositoryId]; delete target.conversations[repositoryId]; delete target.chatPreferences[repositoryId];
     for (const key of Object.keys(target.progress)) if (key.startsWith(`repolens:${repositoryId}:`)) delete target.progress[key];
   }
 
@@ -176,7 +180,7 @@ export function createWorkspaceStore(directory) {
         return result;
       } catch (error) {
         storageMessage = error instanceof Error ? error.message : String(error);
-        return { persisted: false, warning: storageMessage };
+        return { persisted: false, warning: storageMessage, cleared: { workspace: true, copies: false } };
       }
     });
     writeQueue = operation.catch(() => {});
@@ -196,6 +200,7 @@ export function createWorkspaceStore(directory) {
         progress: Object.fromEntries(Object.entries(state.progress).filter(([key]) => key.startsWith(prefix))),
         nodePositions: clone(state.nodePositions[repositoryId] ?? {}),
         conversations: clone(state.conversations[repositoryId] ?? []),
+        chatPreferences: clone(state.chatPreferences[repositoryId] ?? null),
         investigations: clone(state.investigations[repositoryId] ?? []),
         readingNotes: clone(state.readingNotes[repositoryId] ?? []),
         savedTours: clone(state.savedTours[repositoryId] ?? []),
@@ -232,37 +237,66 @@ export function createWorkspaceStore(directory) {
       return mutate((current) => { current.nodePositions[repositoryId] = positions; });
     },
     async saveConversations(repositoryId, conversations) {
-      if (!Array.isArray(conversations) || conversations.length > 100) throw new Error("问答会话数量超出限制。");
-      return mutate((current) => { current.conversations[repositoryId] = conversations; });
-    },
-    async commitAiChatCompletion(workspaceId, conversationId, messages, artifacts, isActive = () => true) {
+      assertConversationPersistenceCapacity(conversations);
       return mutate((current) => {
+        const previous = new Map((current.conversations[repositoryId] ?? []).map(item => [item.id, item]));
+        for (const item of conversations) {
+          // Read legacy metadata safely without permitting new invalid dates.
+          if (!isValidChatTimestamp(item.updatedAt) && (!previous.has(item.id) || previous.get(item.id).updatedAt !== item.updatedAt)) throw new Error("对话更新时间无效，记录未保存。");
+        }
+        current.conversations[repositoryId] = conversations;
+      });
+    },
+    async saveChatPreferences(repositoryId, preferences) {
+      const value = ChatPreferencesSchema.parse(preferences);
+      return mutate(current => { current.chatPreferences[repositoryId] = value; });
+    },
+    async commitAiChatCompletion(workspaceId, conversationId, messages, artifacts, isActive = () => true, session = { repositoryId: artifacts.route?.repositoryId ?? workspaceId, workspaceId }) {
+      let routePersisted;
+      let artifactWarning;
+      const result = await mutate((current) => {
         if (!isActive()) throw Object.assign(new Error("生成已停止或相关数据正在清除。"), { name: "AbortError" });
         const conversations = current.conversations[workspaceId] ?? [];
         const previous = conversations.find((item) => item.id === conversationId);
-        const merged = new Map((previous?.messages ?? []).map((item) => [item.id, item]));
-        for (const message of messages) merged.set(message.id, message);
-        const next = { ...previous, id: conversationId, title: previous?.title && previous.title !== "新对话" ? previous.title : messages[0].content.slice(0, 48), messages: [...merged.values()], updatedAt: Date.now() };
-        current.conversations[workspaceId] = [next, ...conversations.filter((item) => item.id !== conversationId)].slice(0, 100);
+        if (!previous && conversations.length >= MAX_CONVERSATIONS) throw Object.assign(new Error(CONVERSATION_CAPACITY_MESSAGE), { code: "CONVERSATION_CAPACITY" });
+        const existingTours = current.savedTours[workspaceId] ?? [];
         if (artifacts.route) {
+          routePersisted = existingTours.some(item => item.signature === artifacts.route.signature) || existingTours.length < MAX_SAVED_TOURS;
+          if (routePersisted) {
+            try { assertReadingArtifactCapacity({ tours: [...existingTours.filter(item => item.signature !== artifacts.route.signature), artifacts.route] }, session); }
+            catch (error) { routePersisted = false; artifactWarning = `${error.message} 本次路线仅保留在聊天中，原有路线未删除。`; }
+          }
+          if (!routePersisted && !artifactWarning) artifactWarning = "已保存 100 条路线，本次路线仅保留在聊天中。请先导出并删除不再需要的路线，再保存本次路线。";
+        }
+        const merged = new Map((previous?.messages ?? []).map((item) => [item.id, item]));
+        for (const message of messages) merged.set(message.id, message.route ? { ...message, routePersisted } : message);
+        const next = { ...previous, id: conversationId, title: previous?.title && previous.title !== "新对话" ? previous.title : messages[0].content.slice(0, 48), messages: [...merged.values()], updatedAt: Date.now() };
+        const nextConversations = [next, ...conversations.filter((item) => item.id !== conversationId)];
+        assertConversationPersistenceCapacity(nextConversations);
+        current.conversations[workspaceId] = nextConversations;
+        if (artifacts.route && routePersisted) {
           current.aiRoutes[workspaceId] = artifacts.route;
-          current.savedTours[workspaceId] = [...(current.savedTours[workspaceId] ?? []).filter((item) => item.signature !== artifacts.route.signature), artifacts.route].slice(-100);
+          current.savedTours[workspaceId] = [...(current.savedTours[workspaceId] ?? []).filter((item) => item.signature !== artifacts.route.signature), artifacts.route];
         }
         if (artifacts.explanation) {
           current.aiResults[workspaceId] ??= {};
           current.aiResults[workspaceId][artifacts.explanation.__entryFileId] = artifacts.explanation;
         }
+      }).catch(error => {
+        if (error.code === "CONVERSATION_CAPACITY" || error.code === "CONVERSATION_BYTES") return { persisted: false, warning: error.message };
+        throw error;
       });
+      return { ...result, ...(artifacts.route ? { routePersisted: result.persisted && routePersisted === true } : {}), ...(!result.warning && artifactWarning ? { warning: artifactWarning } : {}) };
     },
     async saveInvestigations(repositoryId, records) {
       return mutate((current) => { current.investigations[repositoryId] = records; });
     },
     async saveReadingNotes(repositoryId, notes) {
-      if (!Array.isArray(notes) || notes.length > 10_000) throw new Error("阅读笔记数量超出限制。");
+      assertReadingArtifactCapacity({ notes }, { repositoryId });
       return mutate((current) => { current.readingNotes[repositoryId] = notes; });
     },
     async saveTours(repositoryId, tours) {
-      if (!Array.isArray(tours) || tours.length > 100) throw new Error("保存路线数量超出限制。");
+      assertReadingArtifactCapacity({ tours }, { repositoryId });
       return mutate((current) => { current.savedTours[repositoryId] = tours; });
     },
     async saveGuidePreferences(preferences) { return mutate((current) => { current.guidePreferences = preferences; }); },
@@ -274,6 +308,7 @@ export function createWorkspaceStore(directory) {
     async clearRepository(repositoryId) {
       return mutate((current) => removeRepositoryFromState(current, repositoryId), () => cleanManagedCopies(repositoryId));
     },
+    async cleanCopies(repositoryId) { const operation = writeQueue.then(async () => { try { await cleanManagedCopies(repositoryId); storageMessage = ""; return { persisted: true }; } catch (error) { storageMessage = error.message; return { persisted: false, warning: storageMessage }; } }); writeQueue = operation.catch(() => {}); return operation; },
     async clearAll() { return mutate((current) => (Object.keys(current).forEach(key => delete current[key]), Object.assign(current, emptyState())), () => cleanManagedCopies()); },
   };
 }

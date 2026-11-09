@@ -1,3 +1,4 @@
+import { createStartupRequestMonitor } from "./startup-requests.mjs";
 import { spawn } from 'node:child_process';
 import { stopLocalService } from './stop-local-service.mjs';
 import { createConnection, createServer } from 'node:net';
@@ -95,13 +96,16 @@ async function browserProbe(browser, baseURL, { apiOrigin, repositoryPath, repos
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
   const page = await context.newPage();
   await page.addInitScript(() => localStorage.setItem("repolens:usage-guide:v1", JSON.stringify({ version: 1, welcomeHandled: true, completedTaskIds: [], checklistOpen: false, noticeDismissed: true })));
-  const evidence = { baseURL, apiOrigin, repositoryPath, failedRequests: [], badResponses: [], entryResponses: [], apiRequests: [], consoleErrors: [], pageErrors: [], runtimeErrors: [], navigations: [] };
+  const requestMonitor = createStartupRequestMonitor(apiOrigin);
+  const evidence = { baseURL, apiOrigin, repositoryPath, failedRequests: requestMonitor.failures, badResponses: [], entryResponses: [], apiRequests: [], consoleErrors: [], pageErrors: [], runtimeErrors: [], navigations: [] };
   await page.addInitScript(() => {
     const errors = window.__startupErrors ??= [];
     window.addEventListener('error', (event) => errors.push(`window: ${event.message}`));
     window.addEventListener('unhandledrejection', (event) => errors.push(`promise: ${String(event.reason)}`));
   });
-  page.on('requestfailed', (request) => evidence.failedRequests.push({ url: request.url(), error: request.failure()?.errorText ?? null }));
+  page.on('requestfailed', request => requestMonitor.failed(request));
+  page.on('request', request => requestMonitor.started(request));
+  page.on('requestfinished', request => requestMonitor.finished(request));
   page.on('request', (request) => { if (request.url().includes('/api/')) evidence.apiRequests.push(request.url()); });
   page.on('response', (response) => {
     const item = { url: response.url(), status: response.status() };
@@ -149,10 +153,11 @@ async function browserProbe(browser, baseURL, { apiOrigin, repositoryPath, repos
     const closeResponsePromise = page.waitForResponse((response) => response.url() === `${apiOrigin}/api/close`);
     const repositoryMenu = page.locator('.repo-menu');
     await repositoryMenu.locator('summary').click();
+    requestMonitor.beginRepositoryClose();
     await repositoryMenu.getByRole('button', { name: '打开示例', exact: true }).click();
     if (!(await closeResponsePromise).ok()) throw new Error('Local repository close failed.');
     if (evidence.apiRequests.some((url) => !url.startsWith(apiOrigin))) throw new Error(`An API request escaped the active service origin: ${JSON.stringify(evidence.apiRequests)}`);
-    if (evidence.failedRequests.length || evidence.badResponses.length || evidence.consoleErrors.length || evidence.pageErrors.length || evidence.runtimeErrors.length) {
+    if (evidence.failedRequests.some(item => !item.expectedCancellation) || evidence.badResponses.length || evidence.consoleErrors.length || evidence.pageErrors.length || evidence.runtimeErrors.length) {
       thrown = new Error(`Browser startup produced errors: ${JSON.stringify(evidence)}`);
     }
   } catch (error) {

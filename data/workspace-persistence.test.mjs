@@ -1,12 +1,23 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { clearWorkspacePersistence, enqueueWorkspacePersistence, getKnownWorkspacePersistenceIds, getWorkspacePersistenceStatus, subscribeWorkspacePersistence } from "./workspace-persistence.mjs";
+import { acknowledgeWorkspacePersistenceKey, acknowledgeWorkspaceCopyCleanup, markWorkspacePersistencePending, clearWorkspacePersistence, enqueueWorkspacePersistence, getKnownWorkspacePersistenceIds, getWorkspacePersistenceStatus, subscribeWorkspacePersistence } from "./workspace-persistence.mjs";
 
 function deferred() {
   let resolve;
   const promise = new Promise((done) => { resolve = done; });
   return { promise, resolve };
 }
+
+test("preference recovery confirmation cannot confirm unrelated pending changes", () => {
+  const id = `recovery-key-${crypto.randomUUID()}`;
+  markWorkspacePersistencePending(id, "chat-preferences-recovery", "read failed");
+  markWorkspacePersistencePending(id, "chat-preferences", "draft pending");
+  acknowledgeWorkspacePersistenceKey(id, "chat-preferences-recovery");
+  assert.equal(getWorkspacePersistenceStatus(id).phase, "memory");
+  assert.equal(getWorkspacePersistenceStatus(id).error, "draft pending");
+  acknowledgeWorkspacePersistenceKey(id, "chat-preferences");
+  assert.notEqual(getWorkspacePersistenceStatus(id).phase, "memory");
+});
 
 test("workspace clear waits for an active write and prevents queued stale writes from running afterward", async () => {
   const workspaceId = `persistence-order-${crypto.randomUUID()}`;
@@ -117,4 +128,22 @@ test("a skipped write does not leave the save indicator stuck in progress", asyn
   const workspaceId = `persistence-skipped-${crypto.randomUUID()}`;
   await enqueueWorkspacePersistence(workspaceId, async () => ({ skipped: true }));
   assert.deepEqual(getWorkspacePersistenceStatus(workspaceId), { phase: "idle", pending: 0, error: "" });
+});
+
+
+test("copy cleanup acknowledgement preserves new writes, pending errors and persistence generation", async () => {
+  const id = `copy-retry-${crypto.randomUUID()}`;
+  const started = deferred(), release = deferred();
+  markWorkspacePersistencePending(id, "clear-copies", "copy cleanup failed");
+  const write = enqueueWorkspacePersistence(id, async () => { started.resolve(); await release.promise; }, { key: "reading-notes" });
+  await started.promise;
+  acknowledgeWorkspaceCopyCleanup([id]);
+  assert.equal(getWorkspacePersistenceStatus(id).phase, "saving");
+  release.resolve(); await write;
+  assert.equal(getWorkspacePersistenceStatus(id).phase, "saved");
+  markWorkspacePersistencePending(id, "reading-notes", "new note failed");
+  markWorkspacePersistencePending(id, "clear-copies", "copy cleanup failed again");
+  acknowledgeWorkspaceCopyCleanup([id]);
+  assert.equal(getWorkspacePersistenceStatus(id).phase, "memory");
+  assert.equal(getWorkspacePersistenceStatus(id).error, "new note failed");
 });

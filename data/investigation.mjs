@@ -1,5 +1,13 @@
 import { z } from "zod";
 
+// Applying a new analysis preserves extension data, but never inherits human approval.
+export function replaceInvestigationResult(latest, replacement, now = Date.now()) {
+  if (latest.workspaceId !== replacement.workspaceId) throw new Error("调查结果不属于当前工作区。");
+  return InvestigationSchema.parse({ ...latest, ...replacement, id: latest.id, title: latest.title, question: latest.question,
+    items: replacement.items.map(item => ({ ...latest.items.find(old => old.id === item.id), ...item, basis: item.basis ?? "model-inference" })),
+    createdAt: latest.createdAt, updatedAt: now, verifiedItemIds: [], checks: {} });
+}
+
 const reference = z.object({ fileId: z.string().min(1).max(4096), startLine: z.number().int().positive(), endLine: z.number().int().positive().optional() }).strict();
 // Change checks use the indexed file id (a repository-relative path) as the item
 // id, so the cap must match the fileId limit; a 160-character cap rejected deep

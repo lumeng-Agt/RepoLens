@@ -10,7 +10,7 @@ function clone(value) {
 function stateFor(workspaceId) {
   let state = recoveryByWorkspace.get(workspaceId);
   if (!state) {
-    state = { loaded: false, baseline: [], view: [], operations: [], nextSequence: 1, generation: 0, clearing: false, readError: "", saveError: "" };
+    state = { loaded: false, baseline: [], view: [], operations: [], nextSequence: 1, generation: 0, readVersion: 0, clearing: false, readError: "", saveError: "" };
     recoveryByWorkspace.set(workspaceId, state);
   }
   return state;
@@ -28,7 +28,7 @@ function applyOperations(baseline, operations) {
     if (operation.kind === "delete") conversations.delete(operation.conversationId);
     else conversations.set(operation.conversation.id, mergeMessages(conversations.get(operation.conversation.id), operation.conversation));
   }
-  return [...conversations.values()].sort((left, right) => right.updatedAt - left.updatedAt).slice(0, 100);
+  return [...conversations.values()].sort((left, right) => right.updatedAt - left.updatedAt);
 }
 
 /**
@@ -40,6 +40,7 @@ export function restoreQuestionConversations(workspaceId, saved) {
   const state = stateFor(workspaceId);
   state.loaded = true;
   state.baseline = clone(saved);
+  state.readVersion += 1;
   state.readError = "";
   state.view = applyOperations(state.baseline, state.operations);
   return clone(state.view);
@@ -55,6 +56,11 @@ export function failQuestionConversationRead(workspaceId, message) {
 /** @param {string} workspaceId */
 export function getQuestionConversationView(workspaceId) {
   return clone(stateFor(workspaceId).view);
+}
+
+/** A read started before a newer confirmed baseline must be refreshed. @param {string} workspaceId */
+export function getQuestionConversationReadVersion(workspaceId) {
+  return stateFor(workspaceId).readVersion;
 }
 
 /** @param {string} workspaceId */
@@ -106,6 +112,7 @@ export function acknowledgeQuestionConversationSave(workspaceId, persisted, thro
   const state = stateFor(workspaceId);
   state.loaded = true;
   state.baseline = clone(persisted);
+  state.readVersion += 1;
   state.operations = state.operations.filter((operation) => operation.sequence > throughSequence);
   state.view = applyOperations(state.baseline, state.operations);
   state.readError = "";
@@ -135,6 +142,7 @@ export function enqueueQuestionConversationSave(workspaceId, operation) {
 }
 
 function resetStateAfterClear(state) {
+  state.readVersion += 1;
   state.loaded = true;
   state.baseline = [];
   state.view = [];
@@ -144,6 +152,7 @@ function resetStateAfterClear(state) {
 }
 
 function restoreStateAfterFailedClear(state, snapshot, message) {
+  state.readVersion += 1;
   state.loaded = snapshot.loaded;
   state.baseline = snapshot.baseline;
   state.view = snapshot.view;
@@ -181,7 +190,7 @@ function enqueueClear(workspaceIds, operation) {
 
   const task = clearWorkspacePersistence(ids, operation)
     .then((result) => {
-      for (const { state } of states.values()) resetStateAfterClear(state);
+      if (!result?.preserveMemory) for (const { state } of states.values()) resetStateAfterClear(state);
       return result;
     })
     .catch((error) => {

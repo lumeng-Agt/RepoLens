@@ -69,6 +69,49 @@ test("repository reads reject external paths before opening them and preserve no
   await assert.rejects(access.readFile("target.ts", { signal: controller.signal }), { name: "AbortError" });
 });
 
+test("repository scans and reads reject hard links even when their paths are inside the repository", async t => {
+  const { root, outside } = await fixture(t);
+  const secret = path.join(outside, ".env");
+  await writeFile(secret, 'export const secret = "EXTERNAL_BODY";');
+  fs.linkSync(secret, path.join(root, "alias.ts"));
+  fs.linkSync(path.join(root, "target.ts"), path.join(root, "local-alias.ts"));
+  await writeFile(path.join(root, "ordinary.ts"), "export const ordinary = true;");
+  const access = createRepositoryFileAccess(root);
+  for (const name of ["alias.ts", "target.ts", "local-alias.ts"]) {
+    assert.equal(access.fileExistsSync(name), false);
+    assert.throws(() => access.inspectSync(name), { code: "REPOSITORY_FILE_BLOCKED" });
+    assert.throws(() => access.readFileSync(name), { code: "REPOSITORY_FILE_BLOCKED" });
+    await assert.rejects(access.readFile(name), { code: "REPOSITORY_FILE_BLOCKED" });
+  }
+  const scan = await scanRepository(root);
+  assert.deepEqual(scan.snapshot.files.map(file => file.id).sort(), ["main.ts", "ordinary.ts"]);
+  assert.ok(scan.snapshot.diagnostics.some(item => item.path === "alias.ts" && /硬链接/.test(item.message)));
+  assert.doesNotMatch(JSON.stringify(scan.snapshot), /EXTERNAL_BODY/);
+  fs.unlinkSync(path.join(root, "local-alias.ts"));
+  assert.match(access.readFileSync("target.ts").content, /value = 1/);
+});
+
+test("an inspected file that gains a hard link is rejected before streaming bytes", async t => {
+  const { root, outside } = await fixture(t);
+  const access = createRepositoryFileAccess(root);
+  const inspected = access.inspectSync("target.ts");
+  fs.linkSync(path.join(root, "target.ts"), path.join(outside, "alias.ts"));
+  const open = fs.promises.open;
+  const opening = t.mock.method(fs.promises, "open", async (...args) => {
+    const handle = await open(...args);
+    const stat = handle.stat.bind(handle);
+    // Keep the original timestamps so only the opened link count reveals the change.
+    handle.stat = async (...statArgs) => Object.assign(await stat(...statArgs), {
+      ctimeMs: inspected.info.ctimeMs, mtimeMs: inspected.info.mtimeMs,
+    });
+    return handle;
+  });
+  let bytes = 0;
+  try { await assert.rejects(inspected.consume({}, chunk => { bytes += chunk.length; }), { code: "REPOSITORY_FILE_BLOCKED" }); }
+  finally { opening.mock.restore(); }
+  assert.equal(bytes, 0);
+});
+
 for (const synchronous of [true, false]) test(`a directory replaced before ${synchronous ? "sync" : "async"} open is rejected before reading external bytes`, async t => {
   const { root, outside } = await fixture(t);
   const directory = path.join(root, "config"); await mkdir(directory);

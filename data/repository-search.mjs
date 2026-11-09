@@ -1,8 +1,11 @@
 import { Worker } from "node:worker_threads";
+import { buildSearchMatcher, describeSearchMatch } from "./search-match.mjs";
 
 export const SEARCH_PAGE_SIZE = 100;
 export const SEARCH_MAX_RESULTS = 10_000;
 export const SEARCH_TIMEOUT_MS = 5_000;
+export const SEARCH_BATCH_MAX_FILES = 50;
+export const SEARCH_BATCH_MAX_BYTES = 2 * 1024 * 1024;
 
 export function validateSearchRequest(input) {
   if (!input || typeof input !== "object") throw new Error("搜索条件格式无效。");
@@ -26,51 +29,57 @@ export function validateSearchRequest(input) {
   };
 }
 
-const SEARCH_WORKER = String.raw`
+const SEARCH_WORKER = [buildSearchMatcher.toString(), describeSearchMatch.toString(), String.raw`
 const { parentPort, workerData } = require('node:worker_threads');
 let matcher;
 try {
-  const escaped = workerData.regex ? workerData.query : workerData.query.replace(/[.*+?^$(){}|[\]\\]/g, '\\$&');
-  const source = workerData.wholeWord ? '(?<![\\p{L}\\p{N}_])(?:' + escaped + ')(?![\\p{L}\\p{N}_])' : escaped;
-  matcher = new RegExp(source, 'gu' + (workerData.matchCase ? '' : 'i'));
   if (!workerData.query.trim()) throw new Error('搜索内容不能为空。');
+  matcher = buildSearchMatcher(workerData);
 } catch (error) {
   parentPort.postMessage({ type: 'error', message: '正则表达式无效：' + error.message });
 }
 if (matcher) {
+  let filesSearched = 0;
   let total = 0;
   const page = [];
   let capped = false;
+
+  function processFile(file, source) {
+    if (capped || !file) return;
+    filesSearched++;
+    if (!source) return;
+    const lines = source.split('\n');
+    for (let index = 0; index < lines.length; index++) {
+      matcher.lastIndex = 0;
+      const match = matcher.exec(lines[index]);
+      if (!match) continue;
+      if (total >= workerData.offset && page.length < workerData.pageSize) {
+        page.push({ fileId: file.id, path: file.path, language: file.language || '', line: index + 1, ...describeSearchMatch(lines[index], match) });
+      }
+      total++;
+      if (total >= workerData.maxResults) { capped = true; break; }
+    }
+  }
+
   parentPort.on('message', (message) => {
-    if (message.type === 'file') {
-      const { file, source } = message;
-      if (!capped && file && source) {
-        const lines = source.split('\n');
-        for (let index = 0; index < lines.length; index++) {
-          matcher.lastIndex = 0;
-          const match = matcher.exec(lines[index]);
-          if (!match) continue;
-          if (total >= workerData.offset && page.length < workerData.pageSize) {
-            const line = lines[index];
-            const matchLength = Math.max(1, match[0].length);
-            const matchStart = match.index;
-            const matchEnd = Math.min(line.length, match.index + matchLength);
-            let contextStart = Math.max(0, matchStart - Math.floor((400 - Math.min(matchLength, 400)) / 2));
-            let contextEnd = Math.min(line.length, contextStart + 400);
-            contextStart = Math.max(0, contextEnd - 400);
-            page.push({ fileId: file.id, path: file.path, language: file.language || '', line: index + 1, text: line.slice(contextStart, contextEnd), contextStartColumn: contextStart + 1, contextEndColumn: contextEnd, lineLength: line.length, matchStartColumn: matchStart + 1, matchEndColumn: Math.max(matchStart + 1, matchEnd) });
-          }
-          total++;
-          if (total >= workerData.maxResults) { capped = true; break; }
+    if (message.type === 'batch') {
+      const items = message.files;
+      if (Array.isArray(items)) {
+        for (let i = 0; i < items.length; i++) {
+          processFile(items[i].file, items[i].source);
+          if (capped) break;
         }
       }
-      parentPort.postMessage({ type: 'ack' });
+      parentPort.postMessage({ type: 'ack', total, capped });
+    } else if (message.type === 'file') {
+      processFile(message.file, message.source);
+      parentPort.postMessage({ type: 'ack', total, capped });
     } else if (message.type === 'finish') {
-      parentPort.postMessage({ type: 'done', total, results: page, hasMore: total > workerData.offset + page.length, capped });
+      parentPort.postMessage({ type: 'done', filesSearched, total, results: page, hasMore: total > workerData.offset + page.length, capped });
     }
   });
 }
-`;
+`].join("\n");
 
 function filterFiles(files, sourceById, options) {
   return files.filter((file) => {
@@ -80,6 +89,28 @@ function filterFiles(files, sourceById, options) {
     if (options.excludeTests && /(^|[/_.-])(test|tests|spec|specs)([/_.-]|$)|\.(test|spec)\./i.test(file.path)) return false;
     return true;
   }).sort((a, b) => a.path.localeCompare(b.path));
+}
+
+export function partitionSearchFiles(candidates, sourceById, { maxFiles = SEARCH_BATCH_MAX_FILES, maxBytes = SEARCH_BATCH_MAX_BYTES } = {}) {
+  const batches = [];
+  let currentBatch = [];
+  let currentBytes = 0;
+  for (const file of candidates) {
+    const source = sourceById.get(file.id);
+    if (source === undefined) continue;
+    const sourceBytes = Buffer.byteLength(source, "utf8");
+    if (currentBatch.length >= maxFiles || (currentBatch.length > 0 && currentBytes + sourceBytes > maxBytes)) {
+      batches.push(currentBatch);
+      currentBatch = [];
+      currentBytes = 0;
+    }
+    currentBatch.push({ file: { id: file.id, path: file.path, language: file.language ?? "" }, source });
+    currentBytes += sourceBytes;
+  }
+  if (currentBatch.length > 0) {
+    batches.push(currentBatch);
+  }
+  return batches;
 }
 
 export async function searchRepositoryContent({ files, sourceById, input, signal, timeoutMs = SEARCH_TIMEOUT_MS }) {
@@ -106,20 +137,36 @@ export async function searchRepositoryContent({ files, sourceById, input, signal
       if (message.type === "done") return finish(resolve, message);
     });
   });
+
+  const batches = partitionSearchFiles(candidates, sourceById);
+
   try {
-    for (const file of candidates) {
+    for (const batch of batches) {
       if (signal?.aborted) throw Object.assign(new Error("搜索已取消。"), { name: "AbortError" });
       const ack = new Promise((resolve, reject) => {
-        const onMessage = (message) => { if (message.type === "ack") { worker.off("message", onMessage); worker.off("error", onError); resolve(); } };
-        const onError = (error) => { worker.off("message", onMessage); reject(error); };
-        worker.on("message", onMessage); worker.once("error", onError);
+        const onMessage = (message) => {
+          if (message.type === "ack") {
+            worker.off("message", onMessage);
+            worker.off("error", onError);
+            resolve(message);
+          }
+        };
+        const onError = (error) => {
+          worker.off("message", onMessage);
+          reject(error);
+        };
+        worker.on("message", onMessage);
+        worker.once("error", onError);
       });
-      worker.postMessage({ type: "file", file: { id: file.id, path: file.path, language: file.language ?? "" }, source: sourceById.get(file.id) });
-      await Promise.race([ack, outcome.then(() => { throw new Error("搜索任务已结束。"); })]);
+      worker.postMessage({ type: "batch", files: batch });
+      const ackResult = await Promise.race([ack, outcome.then(() => { throw new Error("搜索任务已结束。"); })]);
+      if (ackResult?.capped) {
+        break;
+      }
     }
     worker.postMessage({ type: "finish" });
     const result = await outcome;
-    return { ...result, revision: input.revision, filesSearched: candidates.length, offset: options.offset, pageSize: SEARCH_PAGE_SIZE };
+    return { ...result, revision: input.revision, candidateFiles: candidates.length, offset: options.offset, pageSize: SEARCH_PAGE_SIZE };
   } finally {
     clearTimeout(timer);
     if (abortListener) signal?.removeEventListener("abort", abortListener);

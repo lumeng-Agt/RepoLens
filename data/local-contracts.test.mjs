@@ -15,9 +15,26 @@ import {
   UsageGuidePreferencesSchema,
   WorkspaceSaveResponseSchema,
   WorkspaceMutationRequestSchema,
+  ReadingTourImportSchema,
   parseLocalApiResponse,
   parseRepositoryEvent,
 } from "./local-contracts.mjs";
+
+test('route import validates every field required by persistence without stripping compatible metadata', () => {
+  const route = { repositoryId: 'repo', entryFileId: 'main.ts', revision: 'rev', signature: 'signature', title: 'Route',
+    contextFiles: [{ fileId: 'main.ts', contentHash: 'hash', future: 1 }],
+    steps: [{ id: 'step', title: 'Step', description: 'Read', focusFileId: 'main.ts', future: 2, reference: { fileId: 'main.ts', line: 1, future: 3 } }],
+    sourceSteps: [{ fileId: 'main.ts', purpose: 'Read', future: 4, references: [{ fileId: 'main.ts', startLine: 1, endLine: null, future: 5 }] }],
+    future: { value: 'preserve' } };
+  assert.deepEqual(ReadingTourImportSchema.parse(route), route);
+  assert.equal(WorkspaceMutationRequestSchema.safeParse({ action: 'saved-tours', repositoryId: 'repo', tours: [ReadingTourImportSchema.parse(route)] }).success, true);
+  for (const field of ['id', 'title', 'description']) {
+    const invalid = structuredClone(route); delete invalid.steps[0][field];
+    assert.equal(ReadingTourImportSchema.safeParse(invalid).success, false);
+  }
+  const invalidSource = structuredClone(route); delete invalidSource.sourceSteps[0].purpose;
+  assert.equal(ReadingTourImportSchema.safeParse(invalidSource).success, false);
+});
 
 const snapshot = {
   id: "sample", version: "v1", name: "Sample", description: "Fixture",

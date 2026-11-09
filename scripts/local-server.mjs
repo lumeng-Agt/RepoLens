@@ -1,3 +1,7 @@
+import { buildRepositorySummary, retrieveFromSummary } from "../data/summary-retrieval.mjs";
+import { checkModel, allowsNoKey } from "../data/model-check.mjs";
+import { createClearCoordinator } from "../data/clear-coordinator.mjs";
+import { createAiOperationScope } from "../data/ai-operation-scope.mjs";
 import { resolveEditorTarget } from "../data/editor-target.mjs";
 import { createServer } from "node:http";
 import { createHash, randomUUID } from "node:crypto";
@@ -8,7 +12,7 @@ import { scanRepository } from "../data/localRepository.mjs";
 import { cleanupGitHubRepository, cleanupPendingGitHubContent, fetchGitHubRevision, parseGitHubRepositoryUrl, prepareGitHubRepository } from "../data/githubRepository.mjs";
 import { AiGenerationEnvelopeSchema, AiPreviewResponseSchema, AiStreamEventSchema, createAiGenerationEnvelope } from "../data/ai-contract.mjs";
 import { AI_PROMPT_VERSION, ModelRedirectError, requestChatCompletion, validateAiResult } from "../data/ai-generation.mjs";
-import { collectAiCandidates, questionCandidateIds, rankGoalCandidates, prepareAiContext } from "../data/ai-context.mjs";
+import { collectAiCandidates, questionCandidateIds, rankGoalCandidates, prepareAiContext, prepareConversationContext } from "../data/ai-context.mjs";
 import { rankQuestionCandidates, rankInvestigationCandidates } from "../data/question-retrieval.mjs";
 import { estimateTokens } from "../data/token-estimate.mjs";
 import { searchRepositoryContent } from "../data/repository-search.mjs";
@@ -47,11 +51,22 @@ import {
 } from "../data/local-contracts.mjs";
 
 const port = Number(process.env.REPOLENS_PORT ?? 4318);
+let boundPort = port;
 const uiPort = Number(process.env.REPOLENS_UI_PORT ?? 5173);
 const workspaceDirectory = process.env.REPOLENS_USER_DATA_PATH
   ?? (process.platform === "win32" ? path.join(process.env.LOCALAPPDATA ?? path.join(os.homedir(), "AppData", "Local"), "RepoLens") : path.join(os.homedir(), ".local", "share", "repolens"));
 const workspaceStore = createWorkspaceStore(workspaceDirectory);
-const activeChatOperations = new Set();
+const aiOperations = createAiOperationScope();
+const activePersistence = new Set();
+let shuttingDown = false;
+function runPersistence(work) {
+  const pending = Promise.resolve().then(work);
+  activePersistence.add(pending);
+  const remove = () => activePersistence.delete(pending);
+  void pending.then(remove, remove);
+  return pending;
+}
+let clearingCount = 0;
 const modelTimeoutMs = Math.max(100, Number(process.env.REPOLENS_AI_TIMEOUT_MS ?? 45_000));
 const allowedOrigins = new Set([`http://127.0.0.1:${uiPort}`, `http://localhost:${uiPort}`, "http://127.0.0.1:8787", "http://localhost:8787", ...(process.env.REPOLENS_ALLOWED_ORIGINS ?? "").split(",").filter(Boolean)]);
 let session = null;
@@ -62,6 +77,7 @@ let pendingChangedPaths = new Set();
 let pendingVerifyScan = false;
 const scanQueue = createSerialTaskQueue();
 const subscribers = new Set();
+const summaryPreviews = new Map();
 const previews = new Map();
 let sessionGeneration = 0;
 const repositoryCommands = createRepositoryCommandRegistry();
@@ -84,7 +100,7 @@ const sequenceHistory = new Map();
 const githubOperations = new Set();
 const githubRescanQueue = createSerialTaskQueue();
 const operationRecorder = createOperationRecorder({ onRecord: (record) => process.stdout.write(`[RepoLens operation] ${JSON.stringify(record)}\n`) });
-const settings = { baseUrl: process.env.REPOLENS_AI_BASE_URL ?? "", model: process.env.REPOLENS_AI_MODEL ?? "", apiKey: process.env.REPOLENS_AI_API_KEY ?? "" };
+const settings = { authMode: process.env.REPOLENS_AI_AUTH_MODE ?? "key", baseUrl: process.env.REPOLENS_AI_BASE_URL ?? "", model: process.env.REPOLENS_AI_MODEL ?? "", apiKey: process.env.REPOLENS_AI_API_KEY ?? "" };
 let settingsSaveId = 0;
 const settingsSaveWaiters = new Map();
 async function persistModelSettings(value) {
@@ -114,10 +130,18 @@ process.on("message", (message) => {
   if (message.ok) pending.resolve(); else pending.reject(new Error("无法加密保存模型配置，请重试。"));
 });
 
-const cache = new Map();
+const clearCoordinator = createClearCoordinator({ store: workspaceStore,
+  beforeClear: workspaceId => { invalidatePreviews(); return aiOperations.clear(workspaceId); },
+  deleteModel: async () => { await persistModelSettings(null); Object.assign(settings, { baseUrl: "", model: "", apiKey: "" }); invalidatePreviews(); },
+});
 const digest = (value) => createHash("sha256").update(value).digest("hex");
 const json = sendJson;
-const body = readJsonRequestBody;
+const shutdownMessage = "本地服务正在关闭，请重新打开 RepoLens 后重试。";
+async function body(request) {
+  const value = await readJsonRequestBody(request);
+  if (shuttingDown) throw Object.assign(new Error(shutdownMessage), { status: 503 });
+  return value;
+}
 function parseRequest(value, schema, label) {
   const parsed = schema.safeParse(value);
   if (!parsed.success) {
@@ -286,7 +310,7 @@ function safeSource(fileId, expectedRepositoryId) {
   if (!session || session.snapshot.id !== expectedRepositoryId) return undefined;
   return session.files.has(fileId) ? session.sourceCache.get(fileId) : undefined;
 }
-function invalidatePreviews() { previews.clear(); }
+function invalidatePreviews() { previews.clear(); summaryPreviews.clear(); }
 function conflict(message) { const error = new Error(message); error.status = 409; return error; }
 function collectQuestionCandidates(fileId, question) {
   if (!session?.files.has(fileId)) throw new Error("目标文件已不存在，请重新选择文件。");
@@ -295,10 +319,14 @@ function collectQuestionCandidates(fileId, question) {
 function buildPreview(input) {
   const questionLike = input.mode === "question" || input.mode === "investigation";
   if (!session || input.repositoryId !== session.snapshot.id || !["explanation", "route", "question", "investigation"].includes(input.mode)) throw new Error("仓库或生成类型无效。");
-  if (!settings.baseUrl || !settings.model || !settings.apiKey) throw new Error("请先填写模型服务地址、模型名称和 API 密钥。预览不会发送源码。");
+  if (!settings.baseUrl || !settings.model || (!settings.apiKey && !(settings.authMode === "none" && allowsNoKey(settings.baseUrl)))) throw new Error("请先填写模型服务地址、模型名称和 API 密钥。预览不会发送源码。");
   if (questionLike && (!String(input.question ?? "").trim() || String(input.question).length > 12_000)) throw new Error("请输入不超过 12,000 字符的问题。");
   if (input.mode === "route" && String(input.goal ?? "").length > 300) throw new Error("导览目标不能超过 300 个字符。");
-  const retrieval = input.mode === "investigation" ? rankInvestigationCandidates({ files: session.snapshot.files, dependencies: session.snapshot.dependencies, sourceById: session.sourceCache, question: input.question, excludedFileIds: input.excludedFileIds }) : questionLike ? collectQuestionCandidates(input.fileId, input.question) : null;
+  const conversation = input.mode === "question" && input.conversation === true;
+  const sourceFreeConversation = conversation && (input.fileIds?.length === 0 || input.fileIds === undefined && session.snapshot.files.length === 0);
+  const lastQuestion = input.history?.filter(item => item.role === "user").at(-1)?.content;
+  const retrievalQuestion = conversation && lastQuestion && /继续|详细|展开|举.*例|为什么|它|刚才|上面|\b(?:continue|more|why|that|example)\b/i.test(input.question) ? `${lastQuestion}\n${input.question}` : input.question;
+  const retrieval = sourceFreeConversation ? { candidates: [], retrievalInsufficient: true, searchSuggestions: [] } : input.mode === "investigation" ? rankInvestigationCandidates({ files: session.snapshot.files, dependencies: session.snapshot.dependencies, sourceById: session.sourceCache, question: input.question, excludedFileIds: input.excludedFileIds }) : questionLike ? collectQuestionCandidates(input.fileId, retrievalQuestion) : null;
   if (input.mode === "investigation") {
     const excluded = new Set(input.excludedFileIds ?? []);
     retrieval.candidates = retrieval.candidates.filter(candidate => !excluded.has(candidate.id));
@@ -307,22 +335,25 @@ function buildPreview(input) {
   const goalRetrieval = input.mode === "route" && String(input.goal ?? "").trim()
     ? rankGoalCandidates(session.snapshot, input.fileId, String(input.goal).trim(), session.sourceCache)
     : null;
-  const questionCandidates = retrieval && input.fileIds ? questionCandidateIds(session.snapshot, input.mode === "investigation" ? "" : input.fileId, input.question, session.sourceCache, input.fileIds) : null;
+  const questionCandidates = !sourceFreeConversation && retrieval && input.fileIds ? questionCandidateIds(session.snapshot, input.mode === "investigation" ? "" : input.fileId, input.question, session.sourceCache, input.fileIds) : null;
   const rankedContextCandidates = retrieval?.candidates ?? goalRetrieval?.candidates ?? null;
   const candidates = (questionCandidates?.candidates ?? rankedContextCandidates?.map((candidate) => candidate.id) ?? collectAiCandidates(session.snapshot, input.fileId, input.mode)).filter((fileId) => (!input.scopePrefix || fileId.startsWith(`${input.scopePrefix}/`)) && !(input.excludedFileIds ?? []).includes(fileId));
   if (!questionLike && !candidates.includes(input.fileId)) throw new Error("所选目录不包含当前入口文件，请调整图谱目录范围。");
-  if (questionLike && candidates.length === 0) throw new Error("仓库中没有可用于回答的源码文件。");
+  if (questionLike && !conversation && candidates.length === 0) throw new Error("仓库中没有可用于回答的源码文件。");
   const questionHistory = input.mode === "question" ? input.history ?? [] : [];
-  if (!Array.isArray(questionHistory) || questionHistory.length > 6 || questionHistory.some((item) => !item || !["user", "assistant"].includes(item.role) || typeof item.content !== "string" || item.content.length > 12_000)) throw new Error("问答历史格式无效，请重新选择对话内容。");
+  if (!Array.isArray(questionHistory) || questionHistory.length > 6 || questionHistory.some((item) => !item || !["user", "assistant"].includes(item.role) || typeof item.content !== "string" || item.content.length > (conversation ? 60_000 : 12_000))) throw new Error("问答历史格式无效，请重新选择对话内容。");
   const requested = input.fileIds ?? (questionLike ? candidates.slice(0, 12) : goalRetrieval ? goalRetrieval.selectedFileIds.filter((fileId) => candidates.includes(fileId)) : candidates);
-  const selected = prepareAiContext({ candidates, rankedCandidates: rankedContextCandidates ?? [], fileIds: input.fileIds ?? (questionLike ? undefined : requested), ranges: input.ranges, sourceById: session.sourceCache, entryFileId: input.fileId, requireEntry: !questionLike, question: input.question, history: questionHistory, retrievalInsufficient: retrieval?.retrievalInsufficient, questionLike });
+  const selected = (conversation ? prepareConversationContext : prepareAiContext)({ candidates, rankedCandidates: rankedContextCandidates ?? [], fileIds: input.fileIds ?? (questionLike ? undefined : requested), ranges: input.ranges, sourceById: session.sourceCache, entryFileId: input.fileId, requireEntry: !questionLike, question: input.question, history: questionHistory, retrievalInsufficient: retrieval?.retrievalInsufficient, questionLike });
   const context = { ...selected, sources: selected.sources.map((source) => ({ ...source, contentHash: digest(session.sourceCache.get(source.fileId) ?? "") })) };
-  const totalCharacters = selected.totalCharacters;
+  const refinement = input.refinement;
+  if (refinement && (!['route', 'investigation'].includes(input.mode) || typeof refinement !== 'object' || typeof refinement.instruction !== 'string' || !refinement.instruction.trim() || refinement.instruction.length > 12000 || JSON.stringify(refinement).length > 60000)) throw new Error("结果调整内容无效或过长。");
+  const totalCharacters = selected.totalCharacters + (refinement ? JSON.stringify(refinement).length : 0);
+  if (totalCharacters > 60000 && !selected.blockers.includes('character_limit')) { selected.scopeRequired = true; selected.blockers.push('character_limit'); }
   const tooMany = selected.scopeRequired;
   if (tooMany) {
-    return { scopeRequired: true, searchSuggestions: retrieval?.searchSuggestions ?? [], candidates: candidates.map((fileId) => { const lines = (session.sourceCache.get(fileId) ?? "").split("\n"); const candidate = rankedContextCandidates?.find((item) => item.id === fileId); return { fileId, characters: lines.join("\n").length, lineCount: lines.length, oversizedLines: lines.flatMap((line, index) => line.length > 60_000 ? [index + 1] : []), ...(candidate?.reasons.length ? { reasons: candidate.reasons } : {}), ...(candidate?.suggestedRange ? { suggestedRange: candidate.suggestedRange } : {}), alternativeRanges: candidate?.alternativeRanges ?? [], ...(candidate?.rangeRequired ? { rangeRequired: true } : {}) }; }), maxFiles: 12, maxCharacters: 60_000, ...(retrieval ? { retrievalInsufficient: retrieval.retrievalInsufficient } : {}) };
+    return { scopeRequired: true, blockers: selected.blockers, searchSuggestions: retrieval?.searchSuggestions ?? [], candidates: candidates.map((fileId) => { const lines = (session.sourceCache.get(fileId) ?? "").split("\n"); const candidate = rankedContextCandidates?.find((item) => item.id === fileId); return { fileId, characters: lines.join("\n").length, lineCount: lines.length, oversizedLines: lines.flatMap((line, index) => line.length > 60_000 ? [index + 1] : []), ...(candidate?.reasons.length ? { reasons: candidate.reasons } : {}), ...(candidate?.suggestedRange ? { suggestedRange: candidate.suggestedRange } : {}), alternativeRanges: candidate?.alternativeRanges ?? [], ...(candidate?.rangeRequired ? { rangeRequired: true } : {}) }; }), maxFiles: 12, maxCharacters: 60_000, ...(retrieval ? { retrievalInsufficient: retrieval.retrievalInsufficient } : {}) };
   }
-  const preview = { excludedFileIds: input.excludedFileIds ?? [], id: randomUUID(), repositoryId: session.snapshot.id, revision: session.snapshot.revision, sequence: session.snapshot.sequence, entryFileId: input.fileId, mode: input.mode, ...(input.mode === "route" ? { goal: String(input.goal ?? "").trim() } : {}), baseUrl: settings.baseUrl, model: settings.model, apiKeyHash: digest(settings.apiKey), sources: context.sources, characters: totalCharacters, expiresAt: Date.now() + 10 * 60_000, used: false, ...(questionLike ? { question: String(input.question).trim(), history: questionHistory, retrievalInsufficient: retrieval.retrievalInsufficient } : {}) };
+  const preview = { ...(refinement ? { refinement: structuredClone(refinement) } : {}), excludedFileIds: input.excludedFileIds ?? [], id: randomUUID(), repositoryId: session.snapshot.id, revision: session.snapshot.revision, sequence: session.snapshot.sequence, entryFileId: input.fileId, mode: input.mode, authMode: settings.authMode, ...(conversation ? { conversation: true, ...(selected.contextNotice ? { contextNotice: selected.contextNotice } : {}) } : {}), ...(input.mode === "route" ? { goal: String(input.goal ?? "").trim() } : {}), baseUrl: settings.baseUrl, model: settings.model, apiKeyHash: digest(settings.apiKey), sources: context.sources, characters: totalCharacters, expiresAt: Date.now() + 10 * 60_000, used: false, ...(questionLike ? { question: String(input.question).trim(), history: questionHistory, retrievalInsufficient: retrieval.retrievalInsufficient } : {}) };
   const tokenEstimate = estimateTokens(`${context.sources.map((item) => item.source).join("\n")}\n${questionLike ? `${String(input.question)}\n${questionHistory.map((item) => item.content).join("\n")}` : ""}`);
   const previewFiles = preview.sources.map(({ fileId, startLine, endLine, contentHash }) => {
     const candidateReasons = rankedContextCandidates?.find((candidate) => candidate.id === fileId)?.reasons;
@@ -336,12 +367,12 @@ function buildPreview(input) {
   preview.selectionReasons = Object.fromEntries(previewFiles.map(file => [file.fileId, file.reasons]));
   previews.set(preview.id, preview);
   while (previews.size > 50) previews.delete(previews.keys().next().value);
-  return { scopeRequired: false, preview: { id: preview.id, repositoryId: preview.repositoryId, revision: preview.revision, entryFileId: preview.entryFileId, mode: preview.mode, ...(preview.mode === "investigation" ? { excludedFileIds: preview.excludedFileIds } : {}), ...(preview.mode === "route" ? { goal: preview.goal } : {}), baseUrl: preview.baseUrl, model: preview.model, files: previewFiles, characters: preview.characters, tokenEstimate, expiresAt: preview.expiresAt, ...(questionLike ? { question: preview.question, history: preview.history, retrievalInsufficient: preview.retrievalInsufficient } : {}) } };
+  return { scopeRequired: false, preview: { id: preview.id, repositoryId: preview.repositoryId, revision: preview.revision, entryFileId: preview.entryFileId, mode: preview.mode, ...(preview.conversation ? { conversation: true, ...(preview.contextNotice ? { contextNotice: preview.contextNotice } : {}) } : {}), ...(preview.mode === "investigation" ? { excludedFileIds: preview.excludedFileIds } : {}), ...(preview.mode === "route" ? { goal: preview.goal } : {}), baseUrl: preview.baseUrl, model: preview.model, files: previewFiles, characters: preview.characters, tokenEstimate, expiresAt: preview.expiresAt, ...(questionLike ? { question: preview.question, history: preview.history, retrievalInsufficient: preview.retrievalInsufficient } : {}) } };
 }
 function contextFromPreview(preview) {
   if (!session || preview.expiresAt < Date.now() || preview.repositoryId !== session.snapshot.id || preview.revision !== session.snapshot.revision || preview.baseUrl !== settings.baseUrl || preview.model !== settings.model || preview.apiKeyHash !== digest(settings.apiKey)) throw new Error("仓库或模型配置已变化，必须重新确认发送范围。");
   for (const source of preview.sources) if (digest(session.sourceCache.get(source.fileId) ?? "") !== source.contentHash) throw new Error("预览中的源码已变化，必须重新确认发送范围。");
-  return { ...preview, apiKey: settings.apiKey };
+  return { ...preview, authMode: settings.authMode, apiKey: settings.apiKey };
 }
 async function refreshPreviewRepository(preview) {
   if (!session || session.snapshot.id !== preview.repositoryId) throw conflict("当前仓库已切换，请重新预览发送范围。");
@@ -361,14 +392,16 @@ async function refreshPreviewRepository(preview) {
 }
 const server = createServer(async (request, response) => {
   const origin = request.headers.origin;
-  const requestPolicy = validateLocalRequest({ host: request.headers.host, origin, method: request.method, url: request.url, port, allowedOrigins });
+  const requestPolicy = validateLocalRequest({ host: request.headers.host, origin, method: request.method, url: request.url, port: boundPort, allowedOrigins });
   if (!requestPolicy.allowed) return json(response, requestPolicy.status, { error: requestPolicy.error });
   if (origin) { response.setHeader("Access-Control-Allow-Origin", origin); response.setHeader("Vary", "Origin"); }
   response.setHeader("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS");
   response.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  if (shuttingDown) return json(response, 503, { error: shutdownMessage });
   if (request.method === "OPTIONS") { response.writeHead(204); return response.end(); }
-  const url = new URL(request.url, `http://127.0.0.1:${port}`);
+  const url = new URL(request.url, `http://127.0.0.1:${boundPort}`);
   try {
+    if (clearingCount && request.method === "POST" && url.pathname.startsWith("/api/ai/")) return json(response, 409, { error: "正在清除保存数据，请完成清除后再操作 AI。" });
     if (request.method === "GET" && url.pathname === "/api/health") return validatedJson(response, 200, { ok: true }, LocalHealthResponseSchema, "健康检查");
     if (request.method === "GET" && url.pathname === "/api/workspace") {
       const repositoryId = url.searchParams.get("repositoryId");
@@ -379,6 +412,7 @@ const server = createServer(async (request, response) => {
     if (request.method === "POST" && url.pathname === "/api/workspace") {
       const input = parseRequest(await body(request), WorkspaceMutationRequestSchema, "工作区操作");
       if (input.repositoryId && input.repositoryId.length > 160) return json(response, 400, { error: "工作区编号无效。" });
+      return await runPersistence(async () => {
       const { repositoryId } = input;
       let result;
       const telemetry = operationRecorder.start("workspace.mutate", { repositoryId: repositoryId ?? "global", action: String(input.action ?? "unknown") });
@@ -414,7 +448,7 @@ const server = createServer(async (request, response) => {
         const sampleWorkspace = repositoryId === "taskflow-sample";
         if (!sampleWorkspace && !matchesPersistenceSession(input)) return json(response, 409, { error: "仓库会话已变化，阅读进度未保存。" });
         result = await workspaceStore.saveProgress(sampleWorkspace ? repositoryId : session.snapshot.workspaceId ?? repositoryId, input.key, input.value);
-      } else if (input.action === "node-positions" || input.action === "ai-result" || input.action === "ai-route" || input.action === "conversations" || input.action === "reading-notes" || input.action === "saved-tours" || input.action === "investigations") {
+      } else if (input.action === "node-positions" || input.action === "ai-result" || input.action === "ai-route" || input.action === "conversations" || input.action === "chat-preferences" || input.action === "reading-notes" || input.action === "saved-tours" || input.action === "investigations") {
         const sampleWorkspace = repositoryId === "taskflow-sample";
         if (!sampleWorkspace && !matchesPersistenceSession(input)) return json(response, 409, { error: "当前仓库会话已变化，保存请求已丢弃。" });
         const workspaceId = sampleWorkspace ? repositoryId : session.snapshot.workspaceId ?? repositoryId;
@@ -422,22 +456,24 @@ const server = createServer(async (request, response) => {
         else if (input.action === "ai-result") result = await workspaceStore.saveAiResult(workspaceId, input.fileId, input.record);
         else if (input.action === "ai-route") result = await workspaceStore.saveAiRoute(workspaceId, input.record);
         else if (input.action === "conversations") result = await workspaceStore.saveConversations(workspaceId, input.conversations);
+        else if (input.action === "chat-preferences") result = await workspaceStore.saveChatPreferences(workspaceId, input.preferences);
         else if (input.action === "investigations") result = await workspaceStore.saveInvestigations(workspaceId, input.records);
         else if (input.action === "reading-notes") result = await workspaceStore.saveReadingNotes(workspaceId, input.notes);
         else result = await workspaceStore.saveTours(workspaceId, input.tours);
       } else if (input.action === "clear-all") {
-        for (const operation of activeChatOperations) operation.controller.abort();
-        result = await workspaceStore.clearAll();
-        if (result.persisted) { await persistModelSettings(null); Object.assign(settings, { baseUrl: "", model: "", apiKey: "" }); invalidatePreviews(); }
+        clearingCount++;
+        try { const cleared = await clearCoordinator.clear(input.operationId ?? randomUUID()); result = { persisted: cleared.ok }; json(response, 200, cleared); return result; } finally { clearingCount--; }
       } else if (input.action === "clear-repository") {
         if (!matchesPersistenceSession(input)) return json(response, 409, { error: "仓库会话已变化，保存数据未清除。" });
-        for (const operation of activeChatOperations) if (operation.workspaceId === (session.snapshot.workspaceId ?? repositoryId)) operation.controller.abort();
-        result = await workspaceStore.clearRepository(session.snapshot.workspaceId ?? repositoryId);
+        clearingCount++;
+        try { const cleared = await clearCoordinator.clear(input.operationId ?? randomUUID(), session.snapshot.workspaceId ?? repositoryId); result = { persisted: cleared.ok }; json(response, 200, cleared); return result; } finally { clearingCount--; }
       } else return json(response, 400, { error: "工作区操作类型无效。" });
-      return validatedJson(response, 200, { ok: result.persisted, warning: result.warning }, WorkspaceSaveResponseSchema, "工作区保存");
+      validatedJson(response, 200, { ok: result.persisted, warning: result.warning }, WorkspaceSaveResponseSchema, "工作区保存");
+      return result;
       } finally {
         telemetry.finish(result?.persisted ? "ok" : result ? "error" : "stale", { action: String(input.action ?? "unknown") });
       }
+      });
     }
     if (request.method === "GET" && url.pathname === "/api/snapshot") {
       if (!session || url.searchParams.get("repositoryId") !== session.snapshot.id) return json(response, 409, { error: "仓库会话已变化，请重新打开。" });
@@ -548,7 +584,7 @@ const server = createServer(async (request, response) => {
       for (const operation of closingOperations) operation.controller.abort();
       if (session?.ownerClientId === command.clientId && session.ownerIntentSequence < command.intentSequence) {
         const closedId = session.snapshot.id;
-        ++sessionGeneration; stopWatching(); session = null; invalidatePreviews(); cache.clear();
+        ++sessionGeneration; stopWatching(); session = null; invalidatePreviews(); aiOperations.clearCache();
         // End only subscriptions captured from the old session, before any await.
         for (const subscriber of subscribers) if (subscriber.repositoryId === closedId) {
           writeEvent(subscriber.response, "diagnostic", { message: "仓库索引已关闭。" }); subscriber.response.end();
@@ -665,17 +701,51 @@ const server = createServer(async (request, response) => {
       writeEvent(response, "revision", { repositoryId, revision: session.snapshot.revision, sequence: session.snapshot.sequence });
       request.on("close", () => { for (const subscriber of subscribers) if (subscriber.response === response) subscribers.delete(subscriber); }); return;
     }
-    if (request.method === "GET" && url.pathname === "/api/ai/settings") return validatedJson(response, 200, { baseUrl: settings.baseUrl, model: settings.model, configured: Boolean(settings.baseUrl && settings.model && settings.apiKey) }, AiSettingsResponseSchema, "模型设置");
+    if (request.method === "POST" && ["/api/ai/retrieve/preview", "/api/ai/retrieve"].includes(url.pathname)) {
+      const input = await body(request);
+      const origin = session;
+      if (!origin || input.repositoryId !== origin.snapshot.id || input.persistenceSessionId !== origin.snapshot.persistenceSessionId || input.revision !== origin.snapshot.revision) throw conflict("仓库会话已变化。");
+      if (url.pathname.endsWith('/preview')) {
+        if (typeof input.question !== 'string' || !input.question.trim() || input.question.length > 12000 || input.prefix && typeof input.prefix !== 'string') throw new Error("请输入有效的问题与目录范围。");
+        const summary = buildRepositorySummary(origin.snapshot, input.prefix ?? '');
+        const text = JSON.stringify(summary); const characters = text.length + input.question.length;
+        if (characters > 60000) return json(response, 413, { error: "索引摘要超过 60,000 字符，请选择更小的目录。" });
+        const id = randomUUID();
+        summaryPreviews.set(id, { origin, question: input.question, summary, settingsSignature: digest(JSON.stringify(settings)), expires: Date.now() + 600000 });
+        if (summaryPreviews.size > 16) summaryPreviews.delete(summaryPreviews.keys().next().value);
+        return json(response, 200, { id, summary, characters });
+      }
+      const preview = summaryPreviews.get(input.previewId); summaryPreviews.delete(input.previewId);
+      if (!preview || preview.origin !== origin || preview.expires < Date.now() || preview.settingsSignature !== digest(JSON.stringify(settings))) throw conflict("摘要预览已失效，请重新查看。");
+      const controller = new AbortController(); const operation = aiOperations.begin(origin.snapshot.workspaceId ?? origin.snapshot.id, controller);
+      const timer = setTimeout(() => controller.abort(), modelTimeoutMs); response.on('close', () => controller.abort());
+      try { const candidates = await retrieveFromSummary(settings, preview.summary, preview.question, controller.signal); if (!operation.isActive() || session !== origin) throw conflict("检索已取消或会话已变化。"); return json(response, 200, { candidates: candidates.map(item => ({ ...item, contentHash: origin.snapshot.files.find(file => file.id === item.fileId)?.contentHash ?? '' })) }); }
+      finally { clearTimeout(timer); operation.finish(); }
+    }
+    if (request.method === "POST" && url.pathname === "/api/ai/settings/check") {
+      const input = parseRequest(await body(request), AiSettingsRequestSchema, "模型检测请求");
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 15000);
+      response.on("close", () => controller.abort());
+      try {
+        const apiKey = input.apiKey || (input.baseUrl === settings.baseUrl ? settings.apiKey : "");
+        return sendJson(response, 200, await checkModel({ ...input, apiKey }, input.action, controller.signal));
+      } finally { clearTimeout(timeout); }
+    }
+    if (request.method === "GET" && url.pathname === "/api/ai/settings") return validatedJson(response, 200, { authMode: settings.authMode, baseUrl: settings.baseUrl, model: settings.model, configured: Boolean(settings.baseUrl && settings.model && (settings.apiKey || settings.authMode === "none" && allowsNoKey(settings.baseUrl))) }, AiSettingsResponseSchema, "模型设置");
     if (request.method === "POST" && url.pathname === "/api/ai/settings") {
       const input = parseRequest(await body(request), AiSettingsRequestSchema, "模型设置请求");
       const baseUrl = String(input.baseUrl ?? "").trim();
       if (baseUrl) { const parsed = new URL(baseUrl); if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password || parsed.search || parsed.hash) throw new Error("模型地址须为不含账号信息的 HTTP(S) 服务地址。"); }
-      const serviceChanged = baseUrl !== settings.baseUrl || String(input.model ?? "").trim() !== settings.model;
-      const nextSettings = { baseUrl, model: String(input.model ?? "").trim(), apiKey: typeof input.apiKey === "string" && input.apiKey ? input.apiKey : input.clearKey || serviceChanged ? "" : settings.apiKey };
-      await persistModelSettings(nextSettings);
-      Object.assign(settings, nextSettings);
-      invalidatePreviews();
-      return validatedJson(response, 200, { baseUrl: settings.baseUrl, model: settings.model, configured: Boolean(settings.baseUrl && settings.model && settings.apiKey) }, AiSettingsResponseSchema, "模型设置");
+      if (input.authMode === "none" && !allowsNoKey(baseUrl)) throw new Error("免密模式仅用于本机回环地址。");
+      return await runPersistence(async () => {
+      await clearCoordinator.run(async () => {
+      const serviceChanged = baseUrl !== settings.baseUrl;
+      const nextSettings = { authMode: input.authMode === "none" ? "none" : "key", baseUrl, model: String(input.model ?? "").trim(), apiKey: input.authMode === "none" ? "" : typeof input.apiKey === "string" && input.apiKey ? input.apiKey : input.clearKey || serviceChanged ? "" : settings.apiKey };
+      await persistModelSettings(nextSettings); Object.assign(settings, nextSettings); invalidatePreviews();
+      });
+      return validatedJson(response, 200, { authMode: settings.authMode, baseUrl: settings.baseUrl, model: settings.model, configured: Boolean(settings.baseUrl && settings.model && (settings.apiKey || settings.authMode === "none" && allowsNoKey(settings.baseUrl))) }, AiSettingsResponseSchema, "模型设置");
+      });
     }
     if (request.method === "POST" && url.pathname === "/api/ai/generate") {
       const controller = new AbortController();
@@ -691,7 +761,7 @@ const server = createServer(async (request, response) => {
         controller.abort();
       };
       const ensureActive = () => {
-        if (!controller.signal.aborted) return;
+        if (!controller.signal.aborted && (!generationOperation || generationOperation.isActive())) return;
         const error = new Error(timedOut ? "模型请求超时或已取消。" : "模型请求已取消。");
         error.name = "AbortError";
         throw error;
@@ -703,7 +773,7 @@ const server = createServer(async (request, response) => {
       let aiTelemetry;
       let aiOutcome = "error";
       let aiCached = false;
-      let chatOperation;
+      let generationOperation;
       let emit;
       try {
         const input = parseRequest(await body(request), AiGenerationRequestSchema, "AI 生成请求");
@@ -713,10 +783,7 @@ const server = createServer(async (request, response) => {
         // Claim the confirmation before the first asynchronous verification.
         preview.used = true;
         const originSession = session;
-        if (input.chat) {
-          chatOperation = { controller, workspaceId: originSession.snapshot.workspaceId ?? preview.repositoryId };
-          activeChatOperations.add(chatOperation);
-        }
+        generationOperation = aiOperations.begin(originSession.snapshot.workspaceId ?? preview.repositoryId, controller);
         aiTelemetry = operationRecorder.start("ai.generate", { repositoryId: preview.repositoryId, mode: preview.mode });
         await refreshPreviewRepository(preview);
         ensureActive();
@@ -738,21 +805,25 @@ const server = createServer(async (request, response) => {
           shownAnswer = answer;
         } } : {};
         const respond = async (result, cached) => {
+          ensureActive();
           const envelope = createAiGenerationEnvelope(result, context, cached);
           if (input.chat) {
             ensureActive();
             const completion = buildAiChatCompletion(context, result, input.chat);
-            const persisted = await workspaceStore.commitAiChatCompletion(chatOperation.workspaceId, input.chat.conversationId, completion.messages, completion.artifacts, () => !controller.signal.aborted);
+            const persisted = await runPersistence(() => workspaceStore.commitAiChatCompletion(generationOperation.workspaceId, input.chat.conversationId, completion.messages, completion.artifacts, generationOperation.isActive, { repositoryId: originSession.snapshot.id, workspaceId: generationOperation.workspaceId, persistenceSessionId: originSession.snapshot.persistenceSessionId }));
             ensureActive();
             envelope.chatPersisted = persisted.persisted;
+            if (persisted.routePersisted !== undefined) envelope.routePersisted = persisted.routePersisted;
             if (persisted.warning) envelope.warning = persisted.warning;
           }
+          if (!cached && envelope.chatPersisted !== false) generationOperation.cache(key, result);
           if (emit) { emit({ type: "complete", result: AiGenerationEnvelopeSchema.parse(envelope) }); response.end(); return; }
           return validatedJson(response, 200, envelope, AiGenerationEnvelopeSchema, "AI 生成");
         };
-        const key = digest(JSON.stringify([AI_PROMPT_VERSION, context.baseUrl, context.model, digest(context.apiKey), context.mode, context.entryFileId, context.goal ?? null, context.question ?? null, context.history ?? [], context.sources.map((source) => [source.fileId, source.contentHash, source.startLine, source.endLine])]));
-        if (cache.has(key)) {
-          const result = validateAiResult(cache.get(key), context);
+        const key = digest(JSON.stringify([AI_PROMPT_VERSION, context.baseUrl, context.model, digest(context.apiKey), context.mode, context.conversation === true, context.entryFileId, context.goal ?? null, context.refinement ?? null, context.question ?? null, context.history ?? [], context.sources.map((source) => [source.fileId, source.contentHash, source.startLine, source.endLine])]));
+        const cachedResult = generationOperation.getCached(key);
+        if (cachedResult !== undefined) {
+          const result = validateAiResult(cachedResult, context);
           ensureActive();
           aiOutcome = "ok";
           aiCached = true;
@@ -793,8 +864,6 @@ const server = createServer(async (request, response) => {
         if (!input.chat || originatingSessionIsOpen()) await refreshPreviewRepository(context);
         ensureActive();
         if ((!input.chat || originatingSessionIsOpen()) && (!session || session.snapshot.id !== context.repositoryId || session.snapshot.revision !== context.revision)) throw conflict("生成期间仓库内容发生变化，结果已丢弃。");
-        cache.set(key, result);
-        if (cache.size > 50) cache.delete(cache.keys().next().value);
         ensureActive();
         aiOutcome = "ok";
         return await respond(result, false);
@@ -809,7 +878,7 @@ const server = createServer(async (request, response) => {
       } finally {
         if (aiTelemetry) aiTelemetry.finish(controller.signal.aborted ? "cancelled" : aiOutcome, { cached: aiCached });
         clearTimeout(timeout);
-        if (chatOperation) activeChatOperations.delete(chatOperation);
+        generationOperation?.finish();
         request.off("aborted", cancelForClient);
       }
     }
@@ -828,8 +897,15 @@ const server = createServer(async (request, response) => {
     return json(response, error?.status ?? 400, { error: error instanceof Error ? error.message : "本地服务发生错误。" });
   }
 });
-server.listen(port, "127.0.0.1", () => process.stdout.write(`RepoLens 本地服务已启动: http://127.0.0.1:${port}\n`));
-let shuttingDown = false;
+server.listen(port, "127.0.0.1", () => {
+  const address = server.address();
+  const actualPort = typeof address === "object" && address ? address.port : port;
+  boundPort = actualPort;
+  process.stdout.write(`RepoLens 本地服务已启动: http://127.0.0.1:${actualPort}\n`);
+  if (process.connected) {
+    process.send({ type: "backend:ready", port: actualPort });
+  }
+});
 function shutdown() {
   if (shuttingDown) return;
   shuttingDown = true;
@@ -838,8 +914,10 @@ function shutdown() {
   const activeGitHubOperations = [...githubOperations];
   for (const operation of openingOperations) operation.cancel();
   for (const operation of activeGitHubOperations) operation.controller.abort();
+  const activeAiOperations = aiOperations.clear();
   const cleanup = (async () => {
     await Promise.allSettled([
+    activeAiOperations,
     ...openingOperations.map((operation) => operation.done),
     ...activeGitHubOperations.map((operation) => operation.done),
     ...[...closeOperations.values()].map(operation => operation.done),
@@ -852,10 +930,19 @@ function shutdown() {
   })();
   for (const subscriber of subscribers) { subscriber.response.end(); }
   subscribers.clear();
-  const forceExit = setTimeout(() => process.exit(1), 15_000);
-  forceExit.unref();
-  server.close(() => { void cleanup.then((cleaned) => { clearTimeout(forceExit); process.exit(cleaned ? 0 : 1); }, () => { clearTimeout(forceExit); process.exit(1); }); });
-  server.closeAllConnections();
+  const forceExit = setTimeout(() => {
+    process.stderr.write("[RepoLens shutdown] 本地服务未能在时限内完成保存与清理。\n");
+    process.exit(1);
+  }, 15_000);
+  const closed = new Promise(resolve => server.close(error => resolve(!error)));
+  const drained = Promise.allSettled(activePersistence).then(results => {
+    server.closeAllConnections();
+    return results.every(result => result.status === "fulfilled" ? result.value?.persisted !== false : result.reason?.name === "AbortError");
+  });
+  void Promise.all([closed, cleanup, drained]).then(results => {
+    clearTimeout(forceExit);
+    process.exit(results.every(Boolean) ? 0 : 1);
+  }, () => { clearTimeout(forceExit); process.exit(1); });
 }
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);

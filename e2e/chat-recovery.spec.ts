@@ -72,7 +72,7 @@ test("a storage warning preserves new chat operations across a successful reread
   await openRepository.click();
   await expect(page.getByText("Question fixture", { exact: true }).first()).toBeVisible();
   await page.getByRole("treeitem", { name: "main.ts" }).click();
-  await page.getByRole("tab", { name: "问答", exact: true }).click();
+  await page.getByRole("button", { name: "打开聊天", exact: true }).click();
   await expect(page.getByText(/本地保存提示：audit-warning/).first()).toBeVisible();
   await page.getByRole('button',{name:'新对话',exact:true}).click();
   await page.getByRole('button',{name:'聊天历史',exact:true}).click();

@@ -290,3 +290,50 @@ test("clear-current scrubs only its workspace from owned copies and preserves ot
   await store.clearAll();
   assert.equal(JSON.parse(await readFile(path.join(directory, "workspace-v1.json"), "utf8")).futureMetadata, undefined);
 });
+
+
+test("AI route capacity preserves all existing routes and separately reports transcript persistence", async (context) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "repolens-route-capacity-"));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const store = createWorkspaceStore(directory);
+  const routes = Array.from({ length: 100 }, (_, i) => ({ signature: `manual-${i}`, title: `Manual ${i}`, steps: [] }));
+  await store.saveTours("workspace", routes);
+  const route = { signature: "new-ai", title: "New AI", steps: [] };
+  const messages = [{ id: "user", role: "user", content: "Plan route" }, { id: "answer", role: "assistant", content: "Route", route }];
+  const result = await store.commitAiChatCompletion("workspace", "chat", messages, { route });
+  assert.equal(result.persisted, true);
+  assert.equal(result.routePersisted, false);
+  assert.match(result.warning, /100/);
+  const restored = await createWorkspaceStore(directory).getRepository("workspace");
+  assert.deepEqual(restored.savedTours, routes);
+  assert.equal(restored.conversations[0].messages[1].route.signature, "new-ai");
+  assert.equal(restored.conversations[0].messages[1].routePersisted, false);
+  assert.equal(restored.aiRoute, null);
+  const updated = { ...routes[0], title: "Updated" };
+  const update = await store.commitAiChatCompletion("workspace", "chat", [{ id: "answer-2", role: "assistant", content: "Updated", route: updated }], { route: updated });
+  assert.equal(update.routePersisted, true);
+  assert.equal((await store.getRepository("workspace")).savedTours.length, 100);
+  await store.saveTours("workspace", routes.slice(1));
+  const afterDelete = await store.commitAiChatCompletion("workspace", "chat", [{ id: "answer-3", role: "assistant", content: "New", route }], { route });
+  assert.equal(afterDelete.routePersisted, true);
+  assert.equal((await store.getRepository("workspace")).savedTours.length, 100);
+});
+
+
+test("chat capacity rejects a new completion without evicting records and permits updates and explicit deletion", async (context) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "repolens-chat-capacity-"));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const store = createWorkspaceStore(directory);
+  const original = Array.from({ length: 100 }, (_, i) => ({ id: `old-${i}`, title: `Saved ${i}`, messages: [{ id: `answer-${i}`, role: "assistant", content: `Keep ${i}` }], updatedAt: i }));
+  await store.saveConversations("workspace", original);
+  const completion = await store.commitAiChatCompletion("workspace", "new", [{ id: "q", role: "user", content: "Question" }, { id: "a", role: "assistant", content: "Answer" }], {});
+  assert.equal(completion.persisted, false);
+  assert.match(completion.warning, /100/);
+  assert.deepEqual((await createWorkspaceStore(directory).getRepository("workspace")).conversations, original);
+  const updated = await store.commitAiChatCompletion("workspace", "old-0", [{ id: "followup", role: "assistant", content: "Follow up" }], {});
+  assert.equal(updated.persisted, true);
+  assert.equal((await store.getRepository("workspace")).conversations.length, 100);
+  await store.saveConversations("workspace", original.slice(1));
+  assert.equal((await store.commitAiChatCompletion("workspace", "new", [{ id: "q", role: "user", content: "Question" }], {})).persisted, true);
+  assert.equal((await store.getRepository("workspace")).conversations.length, 100);
+});

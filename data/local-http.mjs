@@ -1,3 +1,4 @@
+import { assertBoundedData, MAX_WORKSPACE_REQUEST_BYTES } from "./persistence-limits.mjs";
 /** @returns {{ allowed: boolean, status?: number, error?: string }} */
 export function validateLocalRequest({ host, origin, method, url, port, allowedOrigins }) {
   let hostAllowed = false;
@@ -17,7 +18,7 @@ export function sendJson(response, status, value) {
   response.end(JSON.stringify(value));
 }
 
-export async function readJsonRequestBody(request, maxBytes = 2_000_000) {
+export async function readJsonRequestBody(request, maxBytes = MAX_WORKSPACE_REQUEST_BYTES) {
   const chunks = [];
   let length = 0;
   for await (const chunk of request) {
@@ -27,5 +28,7 @@ export async function readJsonRequestBody(request, maxBytes = 2_000_000) {
     chunks.push(buffer);
   }
   const text = Buffer.concat(chunks).toString("utf8");
-  return text ? JSON.parse(text) : {};
+  const value = text ? JSON.parse(text) : {};
+  assertBoundedData(value);
+  return value;
 }

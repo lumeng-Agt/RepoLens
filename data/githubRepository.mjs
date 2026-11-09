@@ -5,10 +5,12 @@ import os from "node:os";
 import path from "node:path";
 import ignore from "ignore";
 import ts from "typescript";
+import { repositoryPathIsBlocked, REPOSITORY_MAX_SOURCE_BYTES, REPOSITORY_MAX_SOURCE_FILES, REPOSITORY_SOURCE_EXTENSIONS } from "./repository-files.mjs";
 
-const SOURCE_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs", ".css", ".scss", ".sass", ".less", ".py", ".pyi", ".go"]);
-const HARD_IGNORES = new Set([".git", "node_modules", ".next", "dist", "build", "coverage", ".wrangler", ".vinext", ".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", "vendor"]);
-const MAX_SOURCE_FILES = 5000;
+const SOURCE_EXTENSIONS = REPOSITORY_SOURCE_EXTENSIONS;
+const MAX_SOURCE_FILES = REPOSITORY_MAX_SOURCE_FILES;
+const MAX_SOURCE_BYTES = REPOSITORY_MAX_SOURCE_BYTES;
+// Ignore and configuration files are read whole; their limit is independent from the source-file limit.
 const MAX_FILE_BYTES = 1024 * 1024;
 const pendingCleanupDirectories = new Set();
 const RETRYABLE_CLEANUP_CODES = new Set(["EBUSY", "EPERM", "ENOTEMPTY"]);
@@ -152,7 +154,7 @@ function parseTreeListing(output) {
   return result;
 }
 
-function hardIgnored(relative) { return relative.split("/").some((part) => HARD_IGNORES.has(part) || part.startsWith(".env")); }
+function hardIgnored(relative) { return repositoryPathIsBlocked(relative); }
 function isSource(relative) { return SOURCE_EXTENSIONS.has(path.posix.extname(relative).toLowerCase()); }
 
 function applyIgnoreRules(relative, ruleMap) {
@@ -214,7 +216,7 @@ async function materializeCommit(mirrorPath, commit, checkoutRoot, signal) {
   }
   const eligibleSources = sourceFiles.filter(({ relative }) => !applyIgnoreRules(relative, ruleMap));
   if (eligibleSources.length > MAX_SOURCE_FILES) throw new Error(`GitHub 仓库超过 ${MAX_SOURCE_FILES} 个源码文件，请增加忽略规则后重新扫描。`);
-  const oversizedSource = eligibleSources.find((item) => item.size > MAX_FILE_BYTES);
+  const oversizedSource = eligibleSources.find((item) => item.size > MAX_SOURCE_BYTES);
   if (oversizedSource) throw new Error(`GitHub 源文件 ${oversizedSource.relative} 超过 1 MiB，已停止读取。`);
 
   // Follow local TypeScript "extends" files, including extensionless files, without executing repository code.

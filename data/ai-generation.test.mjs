@@ -58,7 +58,7 @@ test("mockable Chat Completions client preserves abort signal and parses JSON", 
   let captured;
   const result = await requestChatCompletion(context, "explanation", controller.signal, false, async (url, options) => {
     captured = { url, options };
-    return { ok: true, json: async () => ({ choices: [{ message: { content: "{\"ok\":true}" } }] }) };
+    return Response.json({ choices: [{ message: { content: "{\"ok\":true}" } }] });
   });
   assert.deepEqual(result, { ok: true });
   assert.equal(captured.url, "https://model.example/v1/chat/completions");

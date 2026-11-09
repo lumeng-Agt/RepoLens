@@ -421,3 +421,34 @@ test("invalid reading import is rejected before it can block subsequent normal n
     await expect(page.locator(".reading-note-list")).toContainText("有效的新笔记");
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+test("invalid route import cannot poison subsequent valid route saves or restart recovery", async ({ page }) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "repolens-invalid-tour-"));
+  await writeFile(path.join(root, "main.ts"), "export const value = 1;\n");
+  try {
+    await page.goto("/"); await enterRepositoryLocation(page, root);
+    const opened = page.waitForResponse(response => response.url().endsWith('/api/open') && response.status() === 200);
+    await page.getByRole('button', { name: '打开仓库', exact: true }).click();
+    const snapshot = await (await opened).json();
+    await page.getByRole('tab', { name: '讲解', exact: true }).click();
+    const invalid = { repositoryId: snapshot.id, entryFileId: 'main.ts', revision: snapshot.revision, title: '损坏路线', signature: 'invalid-import', contextFiles: [], steps: [{ focusFileId: 'main.ts', reference: { fileId: 'main.ts', line: 1 } }] };
+    await page.locator('.reading-import-button input').setInputFiles({ name: 'bad-route.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify({ format: 'repolens-reading', version: 1, workspaceId: snapshot.workspaceId ?? snapshot.id, notes: [], tours: [invalid] })) });
+    await expect(page.getByText('文件格式无效，只支持 RepoLens 阅读记录 JSON v1。', { exact: true })).toBeVisible();
+    await expect(page.getByRole('dialog', { name: '导入预览' })).toHaveCount(0);
+    await page.getByLabel('阅读笔记内容').fill('用于合法路线的笔记');
+    const noteSaved = page.waitForResponse(response => { try { return response.request().postDataJSON()?.action === 'reading-notes'; } catch { return false; } });
+    await page.getByRole('button', { name: '保存记录', exact: true }).click();
+    expect((await noteSaved).status()).toBe(200);
+    const builder = page.locator('.manual-tour-builder'); await builder.locator('summary').click();
+    await builder.getByLabel('路线标题').fill('有效的新路线'); await builder.locator('input[type=checkbox]').first().check();
+    const tourSaved = page.waitForResponse(response => { try { return response.request().postDataJSON()?.action === 'saved-tours'; } catch { return false; } });
+    await builder.getByRole('button', { name: '创建并开始路线' }).click();
+    expect((await tourSaved).status()).toBe(200);
+    await page.reload(); await enterRepositoryLocation(page, root);
+    await page.getByRole('button', { name: '打开仓库', exact: true }).click();
+    await page.getByRole('tab', { name: '讲解', exact: true }).click();
+    await page.locator('.saved-tour-list > summary').click();
+    await expect(page.locator('.saved-tour-list')).toContainText('有效的新路线');
+    await expect(page.locator('.saved-tour-list')).not.toContainText('损坏路线');
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

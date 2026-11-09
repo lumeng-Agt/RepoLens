@@ -70,6 +70,8 @@ for (const scenario of ["http-close", "browser-close"]) test(`GitHub smoke keeps
   let validated = false;
   try {
     const diagnostics = JSON.parse(await readFile(path.join(evidenceDirectory, "diagnostics.json"), "utf8"));
+    assert.deepEqual(diagnostics.startupEvents.map(item => item.stage), ['service-spawn', 'backend-ready', 'ui-listening', 'browser-page-created', 'first-navigation-start', 'first-document-loaded', 'initial-workspace-read']);
+    assert.ok(diagnostics.startupEvents.every((item, index, events) => Number.isFinite(item.at) && (!index || item.at >= events[index - 1].at)));
     if (scenario === "http-close") {
       assert.ok(diagnostics.apiResponses.some((item) => item.url.endsWith("/api/close") && item.status === 500), `diagnostics must include the injected close failure: ${JSON.stringify(diagnostics)}`);
       assert.match(diagnostics.error, /returning to the sample must wait for successful remote cleanup/);

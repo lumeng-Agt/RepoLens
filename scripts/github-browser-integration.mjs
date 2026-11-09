@@ -1,10 +1,11 @@
+import { stopLocalService } from "./stop-local-service.mjs";
 import { AI_PROMPT_VERSION } from "../data/ai-generation.mjs";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 import { once } from "node:events";
 import { watch } from "node:fs";
-import { access, mkdtemp, mkdir, readdir, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -74,19 +75,6 @@ async function waitForHealth(url, child) {
   throw new Error("RepoLens local service did not become ready.");
 }
 
-async function waitForTcp(port, child) {
-  for (let attempt = 0; attempt < 120; attempt += 1) {
-    if (child.exitCode !== null) throw new Error("RepoLens UI exited before becoming ready.");
-    const connected = await new Promise((resolve) => {
-      const socket = net.connect({ host: "127.0.0.1", port });
-      socket.once("connect", () => { socket.destroy(); resolve(true); });
-      socket.once("error", () => resolve(false));
-    });
-    if (connected) { startupEvents.push({ stage: "ui-listening", at: Date.now() }); return; }
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  throw new Error("RepoLens UI did not start listening.");
-}
 async function openRepositoryHome(page) {
   const heading = page.getByRole("heading", { name: "打开仓库，开始阅读" });
   if (!await heading.isVisible().catch(() => false)) {
@@ -121,6 +109,8 @@ let browser;
 let browserContext;
 let page;
 let application;
+let uiServer;
+let shutdown;
 let applicationOutput = "";
 let modelCalls = 0;
 let modelRequestBodies = [];
@@ -176,10 +166,26 @@ try {
   const apiPort = await freePort(usedPorts);
   const uiOrigin = `http://127.0.0.1:${uiPort}`;
   const apiOrigin = `http://127.0.0.1:${apiPort}`;
-  application = spawn(process.execPath, [
-    path.join(projectRoot, "scripts/with-local-service.mjs"),
-    path.join(projectRoot, "scripts/run-framework.mjs"), "dev", "--port", String(uiPort),
-  ], {
+  const renderer = path.join(projectRoot, 'desktop', 'renderer');
+  await access(path.join(renderer, 'index.html')).catch(() => { throw new Error('请先运行 npm run build:desktop，再运行真实服务联动。'); });
+  // The full browser suite and startup matrix exercise Vite separately. This
+  // integration uses the built UI with a real isolated backend and Git mirror.
+  uiServer = createServer(async (request, response) => {
+    try {
+      const pathname = decodeURIComponent(new URL(request.url, uiOrigin).pathname);
+      const file = path.resolve(renderer, '.' + (pathname === '/' ? '/index.html' : pathname));
+      if (!file.startsWith(renderer + path.sep)) { response.writeHead(403).end(); return; }
+      let content = await readFile(file);
+      if (file.endsWith('.html')) content = Buffer.from(content.toString().replace('</head>', `<script>globalThis.__REPOLENS_RUNTIME__=${JSON.stringify({ desktop: false, apiOrigin })}</script></head>`));
+      const types = { '.html': 'text/html', '.js': 'application/javascript', '.css': 'text/css', '.wasm': 'application/wasm', '.svg': 'image/svg+xml' };
+      response.setHeader('Content-Type', types[path.extname(file)] ?? 'application/octet-stream');
+      response.setHeader('Cache-Control', 'no-store');
+      response.end(content);
+    } catch { response.writeHead(404).end(); }
+  });
+  await new Promise((resolve, reject) => uiServer.listen(uiPort, '127.0.0.1', resolve).once('error', reject));
+  startupEvents.push({ stage: 'ui-listening', at: Date.now(), renderer: 'desktop-build' });
+  application = spawn(process.execPath, [path.join(projectRoot, 'scripts/local-server.mjs')], {
     cwd: projectRoot,
     env: {
       ...process.env,
@@ -198,12 +204,11 @@ try {
       REPOLENS_TEST_AI_READ_ID: "ui-cancel",
       NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --import=${pathToFileURL(path.join(projectRoot, "data", "ai-generation-gate.mjs")).href}`.trim(),
     },
-    stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
+    stdio: ["ignore", "pipe", "pipe", "ipc"], windowsHide: true,
   });
   const captureOutput = chunk => { applicationOutput = (applicationOutput + chunk.toString()).slice(-100000); };
   application.stdout.on("data", captureOutput); application.stderr.on("data", captureOutput);
   await waitForHealth(apiOrigin, application);
-  await waitForTcp(uiPort, application);
   browser = await chromium.launch({ headless: true });
   browserContext = await browser.newContext({
     viewport: { width: 1440, height: 900 },
@@ -211,6 +216,23 @@ try {
   });
   page = await browserContext.newPage();
   await page.addInitScript(() => localStorage.setItem("repolens:usage-guide:v1", JSON.stringify({ version: 1, welcomeHandled: true, completedTaskIds: [], checklistOpen: false, noticeDismissed: true })));
+  await page.addInitScript(() => {
+    const original = window.fetch.bind(window);
+    window.__chatGenerationResults = {};
+    window.fetch = async (input, init) => {
+      const response = await original(input, init);
+      if (String(input).endsWith('/api/ai/generate') && typeof init?.body === 'string') {
+        const id = JSON.parse(init.body).previewId;
+        void response.clone().text().then(text => {
+          if (response.headers.get('content-type')?.includes('text/event-stream')) {
+            const events = text.split(/\r?\n/).filter(line => line.startsWith('data:')).map(line => JSON.parse(line.slice(5)));
+            window.__chatGenerationResults[id] = events.find(event => event.type === 'complete')?.result ?? { error: events.find(event => event.type === 'error')?.error ?? 'missing complete event' };
+          } else window.__chatGenerationResults[id] = JSON.parse(text);
+        }).catch(() => {});
+      }
+      return response;
+    };
+  });
   const pageErrors = [];
   page.on("pageerror", (error) => { pageErrors.push(error.message); process.stderr.write(`Browser page error: ${error.message}\n`); });
   page.on("console", (message) => { if (message.type() === "error") { pageErrors.push(`console: ${message.text()}`); process.stderr.write(`Browser console error: ${message.text()}\n`); } });
@@ -226,106 +248,93 @@ try {
   const initialSnapshot = await (await openedResponse).json();
   await page.getByText("GitHub 远端", { exact: true }).waitFor({ state: "visible" });
   await page.getByRole("treeitem", { name: "summary.ts" }).click();
-  await page.getByRole("button", { name: "生成当前文件讲解" }).click();
-  const explanationConsent = page.locator(".ai-consent");
-  await explanationConsent.getByText("发送前确认").waitFor({ state: "visible" });
-  const explanationScope = await explanationConsent.innerText();
-  assert.match(explanationScope, /src\/summary\.ts/);
-  assert.match(explanationScope, /src\/status\.ts/);
-  assert.equal(modelCalls, 0, "the real local server must not call the model before confirmation");
-
-  const firstExplanationResponse = page.waitForResponse((response) => response.url() === apiOrigin + "/api/ai/generate");
-  await explanationConsent.getByRole("button", { name: "确认发送并生成" }).click();
-  const firstExplanation = await firstExplanationResponse;
-  assert.equal(firstExplanation.status(), 200);
-  const firstExplanationValue = await firstExplanation.json();
-  assert.ok(firstExplanationValue.result.references.some((reference) => reference.fileId === "src/summary.ts"), "the generated explanation cites the selected file");
-  await page.getByText("文件职责说明", { exact: true }).waitFor({ state: "visible" });
-  assert.equal(modelCalls, 1);
-  assert.ok(modelRequestBodies[0].messages.some((message) => message.content.includes("FILE src/summary.ts LINES 1-")));
-  const explanationTask = modelRequestBodies[0].messages.find((message) => message.role === "user").content.match(/^任务信息：(.+)$/m);
-  assert.ok(explanationTask, "the confirmed model request includes task metadata");
-  assert.deepEqual(JSON.parse(explanationTask[1]), { promptVersion: AI_PROMPT_VERSION, mode: "explanation", entryFileId: "src/summary.ts" });
-  await page.getByRole("tab", { name: "讲解", exact: true }).click();
-  await page.locator(".ai-result [aria-label='AI 源码引用'] .reference-row").first().click();
-  await page.getByRole("tab", { name: "源码", exact: true }).click();
-  await page.locator("#source-line-1.is-focused").waitFor({ state: "visible" });
-  if (demoEvidenceDirectory) await page.screenshot({ path: path.join(demoEvidenceDirectory, "mock-ai-source-reference.png") });
-  await page.getByRole("tab", { name: "讲解", exact: true }).click();
-
-  await page.getByRole("button", { name: "生成当前文件讲解" }).click();
-  const cachedExplanationConsent = page.locator(".ai-consent");
-  await cachedExplanationConsent.getByText("发送前确认").waitFor({ state: "visible" });
-  assert.equal(modelCalls, 1, "preview does not call the model again");
-  const cachedExplanationResponse = page.waitForResponse((response) => response.url() === apiOrigin + "/api/ai/generate");
-  await cachedExplanationConsent.getByRole("button", { name: "确认发送并生成" }).click();
-  const cachedExplanation = await cachedExplanationResponse;
-  const cachedExplanationValue = await cachedExplanation.json();
-  assert.equal(cachedExplanationValue.cached, true, JSON.stringify(cachedExplanationValue));
-  assert.equal(modelCalls, 1, "the cached explanation avoids a second model call");
-
-  await page.getByRole("treeitem", { name: "index.ts" }).click();
-  await page.getByRole("button", { name: "生成阅读路线" }).click();
-  const routeConsent = page.locator(".ai-consent");
-  await routeConsent.getByText("发送前确认").waitFor({ state: "visible" });
-  const routeScope = await routeConsent.innerText();
-  for (const file of Object.keys(fixtureSources)) assert.ok(routeScope.includes(file), `route preview should include ${file}`);
-  assert.equal(modelCalls, 1, "route preview does not call the model");
-  const routeResponsePromise = page.waitForResponse((response) => response.url() === apiOrigin + "/api/ai/generate");
-  await routeConsent.getByRole("button", { name: "确认发送并生成" }).click();
-  const routeResponse = await routeResponsePromise;
-  assert.equal(routeResponse.status(), 200);
-  const routeValue = await routeResponse.json();
-  assert.equal(routeValue.result.steps[0].fileId, "src/index.ts", "the first route step matches the selected entry");
-  const routeTask = modelRequestBodies[1].messages.find((message) => message.role === "user").content.match(/^任务信息：(.+)$/m);
-  assert.ok(routeTask, "the confirmed route request includes task metadata");
-  assert.deepEqual(JSON.parse(routeTask[1]), { promptVersion: AI_PROMPT_VERSION, mode: "route", entryFileId: "src/index.ts" });
-  await setDisclosureOpen(page, ".tour-step-disclosure", true);
-  const routeStep = page.getByRole("button", { name: "第 1 步：index.ts" });
-  await routeStep.waitFor({ state: "visible" });
-  await page.getByRole("button", { name: "第 2 步：summary.ts" }).click();
-  await setDisclosureOpen(page, ".tour-step-description", true);
-  assert.match(await page.locator(".tour-step-description > div").innerText(), /阅读摘要组织/);
-  assert.equal(modelCalls, 2);
-  if (demoEvidenceDirectory) await page.screenshot({ path: path.join(demoEvidenceDirectory, "mock-ai-reading-route.png") });
-
-  await page.getByRole("tab", { name: "讲解", exact: true }).click();
-  await page.getByRole("button", { name: "生成当前文件讲解" }).click();
-  const cancelledExplanationConsent = page.locator(".ai-consent");
-  await cancelledExplanationConsent.getByText("发送前确认").waitFor({ state: "visible" });
+  const composer = page.locator('.copilot-composer');
   const generateEndpoint = `${apiOrigin}/api/ai/generate`;
-  await removeMarkers("read-arm", "read-entered-ui-cancel", "read-finished-ui-cancel", "read-release", "response-closed-ui-cancel", "request-handled-ui-cancel");
-  await page.route(generateEndpoint, async (route) => {
-    await route.continue({ headers: { ...route.request().headers(), "x-repolens-test-id": "ui-cancel" } });
-  });
-  await writeFile(path.join(aiGateDirectory, "read-arm"), "hold\n");
-  const cancelledRequest = page.waitForEvent("requestfailed", (request) => request.url() === generateEndpoint);
-  await cancelledExplanationConsent.getByRole("button", { name: "确认发送并生成" }).click();
-  await waitForMarker(path.join(aiGateDirectory, "read-entered-ui-cancel"));
-  await page.getByRole("treeitem", { name: "status.ts" }).click();
-  await waitForMarker(path.join(aiGateDirectory, "response-closed-ui-cancel"));
-  await writeFile(path.join(aiGateDirectory, "read-release"), "release\n");
-  await Promise.all([
-    waitForMarker(path.join(aiGateDirectory, "read-finished-ui-cancel")),
-    waitForMarker(path.join(aiGateDirectory, "request-handled-ui-cancel")),
-    cancelledRequest,
-  ]);
-  assert.equal(modelCalls, 2, "switching files during verification cancels the request before source reaches the model");
+  const prepareTask = async name => {
+    const pending = page.waitForResponse(response => response.url() === apiOrigin + '/api/ai/preview' && response.request().method() === 'POST');
+    await page.getByRole('button', { name, exact: true }).click();
+    const response = await pending;
+    assert.equal(response.status(), 200);
+    const value = await response.json();
+    assert.equal(value.scopeRequired, false, JSON.stringify(value));
+    await composer.getByRole('button', { name: '发送', exact: true }).waitFor({ state: 'visible' });
+    return value.preview;
+  };
+  const sendTask = async () => {
+    const pending = page.waitForResponse(response => response.url() === generateEndpoint);
+    await composer.getByRole('button', { name: '发送', exact: true }).click();
+    const response = await pending;
+    assert.equal(response.status(), 200);
+    const id = response.request().postDataJSON().previewId;
+    const handle = await page.waitForFunction(id => window.__chatGenerationResults[id], id);
+    const value = await handle.jsonValue(); await handle.dispose();
+    assert.equal(value.error, undefined, JSON.stringify(value));
+    await composer.getByRole('button', { name: '停止', exact: true }).waitFor({ state: 'hidden' });
+    return value;
+  };
+  const explanationScope = await prepareTask('生成当前文件讲解');
+  assert.ok(explanationScope.files.some(file => file.fileId === 'src/summary.ts'));
+  assert.ok(explanationScope.files.some(file => file.fileId === 'src/status.ts'));
+  assert.equal(modelCalls, 0, 'preparing the visible scope must not call the model');
+  const firstExplanation = await sendTask();
+  assert.ok(firstExplanation.result.references.some(reference => reference.fileId === 'src/summary.ts'));
+  assert.equal(modelCalls, 1);
+  assert.ok(modelRequestBodies[0].messages.some(message => message.content.includes('FILE src/summary.ts LINES 1-')));
+  const explanationTask = modelRequestBodies[0].messages.find(message => message.role === 'user').content.match(/^任务信息：(.+)$/m);
+  assert.deepEqual(JSON.parse(explanationTask[1]), { promptVersion: AI_PROMPT_VERSION, mode: 'explanation', entryFileId: 'src/summary.ts' });
+  await page.locator('.question-message.is-assistant [aria-label="回答引用"] button').first().click();
+  await page.getByRole('complementary', { name: '回答证据' }).getByRole('button', { name: '在源码中打开' }).click();
+  await page.getByRole('tab', { name: '源码', exact: true }).click();
+  await page.locator('#source-line-1.is-focused').waitFor({ state: 'visible' });
+  if (demoEvidenceDirectory) await page.screenshot({ path: path.join(demoEvidenceDirectory, 'mock-ai-source-reference.png') });
+  await page.getByRole('tab', { name: '讲解', exact: true }).click();
+  await prepareTask('生成当前文件讲解');
+  assert.equal(modelCalls, 1);
+  const cached = await sendTask();
+  assert.equal(cached.cached, true, JSON.stringify(cached));
+  assert.equal(modelCalls, 1, 'cached explanation does not call the model again');
+
+  await page.getByRole('treeitem', { name: 'index.ts', exact: true }).click();
+  const routeScope = await prepareTask('生成阅读路线');
+  for (const file of Object.keys(fixtureSources)) assert.ok(routeScope.files.some(item => item.fileId === file), `route scope includes ${file}`);
+  assert.equal(modelCalls, 1);
+  const route = await sendTask();
+  assert.equal(route.result.steps[0].fileId, 'src/index.ts');
+  const routeTask = modelRequestBodies[1].messages.find(message => message.role === 'user').content.match(/^任务信息：(.+)$/m);
+  assert.deepEqual(JSON.parse(routeTask[1]), { promptVersion: AI_PROMPT_VERSION, mode: 'route', entryFileId: 'src/index.ts' });
+  await page.locator('.chat-result-card').last().getByRole('button', { name: '开始阅读', exact: true }).click();
+  await setDisclosureOpen(page, '.tour-step-disclosure', true);
+  await page.getByRole('button', { name: '第 1 步：src/index.ts' }).waitFor({ state: 'visible' });
+  await page.getByRole('button', { name: '第 2 步：src/summary.ts' }).click();
+  await setDisclosureOpen(page, '.tour-step-description', true);
+  assert.match(await page.locator('.tour-step-description > div').innerText(), /阅读摘要组织/);
+  assert.equal(modelCalls, 2);
+  if (demoEvidenceDirectory) await page.screenshot({ path: path.join(demoEvidenceDirectory, 'mock-ai-reading-route.png') });
+
+  await page.getByRole('tab', { name: '讲解', exact: true }).click();
+  await prepareTask('生成当前文件讲解');
+  await removeMarkers('read-arm', 'read-entered-ui-cancel', 'read-finished-ui-cancel', 'read-release', 'response-closed-ui-cancel', 'request-handled-ui-cancel');
+  await page.route(generateEndpoint, async route => route.continue({ headers: { ...route.request().headers(), 'x-repolens-test-id': 'ui-cancel' } }));
+  await writeFile(path.join(aiGateDirectory, 'read-arm'), 'hold\n');
+  await composer.getByRole('button', { name: '发送', exact: true }).click();
+  await waitForMarker(path.join(aiGateDirectory, 'read-entered-ui-cancel'));
+  await page.getByRole('treeitem', { name: 'status.ts', exact: true }).click();
+  assert.equal(modelCalls, 2, 'the controlled source verification is still pending');
+  assert.equal(await access(path.join(aiGateDirectory, 'response-closed-ui-cancel')).then(() => true, () => false), false, 'source navigation must not cancel an already sent task');
+  await composer.getByRole('button', { name: '停止', exact: true }).click();
+  await waitForMarker(path.join(aiGateDirectory, 'response-closed-ui-cancel'));
+  await writeFile(path.join(aiGateDirectory, 'read-release'), 'release\n');
+  await Promise.all([waitForMarker(path.join(aiGateDirectory, 'read-finished-ui-cancel')), waitForMarker(path.join(aiGateDirectory, 'request-handled-ui-cancel'))]);
+  assert.equal(modelCalls, 2, 'explicit stop prevents the pending source from reaching the model');
   await page.unroute(generateEndpoint);
 
-  await page.getByRole("button", { name: "生成当前文件讲解" }).click();
-  const statusConsent = page.locator(".ai-consent");
-  await statusConsent.getByText("发送前确认").waitFor({ state: "visible" });
-  assert.match(await statusConsent.innerText(), /src\/status\.ts/);
-  const statusExplanationPromise = page.waitForResponse((response) => response.url() === generateEndpoint);
-  await statusConsent.getByRole("button", { name: "确认发送并生成" }).click();
-  assert.equal((await statusExplanationPromise).status(), 200);
-  await page.getByText("文件职责说明", { exact: true }).waitFor({ state: "visible" });
-  assert.equal(modelCalls, 3, "a new request for the newly selected file still generates normally");
-  assert.ok(modelRequestBodies[2].messages.some((message) => message.content.includes("FILE src/status.ts LINES 1-")));
-  const statusTask = modelRequestBodies[2].messages.find((message) => message.role === "user").content.match(/^任务信息：(.+)$/m);
-  assert.ok(statusTask, "the model request follows the newly selected file");
-  assert.equal(JSON.parse(statusTask[1]).entryFileId, "src/status.ts");
+  const statusScope = await prepareTask('生成当前文件讲解');
+  assert.equal(statusScope.entryFileId, 'src/status.ts');
+  await sendTask();
+  assert.equal(modelCalls, 3);
+  assert.ok(modelRequestBodies[2].messages.some(message => message.content.includes('FILE src/status.ts LINES 1-')));
+  const statusTask = modelRequestBodies[2].messages.find(message => message.role === 'user').content.match(/^任务信息：(.+)$/m);
+  assert.equal(JSON.parse(statusTask[1]).entryFileId, 'src/status.ts');
 
   await setDisclosureOpen(page, ".repo-menu", true);
   const repositoryResponse = page.waitForResponse((response) => response.url() === apiOrigin + "/api/rescan");
@@ -360,8 +369,8 @@ try {
   assert.equal(updatedSnapshot.sequence, unchangedValue.sequence + 1);
   await page.getByRole("treeitem", { name: "index.ts" }).click();
   await page.getByRole("tab", { name: "讲解", exact: true }).click();
-  await page.waitForFunction(() => document.querySelector('button[aria-label="第 1 步：index.ts"]')?.disabled === true);
-  assert.equal(await page.getByRole("button", { name: "第 1 步：index.ts" }).isDisabled(), true);
+  await page.waitForFunction(() => document.querySelector('button[aria-label="第 1 步：src/index.ts"]')?.disabled === true);
+  assert.equal(await page.getByRole("button", { name: "第 1 步：src/index.ts" }).isDisabled(), true);
   await setDisclosureOpen(page, ".tour-step-description", true);
   assert.match(await page.locator(".tour-step-description > div").innerText(), /阅读摘要组织/);
   await page.getByRole("tab", { name: "源码", exact: true }).click();
@@ -375,7 +384,7 @@ try {
   await page.getByText("示例仓库", { exact: true }).waitFor({ state: "visible" });
   const leftovers = (await readdir(tempWorkspaces)).filter((name) => name.startsWith("repolens-github-"));
   assert.deepEqual(leftovers, [], "returning to the sample removes all temporary remote files");
-  process.stdout.write(JSON.stringify({ browserFlow: "passed", modelCalls, cancelledDuringVerification: true, files: Object.keys(fixtureSources).length, cachedExplanation: true, revision: updatedSnapshot.sequence }) + "\n");
+  process.stdout.write(JSON.stringify({ browserFlow: "passed", modelCalls, cancelledDuringVerification: true, renderer: "desktop-build", files: Object.keys(fixtureSources).length, cachedExplanation: true, revision: updatedSnapshot.sequence }) + "\n");
 } catch (error) {
   const directory = path.join(projectRoot, ".artifacts", "github-browser-integration");
   await mkdir(directory, { recursive: true });
@@ -395,11 +404,15 @@ try {
     catch (error) { process.stderr.write(`Could not finalize demo recording: ${error.message}\n`); }
   }
   if (browser) await browser.close();
-  if (application && application.exitCode === null) {
-    application.kill("SIGTERM");
-    await Promise.race([once(application, "exit"), new Promise((resolve) => setTimeout(resolve, 5000))]);
+  try {
+    if (application) shutdown = await stopLocalService(application);
+    assert.deepEqual(shutdown?.remainingPids, [], 'the integration must not leave its backend process running');
+  } finally {
+    uiServer?.closeAllConnections();
+    if (uiServer) await new Promise(resolve => uiServer.close(resolve));
+    modelServer.closeAllConnections();
+    await new Promise(resolve => modelServer.close(resolve));
   }
-  await new Promise((resolve) => modelServer.close(resolve));
   if (path.dirname(temporaryRoot) === path.resolve(os.tmpdir()) && path.basename(temporaryRoot).startsWith("repolens-github-browser-")) {
     await rm(temporaryRoot, { recursive: true, force: true });
   }

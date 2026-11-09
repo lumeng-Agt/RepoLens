@@ -208,3 +208,15 @@ test("a failed chat write is not automatically retried for the same operation pr
   await page.getByRole("button", { name: "聊天历史", exact: true }).click();
   await expect(page.locator(".chat-history-list")).toContainText("新对话");
 });
+
+
+test("investigation summary reports unavailable clipboard without an uncaught error", async ({ page }) => {
+  await page.addInitScript(() => Object.defineProperty(navigator, "clipboard", { configurable: true, value: undefined }));
+  const errors: string[] = []; page.on("pageerror", error => errors.push(error.message));
+  await setup(page, { initial: [original] });
+  await page.getByRole("button", { name: "调查记录 · 1", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "调查记录", exact: true });
+  await dialog.getByRole("button", { name: "复制调查摘要", exact: true }).click();
+  await expect(dialog.getByText("无法复制，请使用 Markdown 导出。", { exact: true })).toBeVisible();
+  expect(errors).toEqual([]);
+});

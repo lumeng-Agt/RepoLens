@@ -58,3 +58,18 @@ test("build input provenance includes source, lockfile, and build configuration 
     await rm(root, { recursive: true, force: true });
   }
 });
+
+import { createHash } from 'node:crypto';
+import { verifyCandidateArtifacts } from './release-provenance.mjs';
+test('candidate promotion rejects missing manifests and changed artifact bytes', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'rl-artifact-manifest-'));
+  try {
+    await writeFile(path.join(root, 'Portable.exe'), 'original');
+    const artifacts = [{ name: 'Portable.exe', sizeBytes: 8, sha256: createHash('sha256').update('original').digest('hex') }];
+    await verifyCandidateArtifacts(root, artifacts);
+    await assert.rejects(verifyCandidateArtifacts(root, []));
+    await writeFile(path.join(root, 'Portable.exe'), 'modified');
+    await assert.rejects(verifyCandidateArtifacts(root, artifacts), /与清单不一致/);
+    await assert.rejects(verifyCandidateArtifacts(root, [{ ...artifacts[0], name: '../Portable.exe' }]), /文件名无效/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

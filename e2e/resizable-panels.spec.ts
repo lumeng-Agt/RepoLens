@@ -5,6 +5,20 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+test.afterEach(async ({ page }, info) => {
+  if (info.status === info.expectedStatus) return;
+  const state = await page.evaluate(() => ({
+    viewport: { width: innerWidth, height: innerHeight },
+    preferences: localStorage.getItem('repolens:layout-preferences:v1'),
+    panels: ['workspace-columns', 'files', 'content', 'workspace-graph-details', 'graph', 'details'].map(id => {
+      const element = document.getElementById(id), box = element?.getBoundingClientRect();
+      return { id, width: box?.width, height: box?.height, style: element?.getAttribute('style') };
+    }),
+    separators: [...document.querySelectorAll('[role=separator]')].map(element => ({ id: element.id, value: element.getAttribute('aria-valuenow') })),
+  })).catch(error => ({ error: String(error) }));
+  await info.attach('panel-layout-failure.json', { body: JSON.stringify(state, null, 2), contentType: 'application/json' });
+});
+
 async function panelWidth(page: import("@playwright/test").Page, selector: string) {
   const box = await page.locator(selector).boundingBox();
   if (!box) throw new Error(`Panel is not visible: ${selector}`);
@@ -141,6 +155,25 @@ test("mouse resize respects panel minimums and double-click restores each layout
   await expect.poll(async () => Math.abs(await panelWidth(page, "#files") - readingDefault)).toBeLessThan(4);
 });
 
+test('repeated viewport and layout changes preserve the original preferred proportions', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.locator('#workspace-columns')).toHaveAttribute('data-layout-ready', 'true');
+  const separator = page.locator('#files-graph-resize'); await separator.focus();
+  for (let index = 0; index < 8; index++) await separator.press('ArrowRight');
+  const expectedWidth = await panelWidth(page, '.files-pane');
+  const preferred = await page.evaluate(() => JSON.parse(localStorage.getItem('repolens:layout-preferences:v1')!).structure);
+  for (let index = 0; index < 4; index++) {
+    await page.getByRole('button', { name: '阅读', exact: true }).click();
+    await page.getByRole('button', { name: '结构', exact: true }).click();
+    await page.setViewportSize({ width: 1024, height: 768 });
+    await waitAnimationFrames(page, 4);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await expect.poll(async () => Math.abs(await panelWidth(page, '.files-pane') - expectedWidth)).toBeLessThan(3);
+    await waitForStableGraphGeometry(page);
+    expect(await page.evaluate(() => JSON.parse(localStorage.getItem('repolens:layout-preferences:v1')!).structure)).toEqual(preferred);
+  }
+});
+
 test("resizing columns keeps the mounted question draft and current source file", async ({ page }) => {
   const repositoryPath = await mkdtemp(join(tmpdir(), "repolens-resize-state-"));
   try {
@@ -151,7 +184,7 @@ test("resizing columns keeps the mounted question draft and current source file"
     await enterRepositoryLocation(page, repositoryPath);
     await page.getByRole("button", { name: "打开仓库" }).click();
     await expect(page.locator(".sample-badge")).toContainText("本地仓库");
-    await page.getByRole("tab", { name: "问答" }).click();
+    await page.getByRole("button", { name: "打开聊天" }).click();
     const draft = page.getByRole("textbox", { name: "提问或追问" });
     await draft.fill("解释 main.ts 如何使用 value");
 

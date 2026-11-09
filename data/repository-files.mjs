@@ -4,6 +4,12 @@ import path from "node:path";
 export const REPOSITORY_BLOCKED_DIRECTORIES = [".git", "node_modules", ".next", "dist", "build", "coverage", ".wrangler", ".vinext", ".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", "vendor"];
 const blockedDirectories = new Set(REPOSITORY_BLOCKED_DIRECTORIES);
 
+// Shared by the local and GitHub scanners so both indexes admit exactly the same source files.
+// README, configuration and revision-comparison limits have their own semantics and are intentionally separate.
+export const REPOSITORY_SOURCE_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs", ".css", ".scss", ".sass", ".less", ".py", ".pyi", ".go"]);
+export const REPOSITORY_MAX_SOURCE_FILES = 5000;
+export const REPOSITORY_MAX_SOURCE_BYTES = 1024 * 1024;
+
 export function repositoryPathIsBlocked(relative) {
   return relative.split(/[\\/]/).some(part => blockedDirectories.has(part.toLowerCase()) || part.toLowerCase().startsWith(".env"));
 }
@@ -39,7 +45,7 @@ export function createRepositoryFileAccess(inputRoot, { expectedIdentity } = {})
   function failure(fileName, code) {
     const absolute = path.resolve(root, fileName);
     const name = contained(root, absolute) ? path.relative(root, absolute).split(path.sep).join("/") || "." : "仓库外路径";
-    const detail = code === "REPOSITORY_FILE_BLOCKED" ? "已阻止访问仓库外、符号链接或禁止读取的路径。"
+    const detail = code === "REPOSITORY_FILE_BLOCKED" ? "已阻止读取仓库外路径、符号链接、硬链接或受保护文件。"
       : code === "REPOSITORY_FILE_CHANGED" ? "文件或目录在读取期间发生替换，请重新扫描。"
         : code === "REPOSITORY_FILE_TOO_LARGE" ? "文件超过读取大小限制。" : code === "ENOENT" || code === "ENOTDIR" ? "文件已不存在，请重新扫描。" : "无法安全读取文件。";
     return Object.assign(new Error(`${name}：${detail}`), { code });
@@ -57,7 +63,8 @@ export function createRepositoryFileAccess(inputRoot, { expectedIdentity } = {})
       for (const part of path.relative(root, absolute).split(path.sep).filter(Boolean)) {
         current = path.join(current, part);
         const info = fs.lstatSync(current);
-        if (info.isSymbolicLink()) throw failure(fileName, "REPOSITORY_FILE_BLOCKED");
+        // A hard link has a valid path inside the root even if its other names are outside.
+        if (info.isSymbolicLink() || (info.isFile() && info.nlink > 1)) throw failure(fileName, "REPOSITORY_FILE_BLOCKED");
         chain.push({ name: current, info });
       }
       const realPath = canonicalPath(absolute);
@@ -69,6 +76,7 @@ export function createRepositoryFileAccess(inputRoot, { expectedIdentity } = {})
     }
   }
   function validateOpened(snapshot, openedInfo) {
+    if (openedInfo.isFile() && openedInfo.nlink > 1) throw failure(snapshot.path, "REPOSITORY_FILE_BLOCKED");
     if (!openedInfo.isFile() || !sameFile(snapshot.info, openedInfo)) throw failure(snapshot.path, "REPOSITORY_FILE_CHANGED");
   }
   function validateComplete(snapshot, openedInfo) {

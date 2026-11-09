@@ -1,3 +1,4 @@
+import { completedGeneration, startGeneratedRoute } from "./helpers/chat-generation";
 import { closeModelSettings, enterRepositoryLocation, openModelSettings, openRepositoryMenu, openTourSteps, returnToSample, test, expect, createReturningPage, type Page } from './fixtures';
 import { createServer, request as httpRequest, type Server } from 'node:http';
 import { mkdir, mkdtemp, rm, unlink, writeFile } from 'node:fs/promises';
@@ -95,12 +96,15 @@ async function openOnly(page: Page, root: string, filename = 'main.ts') {
 
 async function generate(page: Page, label: string) {
   await page.getByRole('button', { name: label, exact: true }).click();
-  await expect(page.getByText('发送前确认', { exact: true })).toBeVisible();
+  await expect(page.getByRole('form', { name: '聊天输入' })).toBeVisible();
   const responsePromise = page.waitForResponse((response) => response.url() === `${apiOrigin}/api/ai/generate`);
-  await page.getByRole('button', { name: '确认发送并生成' }).click();
+  await page.getByRole('button', { name: '发送', exact: true }).click();
   const response = await responsePromise;
   expect(response.status()).toBe(200);
-  return response.json();
+  const value = await completedGeneration(response);
+  if (label === "生成阅读路线") await startGeneratedRoute(page);
+  await page.getByRole("complementary", { name: "AI 聊天", exact: true }).getByRole("button", { name: "收起 AI 面板", exact: true }).click();
+  return value;
 }
 
 async function trackSettingsResponses(page: Page) {
@@ -145,9 +149,9 @@ test('A1 oversize preview must expose selectable source ranges', async ({ page }
   await expect(page.getByText('选择发送范围', { exact: true })).toBeVisible();
   await page.getByLabel('main.ts 结束行').fill('300');
   const previewPromise = page.waitForResponse((next) => next.url() === `${apiOrigin}/api/ai/preview`);
-  await page.getByRole('button', { name: '预览发送范围' }).click();
+  await page.getByRole('button', { name: '应用范围' }).click();
   expect((await previewPromise).status()).toBe(200);
-  await expect(page.getByText('发送前确认', { exact: true })).toBeVisible();
+  await expect(page.getByRole('form', { name: '聊天输入' })).toBeVisible();
 });
 
 test('A1b a single oversized source line reports why it cannot be narrowed', async ({ page }) => {
@@ -156,7 +160,7 @@ test('A1b a single oversized source line reports why it cannot be narrowed', asy
   await page.getByRole('button', { name: '生成当前文件讲解', exact: true }).click();
   await expect(page.getByText('选择发送范围', { exact: true })).toBeVisible();
   await expect(page.getByRole('alert')).toContainText('所选范围包含超长单行');
-  await expect(page.getByRole('button', { name: '预览发送范围' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: '应用范围' })).toBeDisabled();
 });
 
 test('A1c more than twelve imported files opens the scope selector', async ({ page }) => {
@@ -172,9 +176,9 @@ test('A1c more than twelve imported files opens the scope selector', async ({ pa
   await expect(page.locator('.ai-scope-picker label')).toHaveCount(13);
   await page.getByRole('checkbox', { name: /dep11\.ts/ }).uncheck();
   const previewPromise = page.waitForResponse((response) => response.url() === `${apiOrigin}/api/ai/preview`);
-  await page.getByRole('button', { name: '预览发送范围' }).click();
+  await page.getByRole('button', { name: '应用范围' }).click();
   expect((await previewPromise).status()).toBe(200);
-  await expect(page.getByText('发送前确认', { exact: true })).toBeVisible();
+  await expect(page.getByRole('form', { name: '聊天输入' })).toBeVisible();
 });
 
 test('A2 file explanation must not remove a generated route', async ({ page }) => {
@@ -184,7 +188,7 @@ test('A2 file explanation must not remove a generated route', async ({ page }) =
   await page.getByRole('button', { name: '第 2 步：main.ts' }).click();
   await page.getByRole('tab', { name: '讲解', exact: true }).click();
   await generate(page, '生成当前文件讲解');
-  await expect(page.getByText('验收文件讲解', { exact: true })).toBeVisible();
+  await expect(page.locator(".details-pane").getByText('验收文件讲解', { exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: '第 2 步：main.ts' })).toHaveAttribute('aria-current', 'step');
 });
 
@@ -197,7 +201,7 @@ test('A2b explanation and route expire independently after a deep dependency cha
   await open(page, root);
   await page.getByRole('treeitem', { name: 'main.ts', exact: true }).click();
   await generate(page, '生成当前文件讲解');
-  await expect(page.getByText('验收文件讲解', { exact: true })).toBeVisible();
+  await expect(page.locator(".details-pane").getByText('验收文件讲解', { exact: true })).toBeVisible();
   await generate(page, '生成阅读路线');
   await page.getByRole('tab', { name: '讲解', exact: true }).click();
   await writeFile(path.join(root, 'deep.ts'), "export const deep = 2;\n");
@@ -273,7 +277,7 @@ test('a delayed settings save cannot overwrite a newer unsaved draft', async ({ 
   await expect(settings.getByLabel('API 密钥')).toHaveValue('new-test-key');
   await closeModelSettings(page);
   await page.getByRole('button', { name: '生成当前文件讲解', exact: true }).click();
-  await expect(page.getByText('请先填写模型服务地址、模型名称和密钥，再预览发送范围。')).toBeVisible();
+  await expect(page.getByText('设置模型后即可提问')).toBeVisible();
 });
 
 for (const draft of [
@@ -311,7 +315,7 @@ for (const draft of [
     await closeModelSettings(page);
 
     await page.getByRole('button', { name: '生成当前文件讲解', exact: true }).click();
-    await expect(page.getByText('请先填写模型服务地址、模型名称和密钥，再预览发送范围。')).toBeVisible();
+    await expect(page.getByText('设置模型后即可提问')).toBeVisible();
     expect(previewRequests).toBe(0);
   });
 }
@@ -344,7 +348,7 @@ test('a delayed settings read cannot replace a draft entered after the read bega
     await expect(settings.getByLabel('API 密钥')).toHaveValue('draft-key-after-read');
     await closeModelSettings(page);
     await page.getByRole('button', { name: '生成当前文件讲解', exact: true }).click();
-    await expect(page.getByText('请先填写模型服务地址、模型名称和密钥，再预览发送范围。')).toBeVisible();
+    await expect(page.getByText('设置模型后即可提问')).toBeVisible();
   } finally {
     releaseRead();
   }
@@ -522,7 +526,7 @@ test('a delayed settings save from the previous repository cannot overwrite the 
     await expect(nextSettings.getByLabel('API 密钥')).toHaveValue('next-repository-key');
     await closeModelSettings(page);
     await page.getByRole('button', { name: '生成当前文件讲解', exact: true }).click();
-    await expect(page.getByText('请先填写模型服务地址、模型名称和密钥，再预览发送范围。')).toBeVisible();
+    await expect(page.getByText('设置模型后即可提问')).toBeVisible();
   } finally {
     releaseSave();
   }

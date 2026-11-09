@@ -39,3 +39,14 @@ test("a successful tour save does not acknowledge a failed note save", () => {
   assert.equal(hasReadingArtifactOperations(journal, "tours"), false);
   assert.deepEqual(applyReadingArtifactJournal([note("original", "preserve")], journal, "notes"), [note("original", "preserve"), note("pending-note", "not persisted")]);
 });
+
+
+test("legacy routes without signatures survive restoration and unrelated edits without normalization", () => {
+  const legacy = [{ title: "Old A", future: { keep: 1 } }, { title: "Old B" }, { title: "Old B" }];
+  let journal = createReadingArtifactJournal();
+  assert.deepEqual(applyReadingArtifactJournal(legacy, journal, "tours"), legacy);
+  journal = stageReadingArtifactChanges(journal, "tours", legacy, [...legacy, tour("new", "New")]);
+  assert.deepEqual(applyReadingArtifactJournal(legacy, journal, "tours"), [...legacy, tour("new", "New")]);
+  journal = stageReadingArtifactChanges(journal, "tours", [...legacy, tour("new", "New")], [legacy[0], legacy[2], tour("new", "New")]);
+  assert.deepEqual(applyReadingArtifactJournal(legacy, journal, "tours"), [legacy[0], legacy[2], tour("new", "New")]);
+});

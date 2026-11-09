@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
@@ -24,6 +24,21 @@ test('encrypted model configuration survives a new store instance and can be cle
   const unavailable = createModelSettingsStore(root, { ...encryption, isEncryptionAvailable: () => false });
   await assert.rejects(unavailable.save({ ...settings, apiKey: 'changed' }), /加密/);
   assert.deepEqual(await store.read(), settings, 'failed encryption preserves confirmed configuration');
+  const local = { baseUrl: "http://127.0.0.1:11434/v1", model: "local", apiKey: "", authMode: "none" };
+  await store.save(local);
+  assert.deepEqual(await createModelSettingsStore(root, encryption).read(), local);
   await store.save(null);
   assert.equal(await store.read(), null);
+});
+
+
+test('without system encryption nothing is written, not even a plaintext fallback', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'repolens-model-settings-plain-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const encryption = { isEncryptionAvailable: () => false, encryptString: () => { throw new Error('must not encrypt'); }, decryptString: () => { throw new Error('must not decrypt'); } };
+  const store = createModelSettingsStore(root, encryption);
+  await assert.rejects(store.save({ baseUrl: 'https://model.example/v1', model: 'm', apiKey: 'plain-secret-value' }), /加密/);
+  assert.deepEqual(await readdir(root), [], 'no model-settings file or temporary file is left behind');
+  await writeFile(path.join(root, 'model-settings.enc'), 'opaque');
+  await assert.rejects(store.read(), /加密/, 'an existing file is reported as unreadable instead of being treated as unconfigured');
 });

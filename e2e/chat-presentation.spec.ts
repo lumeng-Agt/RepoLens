@@ -2,6 +2,7 @@ import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { enterRepositoryLocation, test, expect } from "./fixtures";
+import { waitForStableGraphGeometry } from "./helpers/graph-geometry";
 import { installResizeObserverProbe } from "./helpers/resize-observer-probe";
 
 const api = "http://127.0.0.1:4319";
@@ -61,12 +62,12 @@ test("chat keeps context explicit, evidence local, drafts editable, and controls
     await panel.getByRole("button", { name: "编辑为新问题", exact: true }).first().click();
     await expect(input).toHaveValue("main 如何得到数据？"); expect(modelCalls).toBe(0);
     const send = page.getByRole("button", { name: "发送", exact: true }); await expect(send).toBeEnabled();
-    await expect(panel.getByRole("button", { name: "添加文件", exact: true })).toContainText("另 1 个文件");
-    await panel.getByRole("button", { name: "移除附件 main.ts", exact: true }).click(); await expect(send).toBeDisabled(); await expect(send).toBeEnabled(); expect(bodies.at(-1)?.fileIds).toEqual(["helper.ts", "third.ts"]);
+    await expect(panel.getByRole("button", { name: "添加文件", exact: true })).toContainText("参考 3 个文件");
+    await panel.getByRole("button", { name: "添加文件", exact: true }).click(); await page.getByRole("button", { name: "移除文件 main.ts", exact: true }).click(); await page.keyboard.press("Escape"); await expect(send).toBeEnabled(); await expect.poll(() => bodies.at(-1)?.fileIds).toEqual(["helper.ts", "third.ts"]);
     await panel.getByRole("button", { name: "添加文件", exact: true }).click();
     await page.getByLabel("筛选聊天附件").fill("fourth"); await page.getByRole("button", { name: "fourth.ts", exact: true }).click();
     await expect(page.getByText("手动添加", { exact: true })).toBeVisible(); await page.keyboard.press("Escape");
-    await expect(send).toBeEnabled(); expect(bodies.at(-1)?.fileIds).toEqual(["helper.ts", "third.ts", "fourth.ts"]); expect(modelCalls).toBe(0);
+    await expect(send).toBeEnabled(); await expect.poll(() => bodies.at(-1)?.fileIds).toEqual(["helper.ts", "third.ts", "fourth.ts"]); expect(modelCalls).toBe(0);
     await page.screenshot({ path: ".artifacts/chat-redesign/conversation-1440.png" });
     await panel.getByRole("button", { name: "AI 任务", exact: true }).click(); await page.getByRole("menuitem", { name: "讲解当前文件", exact: true }).click();
     await expect(panel.getByText("改为提问", { exact: true })).toBeVisible(); await expect(input).toHaveCount(0);
@@ -94,11 +95,14 @@ test("chat keeps context explicit, evidence local, drafts editable, and controls
     await panel.getByRole("button", { name: "聊天历史", exact: true }).click(); await expect(page.locator(".chat-history-list small")).toBeVisible(); await page.getByLabel("搜索聊天历史").fill("不存在的内容"); await expect(page.getByText("没有匹配的对话")).toBeVisible(); await page.keyboard.press("Escape");
     await expect(page.getByLabel("搜索聊天历史")).toBeHidden();
     while (await panel.getByRole("button", { name: /^移除附件 / }).count()) await panel.getByRole("button", { name: /^移除附件 / }).first().click();
-    await expect(send).toBeDisabled(); await expect(panel.getByText("请添加至少一个源码文件。", { exact: true })).toBeVisible(); expect(modelCalls).toBe(0);
-    await panel.getByRole("button", { name: "添加文件", exact: true }).click(); await page.getByLabel("筛选聊天附件").fill("helper"); await page.getByRole("button", { name: "helper.ts", exact: true }).click(); await page.keyboard.press("Escape"); await expect(send).toBeEnabled(); expect(bodies.at(-1)?.fileIds).toEqual(["helper.ts"]);
+    await expect(send).toBeEnabled(); await expect(panel.getByRole("button", { name: "源码上下文：仅对话", exact: true })).toBeVisible(); await expect.poll(() => bodies.at(-1)?.fileIds).toEqual([]); expect(modelCalls).toBe(0);
+    await panel.getByRole("button", { name: "添加文件", exact: true }).click(); await page.getByLabel("筛选聊天附件").fill("helper"); await page.getByRole("button", { name: "helper.ts", exact: true }).click(); await page.keyboard.press("Escape"); await expect(send).toBeEnabled(); await expect.poll(() => bodies.at(-1)?.fileIds).toEqual(["helper.ts"]);
     failSave = true; await panel.getByRole("button", { name: "新对话", exact: true }).click(); await expect(panel.getByText(/对话尚未保存：/)).toBeInViewport();
     await page.screenshot({ path: ".artifacts/chat-redesign/save-failure.png" }); failSave = false; await panel.getByRole("button", { name: "重试保存", exact: true }).click(); await expect(panel.getByText(/对话尚未保存：/)).toHaveCount(0);
     expect(modelCalls).toBe(0);
-    await writeFile(".artifacts/chat-redesign/resize-observer.json", JSON.stringify(await probe.errors(), null, 2));
+    await waitForStableGraphGeometry(page, { minimumNodeCount: 1 });
+    const resizeErrors = await probe.errors();
+    await writeFile(".artifacts/chat-redesign/resize-observer.json", JSON.stringify(resizeErrors, null, 2));
+    expect(resizeErrors, probe.logs.join("\n")).toEqual([]);
   } finally { await rm(temp, { recursive: true, force: true }); }
 });

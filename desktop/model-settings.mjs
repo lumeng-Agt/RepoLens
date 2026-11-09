@@ -11,14 +11,14 @@ export function createModelSettingsStore(directory, encryption) {
       if (!encryption.isEncryptionAvailable()) throw new Error("系统加密服务不可用，无法恢复模型配置。");
       const value = JSON.parse(encryption.decryptString(content));
       if (value.version !== 1 || ![value.baseUrl, value.model, value.apiKey].every((part) => typeof part === "string")) throw new Error("保存的模型配置格式无效。");
-      return { baseUrl: value.baseUrl, model: value.model, apiKey: value.apiKey };
+      return { ...(value.authMode ? { authMode: value.authMode } : {}), baseUrl: value.baseUrl, model: value.model, apiKey: value.apiKey };
     },
     save(settings) {
       const operation = queue.then(async () => {
+        if (!settings) { await rm(file, { force: true }); await rm(`${file}.tmp`, { force: true }); return; }
         if (!encryption.isEncryptionAvailable()) throw new Error("系统加密服务不可用，模型配置未保存。");
         const temporary = `${file}.tmp`;
         try {
-          if (!settings) { await rm(file, { force: true }); return; }
           const content = encryption.encryptString(JSON.stringify({ version: 1, ...settings }));
           await writeFile(temporary, content, { mode: 0o600 });
           await rename(temporary, file);

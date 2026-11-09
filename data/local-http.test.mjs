@@ -30,3 +30,10 @@ test("JSON responses keep explicit no-store headers", () => {
   assert.equal(response.headers["Cache-Control"], "no-store");
   assert.deepEqual(JSON.parse(response.body), { ok: true });
 });
+
+
+test("request parser rejects deep extension fields without affecting the next request", async () => {
+  const request = chunks => ({ async *[Symbol.asyncIterator]() { yield Buffer.from(chunks); } });
+  await assert.rejects(readJsonRequestBody(request('{"future":' + '{"x":'.repeat(12000) + '0' + '}'.repeat(12000) + '}')), /层级/);
+  assert.deepEqual(await readJsonRequestBody(request('{"action":"reading-notes","notes":[]}')), { action: "reading-notes", notes: [] });
+});

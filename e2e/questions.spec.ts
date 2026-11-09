@@ -97,17 +97,17 @@ test("direct chat prepares context locally, sends once, cites lines, and carries
   await page.getByRole("menuitem", { name: "提问", exact: true }).click();
   await page.getByLabel("提问或追问").fill("What does main return?");
   await expect(page.getByRole("button", { name: "发送", exact: true })).toBeEnabled();
-  expect(questionPreviewCalls).toBeGreaterThanOrEqual(1);
+  await expect.poll(() => questionPreviewCalls).toBeGreaterThanOrEqual(1);
   expect(generateCalls).toBe(0);
   await page.getByRole("button", { name: "发送", exact: true }).click();
   await expect(page.getByText("当前范围无法确认该实现细节。")).toBeInViewport();
   await page.getByRole("button", { name: "回答菜单", exact: true }).click();
   await page.getByRole("menuitem", { name: "补充文件", exact: true }).click();
-  await expect(page.getByText("发送上下文", { exact: true })).toBeVisible();
+  await expect(page.getByText("可选上下文", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "src/dep.ts", exact: true }).click();
   await page.keyboard.press("Escape");
   await expect(page.getByRole("button", { name: "发送", exact: true })).toBeEnabled();
-  expect(seenPreviewBodies.at(-1)?.fileIds).toEqual(["src/main.ts", "src/dep.ts"]);
+  await expect.poll(() => seenPreviewBodies.at(-1)?.fileIds).toEqual(["src/main.ts", "src/dep.ts"]);
   expect(generateCalls).toBe(1);
   await page.getByRole("button", { name: "发送", exact: true }).click();
   await expect(page.getByText("main 返回依赖导出的 value。")).toBeInViewport();
@@ -119,9 +119,10 @@ test("direct chat prepares context locally, sends once, cites lines, and carries
   await expect(page.getByRole("tab", { name: "源码", exact: true })).toHaveAttribute("data-state", "active");
   await expect(page.locator("#source-line-2")).toHaveClass(/is-focused/);
 
-  await page.getByRole("tab", { name: "问答", exact: true }).click();
+  await page.getByRole("button", { name: "打开聊天", exact: true }).click();
   await page.getByLabel("提问或追问").fill("Why does it return that value?");
   await expect(page.getByRole("button", { name: "发送", exact: true })).toBeEnabled();
+  await expect.poll(() => seenPreviewBodies.at(-1)?.question).toBe("Why does it return that value?");
   const followUp = seenPreviewBodies.at(-1);
   expect(followUp?.history).toEqual([
     { role: "user", content: "What does main return?" },
@@ -209,7 +210,7 @@ test("closing the AI panel cancels preview but lets a confirmed answer finish", 
   const openRepository = page.getByRole("button", { name: "打开仓库", exact: true });
   await expect(openRepository).toBeEnabled();
   await openRepository.click();
-  await page.getByRole("tab", { name: "问答", exact: true }).click();
+  await page.getByRole("button", { name: "打开聊天", exact: true }).click();
   await page.getByLabel("提问或追问").fill("preview cancellation");
   const previewAborted = page.waitForEvent("requestfailed", (request) => request.url().includes("/api/ai/question/preview"));
 
