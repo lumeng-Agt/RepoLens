@@ -1,6 +1,9 @@
 "use client";
+
+import { useUsageGuide } from "@/hooks/useUsageGuide";
+import { USAGE_GUIDE_STORAGE_KEY } from "@/data/browser-workspace";
 import { flushChatPreferences, retryChatPreferences } from "@/data/chat-preference-lifecycle.mjs";
-import type { ChatIntent } from "@/components/repolens/chat-intent";
+import { useChatSidebar } from "@/hooks/useChatSidebar";
 
 import {
   MarkerType,
@@ -65,7 +68,7 @@ import { RepositoryHome } from "@/components/repolens/RepositoryHome";
 import { ModelSettingsDialog } from "@/components/repolens/ModelSettingsDialog";
 import { useModelSettings } from "@/hooks/useModelSettings";
 import { useWorkspacePersistence } from "@/hooks/useWorkspacePersistence";
-import { completeUsageGuideTask, createDefaultUsageGuidePreferences, hasExistingBrowserUse, hasExistingWorkspaceUse, normalizeUsageGuidePreferences, type UsageGuidePreferences, type UsageGuideTaskId } from "@/data/usage-guide.mjs";
+import { createDefaultUsageGuidePreferences, hasExistingBrowserUse, hasExistingWorkspaceUse, type UsageGuideTaskId } from "@/data/usage-guide.mjs";
 import { afterLayoutMeasurements, DEFAULT_WORKSPACE_LAYOUT, normalizeWorkspaceLayout, updateWorkspaceLayout, workspaceInnerLayout, workspaceOuterLayout } from "@/data/workspace-layout.mjs";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import type { GroupImperativeHandle } from "react-resizable-panels";
@@ -93,7 +96,6 @@ import "@xyflow/react/dist/style.css";
 
 type MobileView = "files" | "graph" | "details";
 const progressMemory = new Map<string, string>();
-const USAGE_GUIDE_STORAGE_KEY = "repolens:usage-guide:v1";
 
 function routeSignature(tour: TourStep[]) {
   const value = JSON.stringify(tour.map((step) => [step.title, step.focusFileId, step.description, step.reference.fileId, step.reference.line, step.reference.endLine ?? null]));
@@ -155,11 +157,7 @@ const EMPTY_FILE: FileRecord = { id: "", path: "", name: "没有源码文件", k
 
 function AppShell() {
   useEffect(() => window.repoLens?.onBeforeClose?.(() => flushChatPreferences()), []);
-  const [chatOpen, setChatOpen] = useState(false);
-  const [chatGraphTarget, setChatGraphTarget] = useState("");
-  const [chatGraphIds, setChatGraphIds] = useState<string[]>([]);
-  const [chatIntent, setChatIntent] = useState<ChatIntent>({ id: 0, mode: "question" });
-  const openAiChat = useCallback((mode: AiMode = "question") => { setChatOpen(true); setChatIntent((previous) => ({ id: previous.id + 1, mode })); }, []);
+  const { chatOpen, setChatOpen, chatIntent, openAiChat, graphSelection, setGraphSelection } = useChatSidebar();
   const [navigation, dispatchNavigation] = useReducer(navigationReducer, initialNavigationState);
   const restoreWorkspaceStateRef = useRef<(snapshot: RepositorySnapshot, saved: LocalWorkspaceState) => string | undefined>(() => undefined);
   const onSnapshotAppliedRef = useRef<(snapshot: RepositorySnapshot) => void>(() => {});
@@ -181,22 +179,14 @@ function AppShell() {
   const [tourVisibilityOverride, setTourVisibilityOverride] = useState<{ signature: string; open: boolean } | null>(null);
   const [navigationHistory, setNavigationHistory] = useState(emptyNavigationHistory);
   const [desktopMode] = useState(() => Boolean(globalThis.__REPOLENS_RUNTIME__?.desktop));
-  const [guidePreferences, setGuidePreferences] = useState<UsageGuidePreferences>(() => createDefaultUsageGuidePreferences());
-  const guidePreferencesRef = useRef(guidePreferences);
-  const [guideReady, setGuideReady] = useState(false);
-  const guidePersistenceAllowedRef = useRef(false);
-  const [guideStorageMessage, setGuideStorageMessage] = useState("");
-  const [showGuideWelcome, setShowGuideWelcome] = useState(true);
-  const [guidePanelOpen, setGuidePanelOpen] = useState(false);
-  const [guideNoticeAvailable, setGuideNoticeAvailable] = useState(false);
-  const [guideRepoRequest, setGuideRepoRequest] = useState(0);
-  const guideButtonRef = useRef<HTMLButtonElement>(null);
+  const {
+    guidePreferences, setGuidePreferences, guidePreferencesRef, guideReady, guideStorageMessage,
+    setGuideStorageMessage, showGuideWelcome, setShowGuideWelcome, guidePanelOpen, setGuidePanelOpen,
+    guideNoticeAvailable, setGuideNoticeAvailable, guideRepoRequest, setGuideRepoRequest, guideButtonRef,
+    guideSaveSequenceRef, guideWriteQueueRef, guideTourPracticeRef, guideNavigationRef, updateGuidePreferences,
+    initializeGuidePreferences, completeGuideTask,
+  } = useUsageGuide(desktopMode);
   const repositoryMenuRef = useRef<HTMLDetailsElement>(null);
-  const guideInitializedRef = useRef(false);
-  const guideSaveSequenceRef = useRef(0);
-  const guideWriteQueueRef = useRef<Promise<void>>(Promise.resolve());
-  const guideTourPracticeRef = useRef<{ workspaceId: string; sessionVersion: number; origin: { fileId: string; line?: number }; destination: { fileId: string; line: number }; visited: boolean; returned: boolean } | null>(null);
-  const guideNavigationRef = useRef<{ repositoryId: string; sessionVersion: number; fileId: string; dependency: boolean } | null>(null);
   const savedDataClearActiveRef = useRef(false);
   const [savedDataClearBusy, setSavedDataClearBusy] = useState(false);
   const [workspacePersistenceReadyKeys, setWorkspacePersistenceReadyKeys] = useState(new Set<string>());
@@ -310,66 +300,6 @@ function AppShell() {
     onClearAiContext: clearAiContext,
     onDispatchAiMessage: (message) => dispatchAiWorkflow({ type: "message", message }),
   });
-  const persistGuidePreferences = useCallback((preferences: UsageGuidePreferences): Promise<boolean> => {
-    if (!guidePersistenceAllowedRef.current) return Promise.resolve(false);
-    if (!desktopMode) {
-      try {
-        window.localStorage.setItem(USAGE_GUIDE_STORAGE_KEY, JSON.stringify(preferences));
-        setGuideStorageMessage("");
-        return Promise.resolve(true);
-      } catch (error) {
-        guidePersistenceAllowedRef.current = false;
-        setGuideStorageMessage(`无法保存使用指南进度；本次仅在当前页面保留：${error instanceof Error ? error.message : "浏览器存储不可用。"}`);
-        return Promise.resolve(false);
-      }
-    }
-    const requestId = ++guideSaveSequenceRef.current;
-    const operation = guideWriteQueueRef.current.then(async () => {
-      if (requestId !== guideSaveSequenceRef.current) return;
-      await localWorkspaceProvider.saveGuidePreferences(preferences);
-    });
-    guideWriteQueueRef.current = operation.catch(() => undefined);
-    return operation.then(() => {
-      if (requestId === guideSaveSequenceRef.current) setGuideStorageMessage("");
-      return true;
-    }).catch((error: Error) => {
-      if (requestId === guideSaveSequenceRef.current) setGuideStorageMessage(`无法保存使用指南进度；本次仅在当前页面保留：${error.message}`);
-      return false;
-    });
-  }, [desktopMode]);
-  const updateGuidePreferences = useCallback((value: UsageGuidePreferences | ((current: UsageGuidePreferences) => UsageGuidePreferences)) => {
-    const next = typeof value === "function" ? value(guidePreferencesRef.current) : value;
-    guidePreferencesRef.current = next;
-    setGuidePreferences(next);
-    if (guideReady) void persistGuidePreferences(next);
-    return next;
-  }, [guideReady, persistGuidePreferences]);
-  const initializeGuidePreferences = useCallback((stored: unknown, present: boolean, hasExistingUse: boolean, storageReady: boolean, warning?: string) => {
-    if (guideInitializedRef.current) return;
-    guideInitializedRef.current = true;
-    const normalized = present ? normalizeUsageGuidePreferences(stored) : null;
-    const invalidStoredValue = present && !normalized;
-    const blocked = !storageReady || invalidStoredValue;
-    let next = normalized ?? createDefaultUsageGuidePreferences();
-    if (blocked) {
-      next = { ...createDefaultUsageGuidePreferences(), welcomeHandled: true, noticeDismissed: true };
-      setGuideStorageMessage(warning ?? (invalidStoredValue ? "无法读取使用指南进度。本次修改未保存，原记录未被覆盖。" : "无法读取已保存的使用指南进度。本次修改未保存。"));
-    } else if (!present && hasExistingUse) {
-      next = { ...next, welcomeHandled: true, noticeDismissed: false };
-      setGuideNoticeAvailable(true);
-    }
-    guidePreferencesRef.current = next;
-    setGuidePreferences(next);
-    guidePersistenceAllowedRef.current = !blocked;
-    setShowGuideWelcome(true);
-    setGuideNoticeAvailable(next.welcomeHandled && !next.noticeDismissed);
-    setGuidePanelOpen(false);
-    setGuideReady(true);
-    if (!blocked && !present && hasExistingUse) void persistGuidePreferences(next);
-  }, [persistGuidePreferences]);
-  const completeGuideTask = useCallback((task: UsageGuideTaskId) => {
-    updateGuidePreferences((previous) => completeUsageGuideTask(previous, task));
-  }, [updateGuidePreferences]);
   const settingsSessionRef = useRef({ repositoryId: repository.id, sessionVersion: repositorySessionVersion });
   useEffect(() => { settingsSessionRef.current = { repositoryId: repository.id, sessionVersion: repositorySessionVersion }; }, [repository.id, repositorySessionVersion]);
   const [mobileView, setMobileView] = useState<MobileView>("graph");
@@ -1396,7 +1326,7 @@ function AppShell() {
       </nav>
 
 
-      <WorkspaceOverview investigationEntry={repository.source === "local" && <InvestigationPanel key={workspaceId} repository={repository} busy={savedDataClearBusy} onOpen={openReference} onRelations={fileId => { setLayoutMode("structure"); selectFile(fileId, "graph"); }} onContinue={investigation => { setChatOpen(true); setChatIntent(previous => ({ id: previous.id + 1, mode: "investigation", investigation })); }} />} clearVersion={questionClearVersion} repository={repository} stepCount={activeTour.length} compact notes={currentReadingNotes} tours={currentSavedTours} results={[...aiResultsByFile.entries()].filter(([key, value]) => key.startsWith(`${workspaceId}:`) && value.__repositoryId === repository.id).map(([, value]) => value)} statusMessage={guideReady && showGuideWelcome ? "" : repoMessage} onDismissMessage={() => setRepoMessage("")} onSelectFile={(fileId) => selectFile(fileId, "details")} />
+      <WorkspaceOverview investigationEntry={repository.source === "local" && <InvestigationPanel key={workspaceId} repository={repository} busy={savedDataClearBusy} onOpen={openReference} onRelations={fileId => { setLayoutMode("structure"); selectFile(fileId, "graph"); }} onContinue={investigation => { openAiChat("investigation", { investigation }); }} />} clearVersion={questionClearVersion} repository={repository} stepCount={activeTour.length} compact notes={currentReadingNotes} tours={currentSavedTours} results={[...aiResultsByFile.entries()].filter(([key, value]) => key.startsWith(`${workspaceId}:`) && value.__repositoryId === repository.id).map(([, value]) => value)} statusMessage={guideReady && showGuideWelcome ? "" : repoMessage} onDismissMessage={() => setRepoMessage("")} onSelectFile={(fileId) => selectFile(fileId, "details")} />
 
       <section id="repository-workspace" className={`workspace-grid${layoutMode === "reading" ? " is-reading-mode" : ""}${chatOpen ? " is-chat-open" : ""}`}>
         <div className="workspace-chat-columns" ref={chatContainerRef}>
@@ -1450,7 +1380,7 @@ function AppShell() {
             resizeTargetMinimumSize={{ fine: 12, coarse: 30 }}
           >
         <ResizablePanel id="graph" style={{ overflow: "hidden" }} className={`workspace-panel-content${narrowLayout && mobileView !== "graph" ? " mobile-panel-hidden" : ""}`} defaultSize="61.54%" minSize={280}>
-          <GraphPanel highlightedFileIds={chatGraphTarget === `${workspaceId}:${repository.revision}:${chatClearAllVersion}:${chatClearVersions[workspaceId] ?? 0}` ? chatGraphIds : []} onAnalyze={(ids, label) => { setChatOpen(true); setChatIntent(previous => ({ id: previous.id + 1, mode: "question", sessionId: repository.persistenceSessionId, draft: `请分析这些静态依赖关系：${label}。请区分静态引用与推断。`, attachments: ids.map(id => ({ fileId: id, contentHash: filesById.get(id)?.contentHash ?? "" })) })); }}
+          <GraphPanel highlightedFileIds={graphSelection?.target === `${workspaceId}:${repository.revision}:${chatClearAllVersion}:${chatClearVersions[workspaceId] ?? 0}` ? graphSelection.ids : []} onAnalyze={(ids, label) => { openAiChat("question", { sessionId: repository.persistenceSessionId, draft: `请分析这些静态依赖关系：${label}。请区分静态引用与推断。`, attachments: ids.map(id => ({ fileId: id, contentHash: filesById.get(id)?.contentHash ?? "" })) }); }}
           mobileView={mobileView}
           directory={graphDirectory}
           directories={graphDirectories}
@@ -1505,7 +1435,7 @@ function AppShell() {
           canOpenRepository={guideReady && !repoBusy && !savedDataClearBusy}
           onChatSelection={(start, end) => {
             if (end < 0) { openReference({ fileId: currentFile.id, line: start, endLine: -end }); setDetailTab("guide"); requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('[aria-label="阅读笔记内容"]')?.focus()); return; }
-            setChatOpen(true); setChatIntent(previous => ({ id: previous.id + 1, mode: "question", sessionId: repository.persistenceSessionId, ...(start < 0 ? { draft: "解释这段代码" } : {}), attachments: [{ fileId: currentFile.id, contentHash: currentFile.contentHash ?? "", startLine: Math.abs(start), endLine: end }] }));
+            openAiChat("question", { sessionId: repository.persistenceSessionId, ...(start < 0 ? { draft: "解释这段代码" } : {}), attachments: [{ fileId: currentFile.id, contentHash: currentFile.contentHash ?? "", startLine: Math.abs(start), endLine: end }] });
           }}
           onPreviewAi={(mode) => openAiChat(mode)}
           aiBusy={aiBusy}
@@ -1544,7 +1474,7 @@ function AppShell() {
         <ResizableHandle className="workspace-resize-handle chat-resize-handle" hidden={!chatOpen || !chatDocked} aria-label="调整 AI 栏宽度" title="拖动调整 AI 栏宽度；双击恢复默认" onDoubleClick={() => saveWorkspaceLayoutPreferences({ ...workspaceLayoutPreferences, chatWidth: 360 })} />
         <ResizablePanel id="assistant" minSize={chatOpen && chatDocked ? "320px" : 0} maxSize={chatOpen && chatDocked ? "45%" : 0}>
         <div className="ai-chat-drawer" hidden={!chatOpen}>
-          <AiChatSidebar onShowGraph={ids => { setChatGraphTarget(`${workspaceId}:${repository.revision}:${chatClearAllVersion}:${chatClearVersions[workspaceId] ?? 0}`); setChatGraphIds(ids); setLayoutMode("structure"); setMobileView("graph"); }} savedTourSignatures={(savedToursByWorkspace.get(workspaceId) ?? []).map(route => route.signature)} onSaveTour={route => saveTours([...(savedToursRef.current.get(workspaceId) ?? []).filter(item => item.signature !== route.signature), route])} onRelations={fileId => { setLayoutMode("structure"); selectFile(fileId, "graph"); }} open={chatOpen} repository={repository} currentFile={currentFile} intent={chatIntent} available={!desktopBackendError} clearingTarget={chatClearingTarget} clearVersions={chatClearVersions} clearAllVersion={chatClearAllVersion} extraFileIds={questionExtraFileIds} modelSettings={chatModelSettings} onClose={() => setChatOpen(false)} onSettings={openModelSettingsDialog} onOpenRepository={() => { void openRepositoryHome(); }} onOpenReference={openReference} onActivateTour={activateSavedTour} onCompleted={(id) => { if (id !== workspaceId) return; const completionSession = repositorySessionVersion; const completionGeneration = savedDataClearGenerationRef.current; void localWorkspaceProvider.get(id).then((saved) => { if (saved.persistenceReady === false || savedDataClearActiveRef.current || completionGeneration !== savedDataClearGenerationRef.current || completionSession !== settingsSessionRef.current.sessionVersion || repository.id !== settingsSessionRef.current.repositoryId) return; setAiResultsByFile((previous) => { const next = new Map(previous); for (const [fileId, result] of Object.entries(saved.aiResults)) next.set(`${id}:${fileId}`, result as AiResultRecord); return next; }); setSavedToursByWorkspace((previous) => { const next = new Map(previous); const journal = readingArtifactJournals.current.get(id) ?? createReadingArtifactJournal<ReadingNote, AiRouteRecord>(); const merged = applyReadingArtifactJournal(saved.savedTours ?? [], journal, "tours"); next.set(id, merged); savedToursRef.current = next; return next; }); }).catch(() => {}); }} />
+          <AiChatSidebar onShowGraph={ids => { setGraphSelection({ target: `${workspaceId}:${repository.revision}:${chatClearAllVersion}:${chatClearVersions[workspaceId] ?? 0}`, ids }); setLayoutMode("structure"); setMobileView("graph"); }} savedTourSignatures={(savedToursByWorkspace.get(workspaceId) ?? []).map(route => route.signature)} onSaveTour={route => saveTours([...(savedToursRef.current.get(workspaceId) ?? []).filter(item => item.signature !== route.signature), route])} onRelations={fileId => { setLayoutMode("structure"); selectFile(fileId, "graph"); }} open={chatOpen} repository={repository} currentFile={currentFile} intent={chatIntent} available={!desktopBackendError} clearingTarget={chatClearingTarget} clearVersions={chatClearVersions} clearAllVersion={chatClearAllVersion} extraFileIds={questionExtraFileIds} modelSettings={chatModelSettings} onClose={() => setChatOpen(false)} onSettings={openModelSettingsDialog} onOpenRepository={() => { void openRepositoryHome(); }} onOpenReference={openReference} onActivateTour={activateSavedTour} onCompleted={(id) => { if (id !== workspaceId) return; const completionSession = repositorySessionVersion; const completionGeneration = savedDataClearGenerationRef.current; void localWorkspaceProvider.get(id).then((saved) => { if (saved.persistenceReady === false || savedDataClearActiveRef.current || completionGeneration !== savedDataClearGenerationRef.current || completionSession !== settingsSessionRef.current.sessionVersion || repository.id !== settingsSessionRef.current.repositoryId) return; setAiResultsByFile((previous) => { const next = new Map(previous); for (const [fileId, result] of Object.entries(saved.aiResults)) next.set(`${id}:${fileId}`, result as AiResultRecord); return next; }); setSavedToursByWorkspace((previous) => { const next = new Map(previous); const journal = readingArtifactJournals.current.get(id) ?? createReadingArtifactJournal<ReadingNote, AiRouteRecord>(); const merged = applyReadingArtifactJournal(saved.savedTours ?? [], journal, "tours"); next.set(id, merged); savedToursRef.current = next; return next; }); }).catch(() => {}); }} />
         </div>
         </ResizablePanel></ResizablePanelGroup></div>
       </section>
