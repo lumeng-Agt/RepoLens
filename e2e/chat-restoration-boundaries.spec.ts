@@ -79,7 +79,20 @@ test('chat bounds table rendering while keeping the original text available to c
 test('saved non-bottom transcript position survives opening the chat',async({page})=>{
  await withRealWorkspace(page,async({api,data,snapshot})=>{
   expect(await seed(page,api,snapshot,{version:1,draft:'保留的草稿',activeId:conversation.id,scrollTop:350})).toEqual([{ok:true},{ok:true}]);
-  await page.getByRole('button',{name:'打开 AI 聊天',exact:true}).click();
+  let releaseModule!: () => void;
+  const moduleGate = new Promise<void>(resolve => { releaseModule = resolve; });
+  const modulePath = /\/assets\/QuestionPanel-[^/]+\.js$/;
+  await page.route(modulePath, async route => {
+   await moduleGate;
+   await route.continue();
+  });
+  try {
+   await page.getByRole('button',{name:'打开 AI 聊天',exact:true}).click();
+   await expect(page.getByText('正在加载聊天…',{exact:true})).toBeVisible();
+   await expect(page.getByRole('log',{name:'聊天消息'})).toHaveCount(0);
+  } finally {
+   releaseModule();
+  }
   const log=page.getByRole('log',{name:'聊天消息'});await expect(log.locator('.question-message')).toHaveCount(32);
   await frames(page);
   const actual=await log.evaluate(e=>({top:e.scrollTop,height:e.scrollHeight,viewport:e.clientHeight}));

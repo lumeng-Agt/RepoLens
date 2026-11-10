@@ -24,10 +24,10 @@ import {
   Settings2,
   MessageSquare,
 } from "lucide-react";
-import { InvestigationPanel } from "@/components/repolens/InvestigationPanel";
-import { ModelSettingsDialog } from "@/components/repolens/ModelSettingsDialog";
 import { WorkspaceOverview } from "@/components/repolens/WorkspaceOverview";
 import {
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useMemo,
@@ -73,6 +73,8 @@ import { useGraphCoordinates } from "@/hooks/useGraphCoordinates";
 import { useWorkspaceLayout, WORKSPACE_LAYOUT_STORAGE_KEY, WORKSPACE_LAYOUT_PERSISTENCE_ID } from "@/hooks/useWorkspaceLayout";
 import "@xyflow/react/dist/style.css";
 
+const ModelSettingsDialog = lazy(() => import("@/components/repolens/ModelSettingsDialog").then(module => ({ default: module.ModelSettingsDialog })));
+const InvestigationPanel = lazy(() => import("@/components/repolens/InvestigationPanel").then(module => ({ default: module.InvestigationPanel })));
 
 type MobileView = "files" | "graph" | "details";
 function readBrowserUsageGuide() {
@@ -811,8 +813,10 @@ function AppShell() {
   }, [desktopMode, guideRepoRequest, setRepoMessage, setRepoPath]);
 
   const chatModelSettings = useMemo(() => ({ ...aiSettingsSaved, configured: aiSettings.configured }), [aiSettingsSaved, aiSettings.configured]);
-  const modelSettingsDialog = (
-    <ModelSettingsDialog open={modelSettingsOpen} available={!desktopBackendError} busy={aiSettingsBusy} configured={aiSettingsSaved.configured} dirty={aiSettingsDirty} values={aiSettingsDraft} readError={currentAiSettingsReadError} saveError={currentAiSettingsSaveError} feedback={aiSettingsFeedback} onChange={(key, value) => editAiSettings({ [key]: value })} onSubmit={saveAiSettings} onClose={closeModelSettingsDialog} />
+  const modelSettingsDialog = modelSettingsOpen && (
+    <Suspense fallback={<span className="sr-only" role="status">正在加载模型设置…</span>}>
+      <ModelSettingsDialog open available={!desktopBackendError} busy={aiSettingsBusy} configured={aiSettingsSaved.configured} dirty={aiSettingsDirty} values={aiSettingsDraft} readError={currentAiSettingsReadError} saveError={currentAiSettingsSaveError} feedback={aiSettingsFeedback} onChange={(key, value) => editAiSettings({ [key]: value })} onSubmit={saveAiSettings} onClose={closeModelSettingsDialog} />
+    </Suspense>
   );
 
   const repositoryHome = <>
@@ -889,7 +893,7 @@ function AppShell() {
         </button>
       </nav>
 
-      <WorkspaceOverview investigationEntry={repository.source === "local" && <InvestigationPanel key={workspaceId} repository={repository} busy={savedDataClearBusy} onOpen={openReference} onRelations={fileId => { setLayoutMode("structure"); selectFile(fileId, "graph"); }} onContinue={investigation => { openAiChat("investigation", { investigation }); }} />} clearVersion={questionClearVersion} repository={repository} stepCount={activeTour.length} compact notes={currentReadingNotes} tours={currentSavedTours} results={[...aiResultsByFile.entries()].filter(([key, value]) => key.startsWith(`${workspaceId}:`) && value.__repositoryId === repository.id).map(([, value]) => value)} statusMessage={guideReady && showGuideWelcome ? "" : repoMessage} onDismissMessage={() => setRepoMessage("")} onSelectFile={(fileId) => selectFile(fileId, "details")} />
+      <WorkspaceOverview investigationEntry={repository.source === "local" && <Suspense fallback={null}><InvestigationPanel key={workspaceId} repository={repository} busy={savedDataClearBusy} onOpen={openReference} onRelations={fileId => { setLayoutMode("structure"); selectFile(fileId, "graph"); }} onContinue={investigation => { openAiChat("investigation", { investigation }); }} /></Suspense>} clearVersion={questionClearVersion} repository={repository} stepCount={activeTour.length} compact notes={currentReadingNotes} tours={currentSavedTours} results={[...aiResultsByFile.entries()].filter(([key, value]) => key.startsWith(`${workspaceId}:`) && value.__repositoryId === repository.id).map(([, value]) => value)} statusMessage={guideReady && showGuideWelcome ? "" : repoMessage} onDismissMessage={() => setRepoMessage("")} onSelectFile={(fileId) => selectFile(fileId, "details")} />
 
       <section id="repository-workspace" className={`workspace-grid${layoutMode === "reading" ? " is-reading-mode" : ""}${chatOpen ? " is-chat-open" : ""}`}>
         <div className="workspace-chat-columns" ref={chatContainerRef}>

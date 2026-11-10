@@ -1,12 +1,15 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState, type ReactNode } from "react";
 import { Telescope } from "lucide-react";
 import type { AiRouteRecord, ReadingNote, RepositoryOverview as OverviewData, RepositorySnapshot } from "@/data/model";
 import type { AiResultRecord } from "@/components/repolens/AiResultView";
 import { localRepositoryProvider } from "@/data/providers";
-import { RevisionComparisonPanel } from "@/components/repolens/RevisionComparisonPanel";
+
+
+const RevisionComparisonPanel = lazy(() => import("./RevisionComparisonPanel").then(module => ({ default: module.RevisionComparisonPanel })));
 
 export function WorkspaceOverview({ repository, stepCount, compact = false, clearVersion = 0, notes, tours, results, statusMessage, onSelectFile, onDismissMessage, investigationEntry }: { repository: RepositorySnapshot; stepCount: number; compact?: boolean; clearVersion?: number; investigationEntry?: ReactNode; notes: ReadingNote[]; tours: AiRouteRecord[]; results: AiResultRecord[]; statusMessage?: string; onSelectFile: (fileId: string) => void; onDismissMessage?: () => void }) {
   const [expanded, setExpanded] = useState(false);
+  const [comparisonRequested, setComparisonRequested] = useState(false);
   const [remoteOverview, setRemoteOverview] = useState<OverviewData | null>(null);
   const [overviewError, setOverviewError] = useState<{ revision: string; message: string } | null>(null);
   const localFallback = useMemo<OverviewData>(() => {
@@ -31,7 +34,7 @@ export function WorkspaceOverview({ repository, stepCount, compact = false, clea
     <div className="workspace-overview-actions">
       {investigationEntry}
       {statusMessage && <div className="workspace-message" role="status" title={statusMessage}><span>{statusMessage}</span>{onDismissMessage && <button type="button" aria-label="关闭提示" onClick={onDismissMessage}>×</button>}</div>}
-      <details className="overview-disclosure" onToggle={(event) => setExpanded(event.currentTarget.open)}>
+      <details className="overview-disclosure" onToggle={(event) => { const open = event.currentTarget.open; setExpanded(open); if (open) setComparisonRequested(true); }}>
         <summary><Telescope size={14} />仓库概览</summary>
         <div className="overview-popover">
           <div className="overview-popover-heading"><strong>{repository.name}</strong><span>{repository.files.length} 个源码文件 · {repository.dependencies.length} 条静态引用 · {stepCount} 个阅读步骤</span></div>
@@ -45,7 +48,7 @@ export function WorkspaceOverview({ repository, stepCount, compact = false, clea
             <section><h2>目录与测试</h2><p>{overview.directories.map((item) => `${item.name}（${item.files}）`).join(" · ") || "仓库没有子目录"}</p><p>测试路径 {overview.testCount} 个{overview.tests.length ? `：${overview.tests.slice(0, 5).join("、")}` : ""}</p><p>静态分析诊断 {overview.diagnosticCount} 条</p></section>
             <p className="overview-limitations">{overview.limitations}</p>
           </>}
-          {repository.source === "local" && <RevisionComparisonPanel key={`${clearVersion}:${repository.origin?.kind ?? repository.source}:${repository.id}:${repository.workspaceId ?? ""}:${repository.persistenceSessionId ?? ""}:${currentRevision}`} repository={repository} notes={notes} tours={tours} results={results} onSelectFile={onSelectFile} />}
+          {repository.source === "local" && comparisonRequested && <Suspense fallback={<p role="status">正在加载版本比较…</p>}><RevisionComparisonPanel key={`${clearVersion}:${repository.origin?.kind ?? repository.source}:${repository.id}:${repository.workspaceId ?? ""}:${repository.persistenceSessionId ?? ""}:${currentRevision}`} repository={repository} notes={notes} tours={tours} results={results} onSelectFile={onSelectFile} /></Suspense>}
         </div>
       </details>
     </div>
