@@ -51,3 +51,11 @@ next-env.d.ts
 /work/
 /.artifacts/
 /.openai/
+
+# Local product/design and portfolio working material.
+/.interface-design/
+/DESIGN.md
+/PRODUCT.md
+/docs/design/
+/docs/ui-copy-review.md
+/docs/portfolio-*.md
