@@ -32,6 +32,9 @@
     "**/*.tsx",
     "**/*.mts",
     "data/local-http.mjs",
+    "data/token-estimate.mjs",
+    "data/source-window.mjs",
+    "data/search-match.mjs",
     "data/repository-command.mjs",
     "scripts/server/route-table.mjs"
   ],

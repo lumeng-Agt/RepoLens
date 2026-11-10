@@ -1,4 +1,7 @@
-/** Calculate the visible source lines for a fixed-height code viewport. */
+// @ts-check
+/** Calculate the visible source lines for a fixed-height code viewport.
+ * @param {{ lineCount: number, scrollTop: number, viewportHeight: number, rowHeight?: number, headerHeight?: number, overscan?: number }} input
+ */
 export function visibleLineWindow({ lineCount, scrollTop, viewportHeight, rowHeight = 24, headerHeight = 45, overscan = 12 }) {
   if (!Number.isFinite(lineCount) || lineCount <= 0) return { start: 0, end: 0, top: 0, bottom: 0 };
   const firstVisible = Math.min(lineCount - 1, Math.max(0, Math.floor(Math.max(0, scrollTop - headerHeight) / rowHeight)));
