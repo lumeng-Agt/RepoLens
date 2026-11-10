@@ -39,6 +39,7 @@ jobs:
           if ($env:RELEASE_TAG -ne "v$version") { throw 'Release tag and package version differ.' }
       - run: npm run verify
       - run: npm run package:desktop
+      # Packaging smoke tests the unpacked executable. This step tests the actual portable launcher.
       - name: Verify the portable launcher
         shell: pwsh
         env:
