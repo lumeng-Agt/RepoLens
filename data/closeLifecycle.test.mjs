@@ -68,7 +68,11 @@ async function fixture(context, { wrapper = false, refuse = false } = {}) {
     if (child.exitCode === null && child.signalCode === null) {
       if (child.connected) child.send({ type: "shutdown" });
       let timer; await Promise.race([exited, new Promise(resolve => { timer = setTimeout(resolve, 22000); })]); clearTimeout(timer);
-      if (child.exitCode === null && child.signalCode === null) { spawnSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], { windowsHide: true, stdio: "ignore" }); await exited; }
+      if (child.exitCode === null && child.signalCode === null) {
+        if (process.platform === "win32") spawnSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], { windowsHide: true, stdio: "ignore" });
+        else child.kill("SIGKILL");
+        await exited;
+      }
     }
     assert.ok(root.startsWith(path.resolve(os.tmpdir()) + path.sep)); await rm(root, { recursive: true, force: true });
   });

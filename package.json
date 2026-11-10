@@ -19,6 +19,7 @@
     "benchmark:indexer": "node scripts/benchmark-indexer.mjs",
     "smoke:github": "node scripts/github-live-smoke.mjs",
     "build": "node scripts/run-framework.mjs build",
+    "clean": "node scripts/clean.mjs",
     "build:desktop": "node scripts/run-framework.mjs build --mode desktop",
     "package:desktop": "node scripts/package-desktop-verified.mjs",
     "preview:desktop": "npm run build:desktop && electron .",

@@ -82,11 +82,11 @@ test("validateCodeExecutable enforces Code.exe only and gives specific reasons f
   assert.match(rel.reason, /绝对路径/);
 
   // Non Code.exe (e.g. Cursor.exe, code.cmd) rejected
-  const cursor = await validateCodeExecutable("C:\\Programs\\Cursor\\Cursor.exe");
+  const cursor = await validateCodeExecutable(path.join(root, "Cursor.exe"));
   assert.equal(cursor.ok, false);
   assert.match(cursor.reason, /仅支持 VS Code（Code\.exe），已选择 Cursor\.exe/);
 
-  const cmd = await validateCodeExecutable("C:\\Programs\\Code\\bin\\code.cmd");
+  const cmd = await validateCodeExecutable(path.join(root, "bin", "code.cmd"));
   assert.equal(cmd.ok, false);
   assert.match(cmd.reason, /仅支持 VS Code（Code\.exe），已选择 code\.cmd/);
 

@@ -1,0 +1,62 @@
+name: Draft Windows Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag, for example v0.1.0
+        type: string
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  draft:
+    runs-on: windows-latest
+    steps:
+      - name: Validate tag
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          if ($env:RELEASE_TAG -notmatch '^v\d+\.\d+\.\d+$') { throw 'Expected a tag like v0.1.0.' }
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install chromium
+      - name: Verify tag matches package version
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ($env:RELEASE_TAG -ne "v$version") { throw 'Release tag and package version differ.' }
+      - run: npm run verify
+      - run: npm run package:desktop
+      - name: Verify the portable launcher
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          REPOLENS_SMOKE_HIDDEN: '0'
+        run: |
+          $version = $env:RELEASE_TAG.Substring(1)
+          $env:REPOLENS_DESKTOP_EXECUTABLE = (Resolve-Path -LiteralPath "release/RepoLens-$version-x64-Portable.exe").Path
+          npm run test:desktop:smoke
+          exit $LASTEXITCODE
+      - name: Upload verified files to a draft release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          $version = $env:RELEASE_TAG.Substring(1)
+          gh release create $env:RELEASE_TAG --verify-tag --draft --generate-notes `
+            "release/RepoLens-$version-x64-Setup.exe" "release/RepoLens-$version-x64-Portable.exe" `
+            release/SHA256SUMS.txt release/BUILD-MANIFEST.json
+          exit $LASTEXITCODE
