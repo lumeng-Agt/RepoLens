@@ -30,7 +30,10 @@
   "include": [
     "**/*.ts",
     "**/*.tsx",
-    "**/*.mts"
+    "**/*.mts",
+    "data/local-http.mjs",
+    "data/repository-command.mjs",
+    "scripts/server/route-table.mjs"
   ],
   "exclude": [
     "node_modules",

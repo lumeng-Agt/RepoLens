@@ -1,5 +1,7 @@
+// @ts-check
 import { assertBoundedData, MAX_WORKSPACE_REQUEST_BYTES } from "./persistence-limits.mjs";
-/** @returns {{ allowed: boolean, status?: number, error?: string }} */
+/** @param {{ host?: string, origin?: string, method?: string, url?: string, port: number, allowedOrigins: ReadonlySet<string> }} request
+ * @returns {{ allowed: true } | { allowed: false, status: number, error: string }} */
 export function validateLocalRequest({ host, origin, method, url, port, allowedOrigins }) {
   let hostAllowed = false;
   try {
@@ -13,11 +15,13 @@ export function validateLocalRequest({ host, origin, method, url, port, allowedO
   return { allowed: true };
 }
 
+/** @param {import("node:http").ServerResponse} response @param {number} status @param {unknown} value */
 export function sendJson(response, status, value) {
   response.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
   response.end(JSON.stringify(value));
 }
 
+/** @param {import("node:http").IncomingMessage} request @param {number} [maxBytes] @returns {Promise<unknown>} */
 export async function readJsonRequestBody(request, maxBytes = MAX_WORKSPACE_REQUEST_BYTES) {
   const chunks = [];
   let length = 0;

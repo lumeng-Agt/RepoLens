@@ -84,6 +84,7 @@
       "desktop/renderer/**/*",
       "data/**/*",
       "scripts/local-server.mjs",
+      "scripts/server/**/*",
       "package.json",
       "!**/*.test.*",
       "desktop/model-settings.mjs",
