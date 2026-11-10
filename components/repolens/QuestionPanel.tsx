@@ -8,13 +8,12 @@ import { MAX_CONVERSATIONS, CONVERSATION_CAPACITY_MESSAGE } from "@/data/persist
 import { InvestigationCard } from "./InvestigationCard";
 import { createInvestigation, appendInvestigationResult, replaceInvestigationResult } from "@/data/investigation.mjs";
 import { changeInvestigation, getInvestigationState, getInvestigationEpoch, subscribeInvestigations } from "@/data/investigation-state.mjs";
-import { useCallback, useEffect, useId, useMemo, useRef, useState, useSyncExternalStore, useEffectEvent, Fragment, type FormEvent } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, useSyncExternalStore, useEffectEvent, Fragment } from "react";
 import { localRepositoryProvider, localWorkspaceProvider } from "@/data/providers";
 import { generateChatStream, localExplanationProvider, type AiGenerationResult, type AiLineRange, type AiPreviewResponse, type AiQuestionHistoryItem, type AiScopeCandidate } from "@/data/explanation-provider";
 import { ChatMarkdown } from "./ChatMarkdown";
 import type { AiPreview, AiRouteRecord, FileRecord, RepositorySnapshot, SourceReference } from "@/data/model";
 import type { AiMode } from "@/data/explanation-provider";
-import { AiResultView } from "./AiResultView";
 import { buildAiChatCompletion } from "@/data/ai-chat-completion.mjs";
 import { acknowledgeQuestionConversationSave, clearQuestionConversationSaveError, enqueueQuestionConversationSave, failQuestionConversationRead, getQuestionConversationGeneration, getQuestionConversationOperations, getQuestionConversationReadError, getQuestionConversationReadVersion, getQuestionConversationSaveError, getQuestionConversationView, isQuestionConversationClearPending, recordQuestionConversationChanges, restoreQuestionConversations, setQuestionConversationSaveError } from "@/data/question-recovery.mjs";
 
@@ -101,8 +100,6 @@ export function QuestionPanel({ onShowGraph, repository, currentFile, filesById,
   const generatingRef = useRef(false);
   const generationSessionRef = useRef("");
   const transcriptRef = useRef<HTMLDivElement>(null);
-  const panelRef = useRef<HTMLElement>(null);
-  const consentRef = useRef<HTMLElement>(null);
   const scrollPosition = useRef(0);
   const hasScrollPosition = useRef(false);
   const followLatest = useRef(true);
@@ -169,18 +166,11 @@ export function QuestionPanel({ onShowGraph, repository, currentFile, filesById,
   const [scopeOpen, setScopeOpen] = useState(false);
   const [manualFileIds, setManualFileIds] = useState<string[]>([]);
   const [explicitSelection, setExplicitSelection] = useState(false);
-  const [supplementQuestion, setSupplementQuestion] = useState("");
-  const [supplementFileIds, setSupplementFileIds] = useState<string[]>([]);
-  const [supplementFilter, setSupplementFilter] = useState("");
   const [stage, setStage] = useState<"idle" | "previewing" | "scope" | "ready" | "generating" | "error">("idle");
   const [message, setMessage] = useState("");
   const [readWarning, setReadWarning] = useState("");
   const readWarningRef = useRef("");
   const [previewState, setPreviewState] = useState<PreviewState | null>(null);
-  const [searchSuggestions, setSearchSuggestions] = useState<string[]>([]);
-  const [supplementalResults, setSupplementalResults] = useState<{ fileId: string; line: number; text: string }[]>([]);
-  const supplementalRequest = useRef<AbortController | null>(null);
-  useEffect(() => () => supplementalRequest.current?.abort(), [repository.id, repository.revision]);
   const [candidates, setCandidates] = useState<AiScopeCandidate[]>([]);
   const [selectedFiles, setSelectedFiles] = useState<string[]>([]);
   const [ranges, setRanges] = useState<Record<string, AiLineRange>>({});
@@ -188,7 +178,6 @@ export function QuestionPanel({ onShowGraph, repository, currentFile, filesById,
   const evidenceSequence = useRef(0);
   const evidenceController = useRef<AbortController | null>(null);
   const evidenceTrigger = useRef<HTMLElement | null>(null);
-  const [scopeContextKey, setScopeContextKey] = useState("");
   const requestSequence = useRef(0);
   const requestController = useRef<AbortController | null>(null);
   const activeRequestContext = useRef("");
@@ -206,7 +195,6 @@ export function QuestionPanel({ onShowGraph, repository, currentFile, filesById,
   }, []);
   const contextKey = `${workspaceId}:${repository.revision ?? repository.version}:${currentFile.id}`;
   const visiblePreviewState = previewState?.contextKey === contextKey ? previewState : null;
-  const visibleScope = stage === "scope" && scopeContextKey === contextKey;
   const filesSignature = repository.files.map((file) => `${file.id}:${file.contentHash ?? ""}`).join("\n");
   const visibleConversations = loadedSessionKey === sessionKey ? conversations : getQuestionConversationView(workspaceId);
   const currentConversation = visibleConversations.find((item) => item.id === activeId) ?? null;
@@ -456,17 +444,10 @@ export function QuestionPanel({ onShowGraph, repository, currentFile, filesById,
       setPreviewState(null); setStage("idle"); setMessage("");
       return;
     }
-    setSupplementQuestion(priorQuestion);
-    setSupplementFileIds([...new Set(entry.contextFiles.map((context) => context.fileId))].slice(0, 12));
-    setSupplementFilter("");
     setQuestion(priorQuestion);
     setPreviewState(null); setCandidates([]); setStage("idle");
     setMessage("选择要补充的源码，然后重新预览。确认前不会发送内容。");
   };
-  const visibleSupplementFiles = useMemo(() => {
-    const query = supplementFilter.trim().toLocaleLowerCase();
-    return [...repository.files].filter((file) => !query || file.path.toLocaleLowerCase().includes(query)).sort((left, right) => left.path.localeCompare(right.path));
-  }, [repository.files, supplementFilter]);
 
   const persistStaleReferences = useEffectEvent(() => {
     // A delayed effect must use the journal's latest view, never an older render's list.
@@ -519,7 +500,7 @@ export function QuestionPanel({ onShowGraph, repository, currentFile, filesById,
           ? chosen.length ? chosen : value.candidates.slice(0, Math.min(12, value.candidates.length)).map((candidate) => candidate.fileId)
           : [currentFile.id, ...chosen.filter((fileId) => fileId !== currentFile.id)].slice(0, 12);
         const nextRanges = Object.fromEntries(value.candidates.map((candidate) => [candidate.fileId, ranges[candidate.fileId] ?? candidate.suggestedRange ?? { startLine: 1, endLine: candidate.lineCount }]));
-        setSearchSuggestions(value.searchSuggestions ?? []); setSupplementalResults([]); setExplicitSelection(true); setCandidates(value.candidates); setSelectedFiles(defaultSelection); setRanges(nextRanges); setScopeContextKey(contextKey); setStage("scope"); setScopeOpen(true);
+        setExplicitSelection(true); setCandidates(value.candidates); setSelectedFiles(defaultSelection); setRanges(nextRanges); setStage("scope"); setScopeOpen(true);
         setMessage(value.blockers?.includes("ambiguous_definition") ? "找到多个可能相关的定义，可选择范围后发送。" : value.blockers?.includes("character_limit") ? sourceFreeConversation ? "问题和历史消息超过 60,000 字符，请在上下文中减少携带的历史消息。" : "发送内容超过 60,000 字符。请缩小行范围或移除文件。" : value.retrievalInsufficient ? "自动检索没有找到足够依据。请手动选择与问题相关的文件；最多 12 个文件、总发送内容 60,000 字符。" : "候选源码超出发送范围上限，请选择文件并调整行范围。未发送任何源码。");
       } else if (value.preview.retrievalInsufficient && !fileIds?.length && !(unified && mode === "question")) {
         setStage("error"); setMessage("没有找到足够的源码依据，请添加相关文件后再发送。");
@@ -546,7 +527,6 @@ export function QuestionPanel({ onShowGraph, repository, currentFile, filesById,
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [unified, active, storageBusy, backendAvailable, modelSettings, question, mode, contextKey, excludedHistory, additionalFileIds, loadedSessionKey, activeId, ranges, selectedFiles, explicitSelection, stage === "generating"]);
 
-  const submitQuestion = (event: FormEvent) => { event.preventDefault(); void startPreview(); };
   const cancel = () => {
     generatingRef.current = false;
     invalidateRequest();
@@ -666,9 +646,7 @@ export function QuestionPanel({ onShowGraph, repository, currentFile, filesById,
     const remaining = visibleConversations.filter((item) => item.id !== currentConversation.id);
     setConversations(remaining); persistConversations(remaining); setActiveId(remaining[0]?.id ?? ""); setMessage("已删除此问答会话。");
   };
-  const retryMessage = (text: string) => { setQuestion(text); void startPreview(text); };
   const changeQuestion = (value: string) => { setQuestion(value); if (!generatingRef.current) { invalidateRequest(); setPreviewState(null); if (stage !== "scope") setStage("idle"); } };
-  const updateScope = (nextFiles: string[], nextRanges = ranges) => { setSelectedFiles(nextFiles); setRanges(nextRanges); setPreviewState(null); setStage("scope"); };
 
 
   const chooseTask = (next: AiMode) => {

@@ -157,6 +157,10 @@ export function useGraphCoordinates({
   const nodePositionsPersisted = useRef(new Map<string, string>());
   const dirtyNodePositions = useRef(new Map<string, Set<string>>());
   const pendingNodePositionRestore = useRef<{ key: string; workspaceId: string; signature: string } | null>(null);
+  const stageNodePositionRestore = useCallback((pending: NonNullable<typeof pendingNodePositionRestore.current>) => {
+    pendingNodePositionRestore.current = pending;
+  }, []);
+
   const [internalNodePositionsReadyKey, setInternalNodePositionsReadyKey] = useState<string | null>(null);
   const nodePositionsReadyKey = externalNodePositionsReadyKey !== undefined ? externalNodePositionsReadyKey : internalNodePositionsReadyKey;
   const setNodePositionsReadyKey = externalSetNodePositionsReadyKey ?? setInternalNodePositionsReadyKey;
@@ -192,7 +196,7 @@ export function useGraphCoordinates({
     if (nodePositionSignature(current) !== pending.signature) return;
     pendingNodePositionRestore.current = null;
     setNodePositionsReadyKey(pending.key);
-  }, [nodePositions, nodePositionSignature, workspaceId]);
+  }, [nodePositions, nodePositionSignature, workspaceId, setNodePositionsReadyKey]);
 
   // Synchronize graph nodes and run collision avoidance
   useEffect(() => {
@@ -367,7 +371,7 @@ export function useGraphCoordinates({
     nodePositionsRef,
     nodePositionsPersisted,
     dirtyNodePositions,
-    pendingNodePositionRestore,
+    stageNodePositionRestore,
     nodePositionsReadyKey,
     setNodePositionsReadyKey,
     activeNodePositionKeyRef,

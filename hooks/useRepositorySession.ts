@@ -11,7 +11,7 @@ import { createRepositorySessionGate } from "@/data/repository-session.mjs";
 import { createOpenRequestGate } from "@/data/open-request-gate.mjs";
 import { enqueueWorkspacePersistence } from "@/data/workspace-persistence.mjs";
 import { failInvestigationRead } from "@/data/investigation-state.mjs";
-import type { RepositorySnapshot, SourceReference } from "@/data/model";
+import type { RepositorySnapshot } from "@/data/model";
 
 export const BOOT_SNAPSHOT: RepositorySnapshot = {
   id: "sample-loading",
@@ -56,7 +56,6 @@ export interface UseRepositorySessionOptions {
   desktopMode: boolean;
   savedDataClearBusy?: boolean;
   isSavedDataClearBusy?: () => boolean;
-  onClearAiContext: () => void;
   onSnapshotApplied: (snapshot: RepositorySnapshot) => void;
   onUpdatedSnapshotApplied: (snapshot: RepositorySnapshot) => void;
   onRestoreWorkspaceState: (snapshot: RepositorySnapshot, saved: LocalWorkspaceState) => string | undefined;
@@ -67,14 +66,12 @@ export interface UseRepositorySessionOptions {
   setWorkspacePersistenceReadyKeys: React.Dispatch<React.SetStateAction<Set<string>>>;
   setWorkspaceReadFailures: React.Dispatch<React.SetStateAction<Set<string>>>;
   setNodePositionsReadyKey: React.Dispatch<React.SetStateAction<string | null>>;
-  onDispatchAiMessage: (message: string) => void;
 }
 
 export function useRepositorySession({
   desktopMode,
   savedDataClearBusy = false,
   isSavedDataClearBusy,
-  onClearAiContext,
   onSnapshotApplied,
   onUpdatedSnapshotApplied,
   onRestoreWorkspaceState,
@@ -85,7 +82,6 @@ export function useRepositorySession({
   setWorkspacePersistenceReadyKeys,
   setWorkspaceReadFailures,
   setNodePositionsReadyKey,
-  onDispatchAiMessage,
 }: UseRepositorySessionOptions) {
   const [repository, setRepository] = useState<RepositorySnapshot>(BOOT_SNAPSHOT);
   const [recentRepositories, setRecentRepositories] = useState<LocalWorkspaceState["recentRepositories"]>([]);
@@ -113,7 +109,6 @@ export function useRepositorySession({
   const openRequestGate = useRef(createOpenRequestGate());
   const openRequestController = useRef<AbortController | null>(null);
   const applyUpdatedSnapshotRef = useRef<(snapshot: RepositorySnapshot, epoch: number) => boolean>(() => false);
-  const onDispatchAiMessageRef = useRef(onDispatchAiMessage);
   const closeRepositoryRef = useRef<() => Promise<void>>(async () => {});
 
   const beginRepositorySession = useCallback(() => {
@@ -143,8 +138,7 @@ export function useRepositorySession({
   );
   useEffect(() => {
     applyUpdatedSnapshotRef.current = applyUpdatedSnapshot;
-    onDispatchAiMessageRef.current = onDispatchAiMessage;
-  }, [applyUpdatedSnapshot, onDispatchAiMessage]);
+  }, [applyUpdatedSnapshot]);
 
   // Desktop backend status event listener
   useEffect(() => {
@@ -152,11 +146,10 @@ export function useRepositorySession({
     return window.repoLens?.onBackendStatus(({ available, message }) => {
       setDesktopBackendError(available ? "" : message);
       if (!available) {
-        onClearAiContext();
         setRepoMessage(message);
       }
     });
-  }, [desktopMode, onClearAiContext]);
+  }, [desktopMode]);
 
   // Open repository path
   const isClearBusy = useCallback(() => Boolean(savedDataClearBusy || isSavedDataClearBusy?.()), [savedDataClearBusy, isSavedDataClearBusy]);
@@ -300,8 +293,7 @@ export function useRepositorySession({
               (next.sequence ?? 0) < sequence
             )
               return;
-            if (applyUpdatedSnapshotRef.current(next, epoch))
-              onDispatchAiMessageRef.current("仓库文件已变化，旧 AI 讲解需要重新生成；相关源码引用已停用。");
+            applyUpdatedSnapshotRef.current(next, epoch);
           } catch (error) {
             if (!controller.signal.aborted && repositoryGate.current.isCurrent(epoch, repositoryId))
               setRepoMessage((error as Error).message);
@@ -329,7 +321,6 @@ export function useRepositorySession({
     openRequestGate.current.invalidate();
     openRequestController.current?.abort();
     openRequestController.current = null;
-    onClearAiContext();
     onLoadSampleStart?.();
     setRepoMessage("正在加载内置示例仓库…");
     try {

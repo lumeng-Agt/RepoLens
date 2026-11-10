@@ -11,8 +11,8 @@ import { BookOpenText, ChevronRight, Code2, FileCode2, FileText, MessageSquare, 
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { AiResultView, type AiResultRecord } from "@/components/repolens/AiResultView";
 import { ReadingArtifactsPanel } from "@/components/repolens/ReadingArtifactsPanel";
-import type { AiLineRange, AiMode, AiScopeCandidate } from "@/data/explanation-provider";
-import type { AiPreview, AiRouteRecord, FileRecord, ReadingNote, RepositorySnapshot, SourceReference } from "@/data/model";
+import type { AiMode } from "@/data/explanation-provider";
+import type { AiRouteRecord, FileRecord, ReadingNote, RepositorySnapshot, SourceReference } from "@/data/model";
 import { visibleLineWindow } from "@/data/source-window.mjs";
 
 const HIGHLIGHT_CACHE_LIMIT = 4;
@@ -121,8 +121,8 @@ function ReferenceButton({ icon, title, caption, onClick }: { icon: ReactNode; t
 }
 
 export function FileDetailsPanel({ repository, currentFile, filesById, mobileView, detailTab, onDetailTabChange, onOpenAi, onChatSelection, onOpenReference, backendAvailable = true,
-  aiSettings, onOpenModelSettings, onOpenRepository, canOpenRepository, onPreviewAi, aiBusy, aiPreview, aiCandidates,
-  pendingAiMode, selectedAiFiles, selectedAiRanges, onToggleAiFile, onAiRangeChange, onGenerateAi, onCancelAi, aiMessage, aiResult, aiStale,
+  aiSettings, onOpenModelSettings, onOpenRepository, canOpenRepository, onPreviewAi,
+  aiResult, aiStale,
   sourceText, sourceStatus, sourceError, focusedLine, onClearFocus, codeViewportRef, readingNotes, savedTours, sessionVersion, savedDataClearGeneration, savedDataClearBusy, onSaveReadingNotes, onSaveTours, onActivateTour, onGuideNoteCreated,
 }: {
   repository: RepositorySnapshot; currentFile: FileRecord; filesById: Map<string, FileRecord>; mobileView: "files" | "graph" | "details"; detailTab: string; backendAvailable?: boolean;
@@ -130,11 +130,7 @@ export function FileDetailsPanel({ repository, currentFile, filesById, mobileVie
   onDetailTabChange: (tab: string) => void; onOpenAi: () => void; onOpenReference: (reference: SourceReference) => void;
   aiSettings: { baseUrl: string; model: string; apiKey: string; configured: boolean };
   onOpenModelSettings: () => void; onOpenRepository: () => void; canOpenRepository: boolean; onPreviewAi: (mode: AiMode, fileIds?: string[], goal?: string) => void;
-  aiPreview: AiPreview | null;
-  aiBusy: boolean; aiCandidates: AiScopeCandidate[]; pendingAiMode: AiMode | null; selectedAiFiles: string[];
-  selectedAiRanges: Record<string, AiLineRange>; onToggleAiFile: (fileId: string, checked: boolean) => void;
-  onAiRangeChange: (fileId: string, range: AiLineRange) => void; onGenerateAi: () => void; onCancelAi: () => void;
-  aiMessage: string; aiResult: AiResultRecord | null; aiStale: boolean;
+  aiResult: AiResultRecord | null; aiStale: boolean;
   sourceText: string; sourceStatus: "loading" | "loaded" | "error"; sourceError?: string;
   focusedLine: SourceReference | null; onClearFocus: () => void; codeViewportRef: RefObject<HTMLDivElement | null>;
   readingNotes: ReadingNote[]; savedTours: AiRouteRecord[]; sessionVersion: number; savedDataClearGeneration: number; savedDataClearBusy: boolean; onSaveReadingNotes: (notes: ReadingNote[], expected?: { repositoryId: string; workspaceId: string; sessionVersion: number; clearGeneration: number }) => Promise<boolean>; onSaveTours: (tours: AiRouteRecord[], expected?: { repositoryId: string; workspaceId: string; sessionVersion: number; clearGeneration: number }) => Promise<boolean>; onActivateTour: (route: AiRouteRecord) => void; onGuideNoteCreated?: () => void;

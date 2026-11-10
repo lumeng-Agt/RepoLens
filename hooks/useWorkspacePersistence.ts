@@ -5,12 +5,10 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import {
   localWorkspaceProvider,
   type LocalWorkspaceState,
-  type WorkspaceSession,
 } from "@/data/providers";
-import { markWorkspacePersistencePending, enqueueWorkspacePersistence } from "@/data/workspace-persistence.mjs";
+import { enqueueWorkspacePersistence } from "@/data/workspace-persistence.mjs";
 import {
   failInvestigationRead,
-  invalidateInvestigationTasks,
   registerInvestigationSession,
   restoreInvestigations,
 } from "@/data/investigation-state.mjs";
@@ -39,10 +37,7 @@ import {
   repositoryWorkspaceId,
   workspaceSession,
 } from "@/hooks/useRepositorySession";
-import {
-  WORKSPACE_LAYOUT_PERSISTENCE_ID,
-  WORKSPACE_LAYOUT_STORAGE_KEY,
-} from "@/hooks/useWorkspaceLayout";
+import { WORKSPACE_LAYOUT_PERSISTENCE_ID } from "@/hooks/useWorkspaceLayout";
 
 export interface UseWorkspacePersistenceOptions {
   repository: RepositorySnapshot;
@@ -52,7 +47,6 @@ export interface UseWorkspacePersistenceOptions {
   repoBusy: boolean;
   savedDataClearBusy?: boolean;
   setSavedDataClearBusy?: React.Dispatch<React.SetStateAction<boolean>>;
-  onClearAiContext: () => void;
   onSetRepoMessage: (message: string) => void;
   repositoryGate: React.MutableRefObject<{
     current: () => { epoch: number };
@@ -66,7 +60,7 @@ export interface UseWorkspacePersistenceOptions {
   setNodePositions: React.Dispatch<React.SetStateAction<Map<string, { x: number; y: number }>>>;
   nodePositionsPersisted: React.MutableRefObject<Map<string, string>>;
   dirtyNodePositions: React.MutableRefObject<Map<string, Set<string>>>;
-  pendingNodePositionRestore: React.MutableRefObject<{ key: string; workspaceId: string; signature: string } | null>;
+  stageNodePositionRestore: (pending: { key: string; workspaceId: string; signature: string }) => void;
   setNodePositionsReadyKey: React.Dispatch<React.SetStateAction<string | null>>;
   setRecentRepositories: React.Dispatch<React.SetStateAction<LocalWorkspaceState["recentRepositories"]>>;
   progressMemory: Map<string, string>;
@@ -112,7 +106,6 @@ export function useWorkspacePersistence({
   repoBusy,
   savedDataClearBusy: externalSavedDataClearBusy,
   setSavedDataClearBusy: externalSetSavedDataClearBusy,
-  onClearAiContext,
   onSetRepoMessage,
   repositoryGate,
   workspacePersistenceReadyKeys,
@@ -123,7 +116,7 @@ export function useWorkspacePersistence({
   setNodePositions,
   nodePositionsPersisted,
   dirtyNodePositions,
-  pendingNodePositionRestore,
+  stageNodePositionRestore,
   setNodePositionsReadyKey,
   setRecentRepositories,
   progressMemory,
@@ -286,11 +279,11 @@ export function useWorkspacePersistence({
         })
       );
       const savedNodePositions = { ...validSavedNodePositions, ...inMemoryPositions };
-      pendingNodePositionRestore.current = {
+      stageNodePositionRestore({
         key: positionsKey,
         workspaceId: targetWorkspaceId,
         signature: nodePositionSignature(savedNodePositions),
-      };
+      });
       setRecentRepositories(saved.recentRepositories);
       for (const [key, value] of Object.entries(saved.progress)) {
         if (!progressMemory.has(key)) progressMemory.set(key, value);
@@ -380,7 +373,7 @@ export function useWorkspacePersistence({
       nodePositionsPersisted,
       nodePositionsRef,
       onSetRepoMessage,
-      pendingNodePositionRestore,
+      stageNodePositionRestore,
       persistReadingArtifactJournal,
       progressMemory,
       setNodePositions,
@@ -459,6 +452,7 @@ export function useWorkspacePersistence({
       workspaceId,
       workspacePersistenceReadyKeys,
       workspaceReadFailures,
+      savedDataClearActiveRef,
     ]
   );
 
@@ -527,6 +521,7 @@ export function useWorkspacePersistence({
       workspaceId,
       workspacePersistenceReadyKeys,
       workspaceReadFailures,
+      savedDataClearActiveRef,
     ]
   );
 
@@ -573,6 +568,7 @@ export function useWorkspacePersistence({
     setNodePositionsReadyKey,
     setWorkspacePersistenceReadyKeys,
     setWorkspaceReadFailures,
+    savedDataClearActiveRef,
   ]);
 
   const retryReadingArtifactSave = useCallback(async () => {
@@ -704,11 +700,39 @@ export function useWorkspacePersistence({
     setWorkspacePersistenceReadyKeys,
     setWorkspaceReadFailures,
     workspaceId,
+    savedDataClearActiveRef,
   ]);
+
+  const refreshAiReadingResults = useCallback(async (targetWorkspaceId: string) => {
+    if (targetWorkspaceId !== workspaceId) return;
+    const epoch = repositoryGate.current.current().epoch;
+    const clearGeneration = savedDataClearGenerationRef.current;
+    try {
+      const saved = await localWorkspaceProvider.get(targetWorkspaceId);
+      if (saved.persistenceReady === false || savedDataClearActiveRef.current
+        || clearGeneration !== savedDataClearGenerationRef.current
+        || !repositoryGate.current.isCurrent(epoch, repository.id)) return;
+      setAiResultsByFile(previous => {
+        const next = new Map(previous);
+        for (const [fileId, result] of Object.entries(saved.aiResults)) {
+          next.set(`${targetWorkspaceId}:${fileId}`, result as AiResultRecord);
+        }
+        return next;
+      });
+      const journal = readingArtifactJournals.current.get(targetWorkspaceId)
+        ?? createReadingArtifactJournal<ReadingNote, AiRouteRecord>();
+      const nextTours = new Map(savedToursRef.current);
+      nextTours.set(targetWorkspaceId, applyReadingArtifactJournal(saved.savedTours ?? [], journal, "tours"));
+      savedToursRef.current = nextTours;
+      setSavedToursByWorkspace(nextTours);
+    } catch {
+      // The result is still available in chat if refreshing the workspace fails.
+    }
+  }, [repository.id, repositoryGate, savedDataClearActiveRef, workspaceId]);
 
   const clearing = useWorkspaceClear({
     desktopMode, dirtyNodePositions, guideNavigationRef, guidePreferencesRef, guideSaveSequenceRef,
-    guideTourPracticeRef, guideWriteQueueRef, nodePositionsPersisted, onClearAiContext, onSetRepoMessage,
+    guideTourPracticeRef, guideWriteQueueRef, nodePositionsPersisted, onSetRepoMessage,
     progressMemory, readingArtifactJournals, readingNotesRef, repoBusy, repository,
     savedDataClearActiveRef, savedDataClearBusy, savedDataClearGenerationRef, savedToursRef, setAiResultsByFile,
     setAiRoutesByRepository, setBrowserLayoutSaveError, setBrowserProgressSaveFailures, setCompletedSteps, setGuideNoticeAvailable,
@@ -722,14 +746,12 @@ export function useWorkspacePersistence({
     readingNotesByWorkspace,
     setReadingNotesByWorkspace,
     savedToursByWorkspace,
-    setSavedToursByWorkspace,
     readingNotesRef,
     savedToursRef,
     aiResultsByFile,
-    setAiResultsByFile,
     aiRoutesByRepository,
     setAiRoutesByRepository,
-    readingArtifactJournals,
+    refreshAiReadingResults,
     savedDataClearBusy,
     savedDataClearGeneration,
     savedDataClearGenerationRef,

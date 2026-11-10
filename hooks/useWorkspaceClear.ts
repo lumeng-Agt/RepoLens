@@ -24,7 +24,6 @@ type WorkspaceClearOptions = Pick<UseWorkspacePersistenceOptions,
   "guideTourPracticeRef" |
   "guideWriteQueueRef" |
   "nodePositionsPersisted" |
-  "onClearAiContext" |
   "onSetRepoMessage" |
   "progressMemory" |
   "repoBusy" |
@@ -62,7 +61,7 @@ type WorkspaceClearOptions = Pick<UseWorkspacePersistenceOptions,
 
 export function useWorkspaceClear({
   desktopMode, dirtyNodePositions, guideNavigationRef, guidePreferencesRef, guideSaveSequenceRef,
-  guideTourPracticeRef, guideWriteQueueRef, nodePositionsPersisted, onClearAiContext, onSetRepoMessage,
+  guideTourPracticeRef, guideWriteQueueRef, nodePositionsPersisted, onSetRepoMessage,
   progressMemory, readingArtifactJournals, readingNotesRef, repoBusy, repository,
   savedDataClearActiveRef, savedDataClearBusy, savedDataClearGenerationRef, savedToursRef, setAiResultsByFile,
   setAiRoutesByRepository, setBrowserLayoutSaveError, setBrowserProgressSaveFailures, setCompletedSteps, setGuideNoticeAvailable,
@@ -95,7 +94,7 @@ export function useWorkspaceClear({
       setClearRetryPending(true);
       onSetRepoMessage(`保存副本清理未完成，新阅读记录已保留：${error instanceof Error ? error.message : "请重试。"}`);
     } finally { copyCleanupBusyRef.current = false; }
-  }, [repository, workspaceId, onSetRepoMessage]);
+  }, [repository, workspaceId, onSetRepoMessage, readingNotesRef, savedToursRef]);
 
   const clearCurrentSavedData = useCallback(async () => {
     if (copyCleanupBusyRef.current) return;
@@ -107,7 +106,6 @@ export function useWorkspaceClear({
     setSavedDataClearBusy(true);
     invalidateInvestigationTasks(workspaceId);
     setChatClearingTarget(workspaceId);
-    onClearAiContext();
     pendingClearScope.current = "current";
     pendingClearWorkspace.current = workspaceId;
     setClearRetryPending(false);
@@ -181,7 +179,6 @@ export function useWorkspaceClear({
     desktopMode,
     dirtyNodePositions,
     nodePositionsPersisted,
-    onClearAiContext,
     onSetRepoMessage,
     progressMemory,
     repoBusy,
@@ -193,6 +190,17 @@ export function useWorkspaceClear({
     setTourIndex,
     setTourVisibilityOverride,
     workspaceId,
+    savedDataClearActiveRef,
+    savedDataClearGenerationRef,
+    setSavedDataClearGeneration,
+    setSavedDataClearBusy,
+    setAiResultsByFile,
+    setAiRoutesByRepository,
+    setReadingNotesByWorkspace,
+    setSavedToursByWorkspace,
+    readingArtifactJournals,
+    readingNotesRef,
+    savedToursRef,
   ]);
 
   const clearAllSavedData = useCallback(async () => {
@@ -207,7 +215,6 @@ export function useWorkspaceClear({
     setChatClearingTarget("*");
     guideSaveSequenceRef.current += 1;
     await guideWriteQueueRef.current;
-    onClearAiContext();
     pendingClearScope.current = "all";
     setClearRetryPending(false);
     let preserveMemory = false;
@@ -299,7 +306,6 @@ export function useWorkspaceClear({
     guideTourPracticeRef,
     guideWriteQueueRef,
     nodePositionsPersisted,
-    onClearAiContext,
     onSetRepoMessage,
     progressMemory,
     repoBusy,
@@ -320,6 +326,17 @@ export function useWorkspaceClear({
     setWorkspaceLayoutReady,
     workspaceId,
     workspaceLayoutInitializedRef,
+    savedDataClearActiveRef,
+    savedDataClearGenerationRef,
+    setSavedDataClearGeneration,
+    setSavedDataClearBusy,
+    setAiResultsByFile,
+    setAiRoutesByRepository,
+    setReadingNotesByWorkspace,
+    readingNotesRef,
+    setSavedToursByWorkspace,
+    savedToursRef,
+    readingArtifactJournals,
   ]);
 
   return { questionClearVersion, chatClearingTarget, chatClearVersions, chatClearAllVersion,
