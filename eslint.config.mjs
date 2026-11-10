@@ -3,7 +3,7 @@ import tseslint from "typescript-eslint";
 import reactHooks from "eslint-plugin-react-hooks";
 
 export default defineConfig([
-  globalIgnores([".next/**", "next-env.d.ts", "dist/**", "desktop/renderer/**", "release/**", "test-results/**", "playwright-report/**", ".artifacts/**", ".sites-runtime/**", ".wrangler/**"]),
+  globalIgnores([".next/**", "next-env.d.ts", "dist/**", "desktop/renderer/**", "release/**", "test-results/**", "playwright-report/**", ".artifacts/**", "work/**", ".sites-runtime/**", ".wrangler/**"]),
   {
     files: ["**/*.{ts,tsx,mts}"],
     extends: [tseslint.configs.recommended, reactHooks.configs.flat.recommended],

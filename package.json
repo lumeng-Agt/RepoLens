@@ -24,7 +24,7 @@
     "package:desktop": "node scripts/package-desktop-verified.mjs",
     "preview:desktop": "npm run build:desktop && electron .",
     "start": "node scripts/with-local-service.mjs scripts/run-framework.mjs preview",
-    "lint": "eslint .",
+    "lint": "eslint . --max-warnings 0",
     "test:desktop:smoke": "node scripts/desktop-smoke.mjs",
     "postinstall": "node scripts/patch-panel-observer.mjs"
   },
