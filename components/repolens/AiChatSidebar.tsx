@@ -15,12 +15,16 @@ export function AiChatSidebar({ onShowGraph, open, repository, currentFile, inte
 }) {
   const workspaceId = repository.workspaceId ?? repository.id;
   const [workspaces, setWorkspaces] = useState<Map<string, Workspace>>(new Map());
-  useEffect(() => {
-    if (repository.source !== "local" || !open) return;
-    // Keep the last known repository/file per workspace while the sidebar is open.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setWorkspaces((previous) => new Map(previous).set(workspaceId, { repository, file: currentFile }));
-  }, [repository, currentFile, workspaceId, open]);
+  const cachedWorkspace = workspaces.get(workspaceId);
+  // Adjust this component's cache before rendering children, so a new snapshot
+  // never commits with the previous file. Keep mounted workspaces for background replies.
+  // The parent supplies immutable snapshot/file references. Compare the full
+  // identities so updated source metadata is not lost when IDs stay the same.
+  // This local state update does not rerender the parent or recreate its props.
+  if (repository.source === "local" && open &&
+    (cachedWorkspace?.repository !== repository || cachedWorkspace?.file !== currentFile)) {
+    setWorkspaces(new Map(workspaces).set(workspaceId, { repository, file: currentFile }));
+  }
   useEffect(() => {
     if (!open) return;
     const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape" && !event.defaultPrevented) { event.preventDefault(); onClose(); } };

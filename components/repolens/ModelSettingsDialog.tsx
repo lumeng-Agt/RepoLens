@@ -22,9 +22,16 @@ export function ModelSettingsDialog({ open, available, busy, configured, dirty, 
   const [models, setModels] = useState<string[]>([]);
   const [checking, setChecking] = useState(false);
   const checkController = useRef<AbortController | null>(null);
-  // Invalidate transient check results when the edited configuration changes.
-  // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { checkController.current?.abort(); setChecking(false); setCheckStatus(""); setModels([]); }, [open, values.baseUrl, values.model, values.apiKey, values.authMode]);
+  const [checkContext, setCheckContext] = useState({ open, values });
+  // Reset check results before committing edited fields, without remounting the
+  // form (which would lose keyboard focus). Cancelling transport remains an effect.
+  // useModelSettings replaces the draft on edits. Retain its identity instead of
+  // copying configuration fields, including the key, into a second state object.
+  if (checkContext.open !== open || checkContext.values !== values) {
+    setCheckContext({ open, values });
+    setChecking(false); setCheckStatus(""); setModels([]);
+  }
+  useEffect(() => { checkController.current?.abort(); }, [open, values]);
   useEffect(() => () => checkController.current?.abort(), []);
   const check = async (action: string) => {
     const controller = new AbortController(); checkController.current?.abort(); checkController.current = controller;

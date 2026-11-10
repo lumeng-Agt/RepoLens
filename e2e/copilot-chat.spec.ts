@@ -60,6 +60,11 @@ test("chat streams into its own scroll area, freezes context, preserves drafts a
     await input.fill("下一条草稿");
     await page.getByRole("treeitem", { name: "helper.ts", exact: true }).click();
     await expect(page.getByText("第一段正在到达。", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "收起 AI 面板", exact: true }).click();
+    await page.getByRole("button", { name: "打开 AI 聊天", exact: true }).click();
+    await expect(input).toHaveValue("下一条草稿");
+    await expect(page.getByRole("button", { name: "停止", exact: true })).toBeVisible();
+    expect(calls).toBe(1);
     await page.screenshot({ path: ".artifacts/copilot-chat/generating-1440.png" });
     const result = { result: { answer: "第一段正在到达。\n\n- 理解静态值\n- 查看引用\n\n```ts\nexport const answer = 42;\n```", insufficientEvidence: false, references: [{ fileId: "main.ts", startLine: 1 }] }, cached: false, repositoryId: snapshot.id, revision: "r1", entryFileId: "main.ts", mode: "question" };
     held!.end(`data: ${JSON.stringify({ type: "complete", requestId: previewId, repositoryId: snapshot.id, revision: "r1", result })}\n\n`);
