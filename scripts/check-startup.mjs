@@ -49,23 +49,17 @@ async function waitForTcp(port, child, timeoutMs = 120_000) {
   throw new Error(`Service did not open its port within ${timeoutMs}ms.`);
 }
 
-function startService(mode, uiPort, apiPort, logPath, persistPath) {
+function startService(mode, uiPort, apiPort, logPath, userDataPath) {
   const environment = {
     ...process.env,
     REPOLENS_PORT: String(apiPort),
     REPOLENS_UI_PORT: String(uiPort),
-    REPOLENS_USER_DATA_PATH: `${persistPath}-user-data`,
-    NEXT_PUBLIC_REPOLENS_API_ORIGIN: `http://127.0.0.1:${apiPort}`,
+    REPOLENS_USER_DATA_PATH: userDataPath,
+    VITE_REPOLENS_API_ORIGIN: `http://127.0.0.1:${apiPort}`,
     REPOLENS_SERVER_LOG: logPath,
-    VINEXT_NO_DEV_LOCK: '1',
   };
-  const args = mode === 'development'
-    ? ['scripts/with-local-service.mjs', 'scripts/run-framework.mjs', 'dev', '--host', '127.0.0.1', '--port', String(uiPort)]
-    : [
-      'scripts/with-local-service.mjs', '--import', './scripts/sites-env.mjs', './node_modules/wrangler/bin/wrangler.js',
-      'dev', '--config', 'dist/server/wrangler.json', '--local', '--persist-to', persistPath,
-      '--ip', '127.0.0.1', '--inspector-port', '0', '--port', String(uiPort),
-    ];
+  const args = ['scripts/with-local-service.mjs', 'scripts/run-framework.mjs',
+    mode === 'development' ? 'dev' : 'preview', '--port', String(uiPort)];
   const child = spawn(process.execPath, args, { cwd: root, env: environment, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe', 'ipc'], detached: process.platform !== 'win32' });
   const pids = [];
   child.on('message', message => { if (message?.type === 'children') pids.push(...message.pids); });
@@ -110,7 +104,8 @@ async function browserProbe(browser, baseURL, { apiOrigin, repositoryPath, repos
   page.on('response', (response) => {
     const item = { url: response.url(), status: response.status() };
     if (response.status() >= 400) evidence.badResponses.push(item);
-    if (/browser-entry|__x00__virtual|page-[\w.-]+\.js|index-[\w.-]+\.js/.test(response.url())) evidence.entryResponses.push(item);
+    const pathname = new URL(response.url()).pathname;
+    if (pathname === "/app/main.tsx" || /^\/assets\/index-[\w.-]+\.js$/.test(pathname)) evidence.entryResponses.push(item);
   });
   page.on('console', (message) => { if (message.type() === 'error') evidence.consoleErrors.push(message.text()); });
   page.on('pageerror', (error) => evidence.pageErrors.push(error.message));
@@ -176,16 +171,16 @@ async function browserProbe(browser, baseURL, { apiOrigin, repositoryPath, repos
 
 async function checkStart(mode, iteration, browser, scratchRoot) {
   const uiPort = await reservePort();
-  const productionApiOrigin = process.env.NEXT_PUBLIC_REPOLENS_API_ORIGIN ?? 'http://127.0.0.1:4318';
+  const productionApiOrigin = process.env.VITE_REPOLENS_API_ORIGIN ?? 'http://127.0.0.1:4318';
   const apiPort = mode === 'production' ? Number(new URL(productionApiOrigin).port || 4318) : await reservePort();
-  const persistPath = path.join(scratchRoot, `wrangler-${mode}-${iteration}`);
+  const userDataPath = path.join(scratchRoot, `user-data-${mode}-${iteration}`);
   const logPath = path.join(scratchRoot, `service-${mode}-${iteration}.log`);
   const baseURL = `http://127.0.0.1:${uiPort}/`;
   const repositoryPath = path.join(scratchRoot, `repository-${mode}-${iteration}`);
   const repositoryName = path.basename(repositoryPath);
   await mkdir(repositoryPath, { recursive: true });
   await writeFile(path.join(repositoryPath, 'index.ts'), 'export const startupFixture = "STARTUP_FIXTURE_CONTENT";\n', 'utf8');
-  const service = startService(mode, uiPort, apiPort, logPath, persistPath);
+  const service = startService(mode, uiPort, apiPort, logPath, userDataPath);
   let failure;
   let browserFailure;
   try {
@@ -201,7 +196,6 @@ async function checkStart(mode, iteration, browser, scratchRoot) {
   if (!failure) {
     if (browserFailure) await removeTemporary(browserFailure);
     await rm(logPath, { force: true });
-    if (mode === 'production') await removeTemporary(persistPath);
     console.log(`PASS ${mode} cold start ${iteration}/${repetitions}: first navigation and reload succeeded without retry.`);
     return;
   }
@@ -225,11 +219,10 @@ async function checkStart(mode, iteration, browser, scratchRoot) {
     destinationRoot: evidenceRoot,
   });
   await rm(browserFailure ?? '', { recursive: true, force: true }).catch(() => {});
-  await removeTemporary(persistPath);
   throw new Error(`${mode} cold start ${iteration} failed; evidence saved to ${saved.destination}: ${failure.message}`);
 }
 
-await access(path.join(root, 'dist/server/wrangler.json')).catch(() => {
+await access(path.join(root, 'dist/index.html')).catch(() => {
   throw new Error('Production output is missing. Run `npm run build` before `npm run check:startup`.');
 });
 

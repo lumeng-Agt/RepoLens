@@ -87,7 +87,7 @@ const serviceOutput = [];
 const startupEvents = [{ stage: "service-spawn", at: Date.now() }];
 const service = spawn(process.execPath, [wrapper, framework, "dev", "--port", String(uiPort)], {
   cwd: projectRoot,
-  env: { ...process.env, REPOLENS_PORT: String(apiPort), REPOLENS_UI_PORT: String(uiPort), NEXT_PUBLIC_REPOLENS_API_ORIGIN: apiOrigin, REPOLENS_TEMP_ROOT: temporaryRoot, REPOLENS_USER_DATA_PATH: path.join(runDirectory, "user-data") },
+  env: { ...process.env, REPOLENS_PORT: String(apiPort), REPOLENS_UI_PORT: String(uiPort), VITE_REPOLENS_API_ORIGIN: apiOrigin, REPOLENS_TEMP_ROOT: temporaryRoot, REPOLENS_USER_DATA_PATH: path.join(runDirectory, "user-data") },
   stdio: ["ignore", "pipe", "pipe", "ipc"],
   detached: process.platform !== "win32",
   windowsHide: true,

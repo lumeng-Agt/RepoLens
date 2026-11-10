@@ -18,20 +18,16 @@ function forward(stream, target) {
 const childStdio = logStream ? ["inherit", "pipe", "pipe"] : "inherit";
 const serverStdio = logStream ? ["inherit", "pipe", "pipe", "ipc"] : ["inherit", "inherit", "inherit", "ipc"];
 const server = spawn(process.execPath, [path.join(root, "scripts/local-server.mjs")], { cwd: root, stdio: serverStdio, env: process.env, windowsHide: true, detached: process.platform !== "win32" });
-const ui = spawn(process.execPath, args, { cwd: root, stdio: childStdio, env: process.env, windowsHide: true, detached: process.platform !== "win32" });
-const children = [server, ui];
-process.send?.({ type: "children", pids: children.map(child => child.pid).filter(Boolean) });
-if (logStream) {
-  for (const child of children) {
-    forward(child.stdout, process.stdout);
-    forward(child.stderr, process.stderr);
-  }
-}
+let ui;
 let stopping = false;
 let exitCode = 0;
-let remaining = children.length;
+let remaining = 1;
+const startupTimer = setTimeout(() => {
+  process.stderr.write("RepoLens: 本地服务未在时限内就绪。\n");
+  stop(1);
+}, 20_000);
 function killTree(child, force = false) {
-  if (!child.pid || child.exitCode !== null) return;
+  if (!child?.pid || child.exitCode !== null || child.signalCode !== null) return;
   if (process.platform === "win32") {
     const killer = spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], { stdio: "ignore", windowsHide: true });
     killer.on("error", (error) => { process.stderr.write(`RepoLens: 无法结束子进程树（${error.message}）。\n`); exitCode = Math.max(exitCode, 1); });
@@ -48,6 +44,7 @@ function killTree(child, force = false) {
 function stop(code = 0) {
   if (stopping) return;
   stopping = true;
+  clearTimeout(startupTimer);
   exitCode = Math.max(exitCode, code);
   killTree(ui);
   if (server.exitCode !== null) return;
@@ -78,9 +75,13 @@ process.on("message", (message) => {
   stop(0);
   process.send?.({ type: "shutdownAccepted" });
 });
-for (const child of children) {
+function trackChild(child) {
+  if (logStream) {
+    forward(child.stdout, process.stdout);
+    forward(child.stderr, process.stderr);
+  }
   child.on("error", () => stop(1));
-  child.on("exit", (code) => {
+  child.on("close", (code) => {
     if (child === server && code !== 0) exitCode = Math.max(exitCode, code ?? 1);
     remaining -= 1;
     if (!stopping) stop(child === ui ? (code ?? 1) : 1);
@@ -91,3 +92,12 @@ for (const child of children) {
     }
   });
 }
+trackChild(server);
+server.on("message", message => {
+  if (message?.type !== "backend:ready" || stopping || ui) return;
+  clearTimeout(startupTimer);
+  ui = spawn(process.execPath, args, { cwd: root, stdio: childStdio, env: process.env, windowsHide: true, detached: process.platform !== "win32" });
+  remaining++;
+  trackChild(ui);
+  process.send?.({ type: "children", pids: [server.pid, ui.pid].filter(Boolean) });
+});

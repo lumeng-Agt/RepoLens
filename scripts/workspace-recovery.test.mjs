@@ -164,7 +164,7 @@ async function openDesktopPage({ localTour = [] } = {}) {
   await new Promise((resolve) => api.listen(0, "127.0.0.1", resolve));
   servers.push(api);
   const apiOrigin = `http://127.0.0.1:${api.address().port}`;
-  const vite = await createViteServer({ configFile: path.join(root, "desktop.vite.config.mjs"), cacheDir: path.join(temporaryDirectory, "vite-cache"), server: { host: "127.0.0.1", port: 0, strictPort: false }, logLevel: "error" });
+  const vite = await createViteServer({ configFile: path.join(root, "vite.config.ts"), mode: "desktop", cacheDir: path.join(temporaryDirectory, "vite-cache"), server: { host: "127.0.0.1", port: 0, strictPort: false }, logLevel: "error" });
   await vite.listen();
   servers.push(vite);
   const browser = await chromium.launch();

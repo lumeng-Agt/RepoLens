@@ -190,8 +190,7 @@ try {
     env: {
       ...process.env,
       REPOLENS_PORT: String(apiPort), REPOLENS_UI_PORT: String(uiPort), REPOLENS_TEMP_ROOT: tempWorkspaces, REPOLENS_USER_DATA_PATH: path.join(temporaryRoot, "user-data"),
-      NEXT_PUBLIC_REPOLENS_API_ORIGIN: apiOrigin,
-      VINEXT_NO_DEV_LOCK: "1",
+      VITE_REPOLENS_API_ORIGIN: apiOrigin,
       GIT_CONFIG_COUNT: "1",
       GIT_CONFIG_KEY_0: `url.${pathToFileURL(bare).href}.insteadOf`,
       GIT_CONFIG_VALUE_0: "https://github.com/repolens-test/ai-fixture.git",

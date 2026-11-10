@@ -1,6 +1,6 @@
 import { enterRepositoryLocation, openRepositoryMenu, test, expect } from "./fixtures";
 
-const apiOrigin = process.env.NEXT_PUBLIC_REPOLENS_API_ORIGIN ?? "http://127.0.0.1:4319";
+const apiOrigin = process.env.VITE_REPOLENS_API_ORIGIN ?? "http://127.0.0.1:4319";
 
 test("GitHub link opens the selected tree, confirms only a previewed AI scope, and refreshes remote metadata", async ({ page }) => {
   const sourceText = "import { value } from './dep';\nexport const main = value;\n";

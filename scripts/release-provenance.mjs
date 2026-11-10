@@ -6,8 +6,8 @@ import path from "node:path";
 const APPLICATION_ROOTS = ["desktop", "data", "scripts/local-server.mjs", "package.json"];
 const BUILD_INPUT_ROOTS = [
   "hooks", "lib", "public", "vendor", "app", "build", "components", "data", "desktop", "fixtures", "scripts",
-  ".npmrc", "next.config.ts", "next-env.d.ts", "cloudflare-env.d.ts", "components.json", "THIRD-PARTY-NOTICES.md", "package.json", "package-lock.json", "tsconfig.json", "vite.config.ts",
-  "desktop.vite.config.mjs", "postcss.config.mjs", "eslint.config.mjs", "wrangler.jsonc",
+  ".npmrc", "index.html", "components.json", "THIRD-PARTY-NOTICES.md", "package.json", "package-lock.json", "tsconfig.json", "vite.config.ts",
+  "postcss.config.mjs", "eslint.config.mjs",
 ];
 
 async function visit(root, relativePath, output, includeTests = false) {

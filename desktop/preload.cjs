@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-require-imports */
 const { contextBridge, ipcRenderer } = require("electron");
 const closeListeners = new Set();
 ipcRenderer.on("desktop:prepare-close", async (_event, id) => {

@@ -38,7 +38,7 @@ await new Promise((resolve, reject) => apiPortReservation.listen(0, "127.0.0.1",
 const reservedApiPort = apiPortReservation.address().port;
 const productionBuildEnvironment = {
   ...process.env,
-  NEXT_PUBLIC_REPOLENS_API_ORIGIN: `http://127.0.0.1:${reservedApiPort}`,
+  VITE_REPOLENS_API_ORIGIN: `http://127.0.0.1:${reservedApiPort}`,
 };
 let apiPortReleased = false;
 let defaultBuildRestored = false;
@@ -86,7 +86,7 @@ try {
     const record = { ...(layoutWarningCount === undefined ? {} : { layoutWarningCount }), name, command: `npm ${args.join(" ")}`, startedAt, finishedAt: new Date().toISOString(), exitCode: result.code, ...(result.signal ? { signal: result.signal } : {}) };
     results.push(record);
     if (name === "restore-default-browser-build") defaultBuildRestored = result.code === 0;
-    await writeFile(path.join(evidenceDirectory, "summary.json"), JSON.stringify({ node: process.version, platform: process.platform, productionApiOrigin: productionBuildEnvironment.NEXT_PUBLIC_REPOLENS_API_ORIGIN, defaultApiOriginRestored: results.some((step) => step.name === "restore-default-browser-build" && step.exitCode === 0), steps: results }, null, 2), "utf8");
+    await writeFile(path.join(evidenceDirectory, "summary.json"), JSON.stringify({ node: process.version, platform: process.platform, productionApiOrigin: productionBuildEnvironment.VITE_REPOLENS_API_ORIGIN, defaultApiOriginRestored: results.some((step) => step.name === "restore-default-browser-build" && step.exitCode === 0), steps: results }, null, 2), "utf8");
     if (result.code !== 0) {
       console.error(`[${name}] 失败，已停止后续检查；日志保留在 ${evidenceDirectory}`);
       process.exitCode = result.code;
@@ -102,7 +102,7 @@ try {
     const result = await runStep(["run", "build"], path.join(evidenceDirectory, "restore-default-browser-build.log"), process.env);
     results.push({ name: "restore-default-browser-build", command: "npm run build", startedAt, finishedAt: new Date().toISOString(), exitCode: result.code, ...(result.signal ? { signal: result.signal } : {}) });
     defaultBuildRestored = result.code === 0;
-    await writeFile(path.join(evidenceDirectory, "summary.json"), JSON.stringify({ node: process.version, platform: process.platform, productionApiOrigin: productionBuildEnvironment.NEXT_PUBLIC_REPOLENS_API_ORIGIN, defaultApiOriginRestored: defaultBuildRestored, steps: results }, null, 2), "utf8");
+    await writeFile(path.join(evidenceDirectory, "summary.json"), JSON.stringify({ node: process.version, platform: process.platform, productionApiOrigin: productionBuildEnvironment.VITE_REPOLENS_API_ORIGIN, defaultApiOriginRestored: defaultBuildRestored, steps: results }, null, 2), "utf8");
     if (!defaultBuildRestored) process.exitCode = 1;
   }
 }

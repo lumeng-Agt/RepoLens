@@ -56,7 +56,6 @@ for (const scenario of ["http-close", "browser-close"]) test(`GitHub smoke keeps
     REPOLENS_GITHUB_SMOKE_TEST_CLOSE_FAILURE: scenario === "http-close" ? "1" : "0",
     REPOLENS_GITHUB_SMOKE_TEST_BROWSER_CLOSE_FAILURE: scenario === "browser-close" ? "1" : "0",
     REPOLENS_TEMP_ROOT: path.join(testRoot, "service-content"),
-    VINEXT_NO_DEV_LOCK: "1",
     GIT_CONFIG_COUNT: "1",
     GIT_CONFIG_KEY_0: `url.${pathToFileURL(remote).href}.insteadOf`,
     GIT_CONFIG_VALUE_0: cloneUrl,

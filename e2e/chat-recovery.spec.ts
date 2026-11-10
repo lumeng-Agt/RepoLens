@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-const apiOrigin = process.env.NEXT_PUBLIC_REPOLENS_API_ORIGIN ?? "http://127.0.0.1:4319";
+const apiOrigin = process.env.VITE_REPOLENS_API_ORIGIN ?? "http://127.0.0.1:4319";
 let temporaryQuestionRepository = "";
 
 test.afterEach(async () => {

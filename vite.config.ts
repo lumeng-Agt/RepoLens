@@ -1,86 +1,26 @@
-import vinext from "vinext";
+import { fileURLToPath } from "node:url";
+import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
-import { readExecutionProfile } from "./scripts/execution-profile.mjs";
-import { readSitesHostingConfig } from "./data/sites-hosting-config.mjs";
-import { sites } from "./build/sites-vite-plugin";
-import { connectorPreview } from "./build/connector-preview-plugin.mjs";
 
-const SITE_CREATOR_PLACEHOLDER_DATABASE_ID =
-  "00000000-0000-4000-8000-000000000000";
+const root = fileURLToPath(new URL(".", import.meta.url));
 
-// macOS Seatbelt blocks FSEvents, so Codex previews need polling for HMR.
-const isCodexSeatbeltSandbox = process.env.CODEX_SANDBOX === "seatbelt";
-const managedLinux = readExecutionProfile() === "managed-linux";
-
-export default defineConfig(async ({ command }) => {
-  // Use Miniflare's local Request.cf placeholder unless fetching is requested.
-  process.env.CLOUDFLARE_CF_FETCH_ENABLED ??= "false";
-  process.env.WRANGLER_SEND_METRICS ??= "false";
-
-  // Keep Wrangler and Miniflare state project-local. These are non-secret tool
-  // settings; application environment belongs in ignored `.env*` files.
-  process.env.WRANGLER_WRITE_LOGS ??= "false";
-  process.env.WRANGLER_LOG_PATH ??= ".wrangler/logs";
-  process.env.WRANGLER_REGISTRY_PATH ??= ".wrangler/dev-registry";
-  process.env.MINIFLARE_REGISTRY_PATH ??= ".wrangler/registry";
-
-  const { d1, r2 } = await readSitesHostingConfig(new URL("./.openai/hosting.json", import.meta.url));
-  const localBindingConfig = {
-    main: "./build/sites-worker.ts",
-    compatibility_flags: ["nodejs_compat"],
-    d1_databases: d1
-      ? [{ binding: d1, database_name: "site-creator-d1", database_id: SITE_CREATOR_PLACEHOLDER_DATABASE_ID }]
-      : [],
-    r2_buckets: r2 ? [{ binding: r2, bucket_name: "site-creator-r2" }] : [],
-  };
-
-  // Wrangler snapshots its log path while the Cloudflare plugin is imported.
-  const { cloudflare } = await import("@cloudflare/vite-plugin");
-
-  return {
-    server: {
-      ...(managedLinux
-        ? { host: "0.0.0.0", allowedHosts: ["terminal.local"] }
-        : {}),
-      ...(isCodexSeatbeltSandbox
-        ? { watch: { useFsEvents: false, usePolling: true } }
-        : {}),
-    },
-    plugins: [
-      vinext(),
-      sites({ mockAuth: !managedLinux }),
-      connectorPreview(),
-      cloudflare({
-        viteEnvironment: { name: "rsc", childEnvironments: ["ssr"] },
-        inspectorPort: false,
-        config: {
-          ...localBindingConfig,
-          ...(command === "serve"
-            ? {
-                services: [
-                  {
-                    binding: "CONNECTORS",
-                    service: "sites-connector-preview",
-                    entrypoint: "ConnectorPreview",
-                  },
-                ],
-              }
-            : {}),
+export default defineConfig(({ mode }) => ({
+  plugins: [react()],
+  resolve: { alias: { "@": root } },
+  server: { host: "127.0.0.1", strictPort: true },
+  preview: { host: "127.0.0.1", strictPort: true },
+  build: {
+    outDir: mode === "desktop" ? "desktop/renderer" : "dist",
+    emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes("node_modules/react/") || id.includes("node_modules/react-dom/")) return "vendor-react";
+          if (id.includes("@xyflow") || id.includes("@dagrejs")) return "vendor-flow";
+          if (id.includes("radix-ui") || id.includes("@radix-ui") || id.includes("cmdk")) return "vendor-ui";
+          if (id.includes("lucide-react")) return "vendor-icons";
         },
-        ...(command === "serve"
-          ? {
-              auxiliaryWorkers: [
-                {
-                  config: {
-                    name: "sites-connector-preview",
-                    main: "./build/connector-preview-worker.mjs",
-                    compatibility_date: "2026-05-15",
-                  },
-                },
-              ],
-            }
-          : {}),
-      }),
-    ],
-  };
-});
+      },
+    },
+  },
+}));

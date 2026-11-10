@@ -38,7 +38,7 @@ async function watchRuntimeErrors(page: import("@playwright/test").Page) {
 async function expectRuntimeClean(page: import("@playwright/test").Page, consoleErrors: string[], label: string) {
   const runtimeErrors = await page.evaluate(() => (window as Window & { __repolensRuntimeErrors?: string[] }).__repolensRuntimeErrors ?? []);
   expect([...consoleErrors, ...runtimeErrors], label).toEqual([]);
-  await expect(page.locator("nextjs-portal, vite-error-overlay, [data-vinext-error-overlay], [data-vinext-dev-error-overlay]")).toHaveCount(0);
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
 }
 
 let modelServer: Server;

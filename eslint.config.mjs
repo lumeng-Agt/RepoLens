@@ -1,23 +1,23 @@
 import { defineConfig, globalIgnores } from "eslint/config";
-import nextVitals from "eslint-config-next/core-web-vitals";
-import nextTs from "eslint-config-next/typescript";
+import tseslint from "typescript-eslint";
+import reactHooks from "eslint-plugin-react-hooks";
 
-const eslintConfig = defineConfig([
-  ...nextVitals,
-  ...nextTs,
-  // Override default ignores of eslint-config-next.
-  globalIgnores([
-    // Default ignores of eslint-config-next:
-    ".next/**",
-    "out/**",
-    "build/**",
-    "next-env.d.ts",
-  ]),
+export default defineConfig([
+  globalIgnores([".next/**", "next-env.d.ts", "dist/**", "desktop/renderer/**", "release/**", "test-results/**", "playwright-report/**", ".artifacts/**", ".sites-runtime/**", ".wrangler/**"]),
+  {
+    files: ["**/*.{ts,tsx,mts}"],
+    extends: [tseslint.configs.recommended, reactHooks.configs.flat.recommended],
+    rules: {
+      "@typescript-eslint/no-unused-vars": "warn",
+    },
+  },
+  {
+    files: ["e2e/**/*.{ts,tsx}"],
+    rules: { "@typescript-eslint/no-require-imports": "off" },
+  },
   {
     files: ["components/ui/**/*.{ts,tsx}", "hooks/use-mobile.ts"],
     rules: {
-      // These files are vendored verbatim from shadcn@4.17.0. Keep the
-      // registry source intact while applying the stricter rules to Site code.
       "@typescript-eslint/no-unused-vars": "off",
       "react-hooks/purity": "off",
       "react-hooks/set-state-in-effect": "off",
@@ -31,5 +31,3 @@ const eslintConfig = defineConfig([
     },
   },
 ]);
-
-export default eslintConfig;
