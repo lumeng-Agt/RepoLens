@@ -66,7 +66,7 @@ test('unavailable clipboard produces feedback rather than an uncaught exception'
   expect.soft(errors).toEqual([]);await expect(page.getByText('复制失败',{exact:true}).first()).toBeVisible();
 });
 
-realTest('desktop draft: late restore keeps new input; failed save retries without losing the draft', async ({page}) => {
+for (const clearDuringRetry of [false, true]) realTest(`desktop draft: late restore keeps new input; failed save retries without losing the draft${clearDuringRetry ? '; clearing invalidates a waiting retry' : ''}`, async ({page}) => {
   await withRealWorkspace(page, async ({api,data,snapshot}) => {
     const workspaceId = snapshot.workspaceId ?? snapshot.id;
     const seeded = await page.evaluate(async ({api,snapshot,workspaceId}) => (await fetch(api+'/api/workspace', {
@@ -77,6 +77,10 @@ realTest('desktop draft: late restore keeps new input; failed save retries witho
     let release!: () => void, entered!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
     const started = new Promise<void>(resolve => { entered = resolve; });
+    let releaseFailure!: () => void, enteredFailure!: () => void;
+    const failureGate = new Promise<void>(resolve => { releaseFailure = resolve; });
+    const failureStarted = new Promise<void>(resolve => { enteredFailure = resolve; });
+    let holdFailure = false;
     let hold = true, failWrites = false, writes = 0;
     await page.route(api+'/api/workspace**', async route => {
       if (route.request().method()==='GET' && hold) {
@@ -85,7 +89,10 @@ realTest('desktop draft: late restore keeps new input; failed save retries witho
       }
       if (route.request().method()==='POST' && route.request().postDataJSON().action==='chat-preferences') {
         writes++;
-        if (failWrites) return route.fulfill({json:{ok:false,warning:'模拟保存失败'}});
+        if (failWrites) {
+          if (holdFailure) { enteredFailure(); await failureGate; }
+          return route.fulfill({json:{ok:false,warning:'模拟保存失败'}});
+        }
       }
       return route.continue();
     });
@@ -107,12 +114,25 @@ realTest('desktop draft: late restore keeps new input; failed save retries witho
       await expect(input).toHaveValue('失败后保留的新草稿');
       await expect(page.getByRole('button',{name:'重试草稿保存',exact:true})).toBeHidden();
       expect(writes).toBeGreaterThanOrEqual(3);
-      failWrites=true; await input.fill('收起聊天后仍可重试的草稿');
+      failWrites=true; await input.fill('先失败，继续编辑仍应保留重试入口');
       await expect(page.getByRole('button',{name:'重试草稿保存',exact:true})).toBeVisible();
+      holdFailure=true; await input.fill('收起聊天后仍可重试的草稿'); await failureStarted;
       await page.getByRole('button',{name:'收起 AI 面板',exact:true}).click();
       failWrites=false;
       await page.getByRole('button',{name:'重试保存',exact:true}).click();
-      await expect.poll(disk).toBe('收起聊天后仍可重试的草稿');
-    } finally { release(); }
+      if (clearDuringRetry) {
+        const menu = page.locator('.repo-menu'); await menu.locator('summary').click();
+        await menu.getByRole('button', { name: '清除此仓库的阅读记录', exact: true }).click();
+        await expect(page.getByLabel('本地保存状态：正在清除', { exact: true })).toBeVisible();
+      }
+      releaseFailure();
+      if (clearDuringRetry) {
+        // Clearing may persist the new empty preferences; the old draft must
+        // not reappear whether the preference record is absent or initialized.
+        await expect.poll(async () => (await disk()) ?? '').toBe('');
+        await page.getByRole('button', { name: '打开 AI 聊天', exact: true }).click();
+        await expect(input).toHaveValue('');
+      } else await expect.poll(disk).toBe('收起聊天后仍可重试的草稿');
+    } finally { release(); releaseFailure(); }
   });
 });

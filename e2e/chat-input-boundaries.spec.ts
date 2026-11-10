@@ -31,7 +31,9 @@ test('transient draft preference read failure must not erase a pre-existing draf
     Storage.prototype.getItem = function(name) { if (name === key && !failed) { failed = true; throw new Error('injected one-shot preference read failure'); } return get.call(this, name); };
   });
   const f = await fixture(page, 'probe-draft');
-  await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  // A pair of animation frames does not mean the asynchronous workspace read
+  // has finished, especially on CI. Wait for the actual restored draft.
+  await expect(page.getByLabel('提问或追问', { exact: true })).toHaveValue('未发送的重要草稿');
   const observed = { value: await page.getByLabel('提问或追问', { exact: true }).inputValue(), stored: await page.evaluate(() => localStorage.getItem('repolens:chat-ui:probe-draft')), modelCalls: f.calls };
   expect.soft(JSON.parse(observed.stored!).draft).toBe('未发送的重要草稿');
   expect(observed.value).toBe('未发送的重要草稿');

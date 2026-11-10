@@ -301,10 +301,17 @@ export function QuestionPanel({ onShowGraph, repository, currentFile, filesById,
       if (expected !== confirmedPreferences.current) throw new Error("草稿尚未保存，请先重试草稿保存再离开。");
     };
     return registerChatPreferenceFlush(flush, async () => {
+      // An earlier failure remains visible while a newer write is in flight.
+      // An explicit retry must wait for that write before deduplicating/saving
+      // the latest draft, rather than merely awaiting the same failing promise.
+      const generation = getQuestionConversationGeneration(workspaceId);
+      await pendingPreferenceSave.current.catch(() => {});
+      if (generation !== getQuestionConversationGeneration(workspaceId) || currentWorkspaceIdRef.current !== sessionKey) return;
       if (!preferencesReady.current || loadedSessionKeyRef.current !== sessionKey) await loadWorkspace();
+      if (generation !== getQuestionConversationGeneration(workspaceId) || currentWorkspaceIdRef.current !== sessionKey) return;
       await flush();
     });
-  }, [loadWorkspace, activeId, desktopPreferences, persistenceActive, savePreferences, sessionKey, storageBusy]);
+  }, [loadWorkspace, activeId, desktopPreferences, persistenceActive, savePreferences, sessionKey, storageBusy, workspaceId]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => { void loadWorkspace(); }, 0);
