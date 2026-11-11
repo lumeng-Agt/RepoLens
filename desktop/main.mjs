@@ -47,7 +47,10 @@ function focusMainWindow() {
   mainWindow.show();
   mainWindow.focus();
 }
-if (hasSingleInstanceLock) app.on("second-instance", () => { if (mainWindow) focusMainWindow(); else secondInstancePendingFocus = true; });
+if (hasSingleInstanceLock) app.on("second-instance", () => {
+  log("已将重复启动交给现有窗口。");
+  if (mainWindow) focusMainWindow(); else secondInstancePendingFocus = true;
+});
 
 function log(message) {
   logs.push(`${new Date().toISOString()} ${message}`);

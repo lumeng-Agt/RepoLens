@@ -107,6 +107,9 @@
       "createStartMenuShortcut": true,
       "artifactName": "RepoLens-${version}-${arch}-Setup.${ext}"
     },
+    "portable": {
+      "unpackDirName": true
+    },
     "artifactName": "RepoLens-${version}-${arch}-Portable.${ext}"
   },
   "description": "A local-first desktop tool for exploring source repositories.",

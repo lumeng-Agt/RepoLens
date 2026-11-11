@@ -45,6 +45,7 @@ jobs:
         env:
           RELEASE_TAG: ${{ inputs.tag }}
           REPOLENS_SMOKE_HIDDEN: '0'
+          REPOLENS_SMOKE_SCREENSHOTS: .artifacts/release-portable-smoke
         run: |
           $version = $env:RELEASE_TAG.Substring(1)
           $env:REPOLENS_DESKTOP_EXECUTABLE = (Resolve-Path -LiteralPath "release/RepoLens-$version-x64-Portable.exe").Path
@@ -61,3 +62,15 @@ jobs:
             "release/RepoLens-$version-x64-Setup.exe" "release/RepoLens-$version-x64-Portable.exe" `
             release/SHA256SUMS.txt release/BUILD-MANIFEST.json
           exit $LASTEXITCODE
+      - name: Preserve failed release evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-failure-evidence
+          path: |
+            .artifacts/verify/**
+            .artifacts/release-portable-smoke/**
+            .artifacts/desktop-candidates/**/package-and-smoke.log
+            test-results/**
+          retention-days: 14
+          if-no-files-found: warn

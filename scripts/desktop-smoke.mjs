@@ -291,43 +291,29 @@ async function quit(app) {
   clearTimeout(timer);
   assert.ok(!("timeout" in exit), `desktop completed its bounded service shutdown; quit error: ${quitError ?? "none"}; process output: ${app.serviceOutput.join("").slice(-5000)}`);
   assert.deepEqual(exit, { code: 0, signal: null }, `desktop and local service exited cleanly; process output: ${app.serviceOutput.join("").slice(-5000)}`);
-  if (app.portableSecondInstance && app.portableSecondInstance.exitCode === null) {
-    const wrapperExit = await Promise.race([
-      new Promise((resolve) => app.portableSecondInstance.once("exit", (code, signal) => resolve({ code, signal }))),
-      new Promise((resolve) => setTimeout(() => resolve({ timeout: true }), 15_000)),
-    ]);
-    assert.deepEqual(wrapperExit, { code: 0, signal: null }, "the second portable launcher exits after the active app shuts down");
-  }
   await app.browser.close();
 }
 
 async function assertSingleInstance(first) {
   const port = await reservePort();
   const developmentExecutable = process.env.REPOLENS_DESKTOP_DEV === "1";
-  const portableExecutable = !developmentExecutable && /-Portable\.exe$/i.test(executable);
   const environment = { ...process.env, REPOLENS_USER_DATA_PATH: userDataPath, REPOLENS_SMOKE_HIDDEN: "1", ELECTRON_DISABLE_GPU: "1" };
   delete environment.ELECTRON_RUN_AS_NODE;
   const child = spawn(executable, developmentExecutable ? [root, `--remote-debugging-port=${port}`] : [`--remote-debugging-port=${port}`], { cwd: developmentExecutable ? root : temporaryRoot, env: environment, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
   const record = { child, output: [] }; children.push(record);
   child.stdout.on("data", (chunk) => record.output.push(chunk.toString("utf8")));
   child.stderr.on("data", (chunk) => record.output.push(chunk.toString("utf8")));
+  let timer;
   const result = await Promise.race([
-    new Promise((resolve) => child.once("exit", (code, signal) => resolve({ code, signal }))),
-    new Promise((resolve) => setTimeout(() => resolve({ timeout: true }), portableExecutable ? 3_000 : 15_000)),
-  ]);
-  if (portableExecutable && "timeout" in result) {
-    // The portable bootstrap can stay alive while checking an already-running
-    // extracted app. Prove it did not create another renderer or backend.
-    const secondDebugServer = await fetch(`http://127.0.0.1:${port}/json/version`, { signal: AbortSignal.timeout(500) }).then((response) => response.ok).catch(() => false);
-    const backendCountResult = spawnSync("powershell.exe", ["-NoProfile", "-Command", "@(Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'RepoLens.exe' -and $_.CommandLine -match 'app\.asar[\\\\/]scripts[\\\\/]local-server\.mjs' }).Count"], { encoding: "utf8", windowsHide: true });
-    const backendCount = Number(backendCountResult.stdout.trim());
-    assert.equal(backendCountResult.status, 0, `portable process inspection succeeds: ${backendCountResult.stderr}`);
-    assert.equal(secondDebugServer, false, "the second portable launch does not expose a second renderer");
-    assert.equal(backendCount, 1, `the second portable launch does not create another backend: ${backendCountResult.stdout}${backendCountResult.stderr}`);
-    first.portableSecondInstance = child;
-  } else {
-    assert.deepEqual(result, { code: 0, signal: null }, `a second launch exits after focusing the existing instance: ${record.output.join("")}`);
-  }
+    waitForChildExit(child),
+    new Promise((resolve) => { timer = setTimeout(() => resolve({ timeout: true }), 15_000); }),
+  ]).finally(() => clearTimeout(timer));
+  // The second launcher must finish while the first instance is still alive.
+  // Merely observing no second debug port during extraction proves nothing.
+  assert.deepEqual(result, { code: 0, signal: null }, `a second launch exits after focusing the existing instance: ${record.output.join("")}`);
+  assert.ok(first.serviceOutput.join("").includes("已将重复启动交给现有窗口。"), "the original app receives the second-instance event");
+  const secondDebugServer = await fetch(`http://127.0.0.1:${port}/json/version`, { signal: AbortSignal.timeout(500) }).then(response => response.ok).catch(() => false);
+  assert.equal(secondDebugServer, false, "the second launch does not expose another renderer");
   await first.page.getByRole("button", { name: "第 1 步：从入口开始" }).waitFor({ state: "visible" });
   assert.equal((await fetch(await first.page.evaluate(() => window.__REPOLENS_RUNTIME__?.apiOrigin) + "/api/health")).ok, true, "the original backend remains the only active service");
 }
