@@ -10,7 +10,7 @@ import {
 import { app, BrowserWindow, dialog, ipcMain, shell, safeStorage } from "electron";
 import { fork } from "node:child_process";
 import { createServer } from "node:http";
-import { access, readFile } from "node:fs/promises";
+import { access, readFile, writeFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -50,6 +50,11 @@ function focusMainWindow() {
 if (hasSingleInstanceLock) app.on("second-instance", () => {
   log("已将重复启动交给现有窗口。");
   if (mainWindow) focusMainWindow(); else secondInstancePendingFocus = true;
+  // Portable launchers do not forward embedded stdout. Isolated smoke runs
+  // acknowledge receipt through their own user-data directory instead.
+  if (process.env.REPOLENS_SMOKE_INSTANCE_ACK === "1" && process.env.REPOLENS_USER_DATA_PATH) {
+    void writeFile(path.join(app.getPath("userData"), "single-instance-smoke.json"), JSON.stringify({ event: "second-instance", pid: process.pid })).catch(error => log(`重复启动测试回执写入失败：${error.message}`));
+  }
 });
 
 function log(message) {

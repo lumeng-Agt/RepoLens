@@ -143,7 +143,7 @@ async function launch({ gitExecutable, hidden, expectFirstUseGuide = false, expe
   const developmentExecutable = process.env.REPOLENS_DESKTOP_DEV === "1";
   // Screenshot capture needs a rendered window. Functional-only runs remain
   // hidden; an explicitly requested hidden mode is still respected.
-  const childEnvironment = { ...process.env, REPOLENS_USER_DATA_PATH: userDataPath, REPOLENS_SMOKE_HIDDEN: hidden === undefined ? process.env.REPOLENS_SMOKE_HIDDEN ?? (process.env.REPOLENS_SMOKE_SCREENSHOTS ? "0" : "1") : hidden ? "1" : "0", ELECTRON_DISABLE_GPU: "1" };
+  const childEnvironment = { ...process.env, REPOLENS_SMOKE_INSTANCE_ACK: "1", REPOLENS_USER_DATA_PATH: userDataPath, REPOLENS_SMOKE_HIDDEN: hidden === undefined ? process.env.REPOLENS_SMOKE_HIDDEN ?? (process.env.REPOLENS_SMOKE_SCREENSHOTS ? "0" : "1") : hidden ? "1" : "0", ELECTRON_DISABLE_GPU: "1" };
   delete childEnvironment.REPOLENS_AI_BASE_URL;
   delete childEnvironment.REPOLENS_AI_MODEL;
   delete childEnvironment.REPOLENS_AI_API_KEY;
@@ -295,6 +295,8 @@ async function quit(app) {
 }
 
 async function assertSingleInstance(first) {
+  const acknowledgement = path.join(userDataPath, "single-instance-smoke.json");
+  await rm(acknowledgement, { force: true });
   const port = await reservePort();
   const developmentExecutable = process.env.REPOLENS_DESKTOP_DEV === "1";
   const environment = { ...process.env, REPOLENS_USER_DATA_PATH: userDataPath, REPOLENS_SMOKE_HIDDEN: "1", ELECTRON_DISABLE_GPU: "1" };
@@ -311,7 +313,13 @@ async function assertSingleInstance(first) {
   // The second launcher must finish while the first instance is still alive.
   // Merely observing no second debug port during extraction proves nothing.
   assert.deepEqual(result, { code: 0, signal: null }, `a second launch exits after focusing the existing instance: ${record.output.join("")}`);
-  assert.ok(first.serviceOutput.join("").includes("已将重复启动交给现有窗口。"), "the original app receives the second-instance event");
+  const acknowledgementDeadline = Date.now() + 5000;
+  let handoff;
+  while (!handoff && Date.now() < acknowledgementDeadline) {
+    handoff = await readFile(acknowledgement, "utf8").then(JSON.parse).catch(() => null);
+    if (!handoff) await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  assert.equal(handoff?.event, "second-instance", "the original app acknowledges the second-instance event independently of launcher stdout");
   const secondDebugServer = await fetch(`http://127.0.0.1:${port}/json/version`, { signal: AbortSignal.timeout(500) }).then(response => response.ok).catch(() => false);
   assert.equal(secondDebugServer, false, "the second launch does not expose another renderer");
   await first.page.getByRole("button", { name: "第 1 步：从入口开始" }).waitFor({ state: "visible" });
